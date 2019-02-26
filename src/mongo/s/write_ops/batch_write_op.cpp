@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -36,6 +35,7 @@
 
 #include "mongo/base/error_codes.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/s/transaction_router.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/util/transitional_tools_do_not_use/vector_spooling.h"
 
@@ -318,6 +318,13 @@ Status BatchWriteOp::targetBatch(const NSTargeter& targeter,
         Status targetStatus = writeOp.targetWrites(_opCtx, targeter, &writes);
 
         if (!targetStatus.isOK()) {
+            // Throw any error encountered during a transaction, since the whole batch must fail.
+            if (TransactionRouter::get(_opCtx)) {
+                forgetTargetedBatchesOnTransactionAbortingError();
+                uassertStatusOK(targetStatus.withContext(
+                    str::stream() << "Encountered targeting error during a transaction"));
+            }
+
             WriteErrorDetail targetError;
             buildTargetError(targetStatus, &targetError);
 

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -57,6 +56,8 @@ public:
     void remove(EgressTagCloser* etc);
 
     void dropConnections(transport::Session::TagMask tags);
+
+    void dropConnections(const HostAndPort& hostAndPort);
 
     void mutateTags(
         const HostAndPort& hostAndPort,

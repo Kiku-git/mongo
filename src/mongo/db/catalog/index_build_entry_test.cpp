@@ -35,8 +35,8 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
+#include "mongo/db/catalog/commit_quorum_options.h"
 #include "mongo/db/catalog/index_build_entry_gen.h"
-#include "mongo/db/write_concern_options.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/net/hostandport.h"
@@ -45,31 +45,12 @@
 namespace mongo {
 namespace {
 
-enum CommitQuorumOptions { Number, Majority, Tag };
-
 const std::vector<std::string> generateIndexes(size_t numIndexes) {
     std::vector<std::string> indexes;
     for (size_t i = 0; i < numIndexes; i++) {
-        indexes.push_back("Index" + std::to_string(i));
+        indexes.push_back("index_" + std::to_string(i));
     }
     return indexes;
-}
-
-const WriteConcernOptions generateCommitQuorum(CommitQuorumOptions option) {
-    switch (option) {
-        case Number:
-            return WriteConcernOptions(1, WriteConcernOptions::SyncMode::UNSET, 0);
-            break;
-        case Majority:
-            return WriteConcernOptions(
-                WriteConcernOptions::kMajority, WriteConcernOptions::SyncMode::UNSET, 0);
-            break;
-        case Tag:
-            return WriteConcernOptions("someTag", WriteConcernOptions::SyncMode::UNSET, 0);
-            break;
-        default:
-            return WriteConcernOptions(0, WriteConcernOptions::SyncMode::UNSET, 0);
-    }
 }
 
 const std::vector<HostAndPort> generateCommitReadyMembers(size_t numMembers) {
@@ -80,53 +61,66 @@ const std::vector<HostAndPort> generateCommitReadyMembers(size_t numMembers) {
     return members;
 }
 
+void checkIfEqual(IndexBuildEntry lhs, IndexBuildEntry rhs) {
+    ASSERT_EQ(lhs.getBuildUUID(), rhs.getBuildUUID());
+    ASSERT_EQ(lhs.getCollectionUUID(), rhs.getCollectionUUID());
+
+    BSONObj commitQuorumOptionsBsonLHS = lhs.getCommitQuorum().toBSON();
+    BSONObj commitQuorumOptionsBsonRHS = rhs.getCommitQuorum().toBSON();
+    ASSERT_BSONOBJ_EQ(commitQuorumOptionsBsonLHS, commitQuorumOptionsBsonRHS);
+
+    auto lhsIndexNames = lhs.getIndexNames();
+    auto rhsIndexNames = rhs.getIndexNames();
+    ASSERT_TRUE(std::equal(lhsIndexNames.begin(), lhsIndexNames.end(), rhsIndexNames.begin()));
+
+    if (lhs.getCommitReadyMembers() && rhs.getCommitReadyMembers()) {
+        auto lhsMembers = lhs.getCommitReadyMembers().get();
+        auto rhsMembers = rhs.getCommitReadyMembers().get();
+        ASSERT_TRUE(std::equal(lhsMembers.begin(), lhsMembers.end(), rhsMembers.begin()));
+    } else {
+        ASSERT_FALSE(lhs.getCommitReadyMembers());
+        ASSERT_FALSE(rhs.getCommitReadyMembers());
+    }
+}
+
 TEST(IndexBuildEntryTest, IndexBuildEntryWithRequiredFields) {
     const UUID id = UUID::gen();
     const UUID collectionUUID = UUID::gen();
-    const WriteConcernOptions commitQuorum = generateCommitQuorum(CommitQuorumOptions::Number);
+    const CommitQuorumOptions commitQuorum(1);
     const std::vector<std::string> indexes = generateIndexes(1);
 
     IndexBuildEntry entry(id, collectionUUID, commitQuorum, indexes);
 
     ASSERT_EQUALS(entry.getBuildUUID(), id);
     ASSERT_EQUALS(entry.getCollectionUUID(), collectionUUID);
-    ASSERT_EQUALS(entry.getCommitQuorum().wNumNodes, 1);
-    ASSERT_TRUE(entry.getCommitQuorum().syncMode == WriteConcernOptions::SyncMode::UNSET);
-    ASSERT_EQUALS(entry.getCommitQuorum().wTimeout, 0);
+    ASSERT_EQUALS(entry.getCommitQuorum().numNodes, 1);
     ASSERT_EQUALS(entry.getIndexNames().size(), indexes.size());
-    ASSERT_FALSE(entry.getPrepareIndexBuild());
 }
 
 TEST(IndexBuildEntryTest, IndexBuildEntryWithOptionalFields) {
     const UUID id = UUID::gen();
     const UUID collectionUUID = UUID::gen();
-    const WriteConcernOptions commitQuorum = generateCommitQuorum(CommitQuorumOptions::Majority);
+    const CommitQuorumOptions commitQuorum(CommitQuorumOptions::kMajority);
     const std::vector<std::string> indexes = generateIndexes(3);
 
     IndexBuildEntry entry(id, collectionUUID, commitQuorum, indexes);
 
-    ASSERT_FALSE(entry.getPrepareIndexBuild());
-    entry.setPrepareIndexBuild(true);
     entry.setCommitReadyMembers(generateCommitReadyMembers(2));
 
     ASSERT_EQUALS(entry.getBuildUUID(), id);
     ASSERT_EQUALS(entry.getCollectionUUID(), collectionUUID);
-    ASSERT_EQUALS(entry.getCommitQuorum().wMode, WriteConcernOptions::kMajority);
-    ASSERT_TRUE(entry.getCommitQuorum().syncMode == WriteConcernOptions::SyncMode::UNSET);
-    ASSERT_EQUALS(entry.getCommitQuorum().wTimeout, 0);
+    ASSERT_EQUALS(entry.getCommitQuorum().mode, CommitQuorumOptions::kMajority);
     ASSERT_EQUALS(entry.getIndexNames().size(), indexes.size());
-    ASSERT_TRUE(entry.getPrepareIndexBuild());
-    ASSERT_TRUE(entry.getCommitReadyMembers()->size() == 2);
+    ASSERT_EQ(entry.getCommitReadyMembers()->size(), 2U);
 }
 
 TEST(IndexBuildEntryTest, SerializeAndDeserialize) {
     const UUID id = UUID::gen();
     const UUID collectionUUID = UUID::gen();
-    const WriteConcernOptions commitQuorum = generateCommitQuorum(CommitQuorumOptions::Tag);
+    const CommitQuorumOptions commitQuorum("someTag");
     const std::vector<std::string> indexes = generateIndexes(1);
 
     IndexBuildEntry entry(id, collectionUUID, commitQuorum, indexes);
-    entry.setPrepareIndexBuild(false);
     entry.setCommitReadyMembers(generateCommitReadyMembers(3));
 
     BSONObj obj = entry.toBSON();
@@ -135,14 +129,7 @@ TEST(IndexBuildEntryTest, SerializeAndDeserialize) {
     IDLParserErrorContext ctx("IndexBuildsEntry Parser");
     IndexBuildEntry rebuiltEntry = IndexBuildEntry::parse(ctx, obj);
 
-    ASSERT_EQUALS(rebuiltEntry.getBuildUUID(), id);
-    ASSERT_EQUALS(rebuiltEntry.getCollectionUUID(), collectionUUID);
-    ASSERT_EQUALS(rebuiltEntry.getCommitQuorum().wMode, "someTag");
-    ASSERT_TRUE(rebuiltEntry.getCommitQuorum().syncMode == WriteConcernOptions::SyncMode::UNSET);
-    ASSERT_EQUALS(rebuiltEntry.getCommitQuorum().wTimeout, 0);
-    ASSERT_EQUALS(rebuiltEntry.getIndexNames().size(), indexes.size());
-    ASSERT_FALSE(rebuiltEntry.getPrepareIndexBuild());
-    ASSERT_TRUE(rebuiltEntry.getCommitReadyMembers()->size() == 3);
+    checkIfEqual(entry, rebuiltEntry);
 }
 
 }  // namespace

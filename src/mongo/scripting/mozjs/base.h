@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -74,10 +73,11 @@ struct BaseInfo {
                           JS::HandleObject obj,
                           JS::AutoIdVector& properties,
                           bool enumerableOnly);
-    static void finalize(JSFreeOp* fop, JSObject* obj);
+    static void finalize(js::FreeOp* fop, JSObject* obj);
     static void getProperty(JSContext* cx,
                             JS::HandleObject obj,
                             JS::HandleId id,
+                            JS::HandleValue receiver,
                             JS::MutableHandleValue vp);
     static void hasInstance(JSContext* cx,
                             JS::HandleObject obj,
@@ -89,7 +89,8 @@ struct BaseInfo {
     static void setProperty(JSContext* cx,
                             JS::HandleObject obj,
                             JS::HandleId id,
-                            JS::MutableHandleValue vp,
+                            JS::HandleValue v,
+                            JS::HandleValue receiver,
                             JS::ObjectOpResult& result);
 };
 

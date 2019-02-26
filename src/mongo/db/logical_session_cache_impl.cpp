@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -34,9 +33,11 @@
 
 #include "mongo/db/logical_session_cache_impl.h"
 
+#include "mongo/db/logical_session_cache_impl_gen.h"
 #include "mongo/db/logical_session_id.h"
 #include "mongo/db/logical_session_id_helpers.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/server_parameters.h"
 #include "mongo/db/service_context.h"
 #include "mongo/platform/atomic_word.h"
@@ -47,14 +48,16 @@
 
 namespace mongo {
 
-MONGO_EXPORT_STARTUP_SERVER_PARAMETER(
-    logicalSessionRefreshMillis,
-    int,
-    LogicalSessionCacheImpl::kLogicalSessionDefaultRefresh.count());
+namespace {
 
-MONGO_EXPORT_STARTUP_SERVER_PARAMETER(disableLogicalSessionCacheRefresh, bool, false);
+void clearShardingOperationFailedStatus(OperationContext* opCtx) {
+    // We do not intend to immediately act upon sharding errors if we receive them during sessions
+    // collection operations. We will instead attempt the same operations during the next refresh
+    // cycle.
+    OperationShardingState::get(opCtx).resetShardingOperationFailedStatus();
+}
 
-MONGO_EXPORT_STARTUP_SERVER_PARAMETER(maxSessions, int, 1'000'000);
+}  // namespace
 
 constexpr Milliseconds LogicalSessionCacheImpl::kLogicalSessionDefaultRefresh;
 
@@ -221,6 +224,8 @@ Status LogicalSessionCacheImpl::_reap(Client* client) {
             return uniqueCtx->get();
         }();
 
+        ON_BLOCK_EXIT([&opCtx] { clearShardingOperationFailedStatus(opCtx); });
+
         auto existsStatus = _sessionsColl->checkSessionsCollectionExists(opCtx);
         if (!existsStatus.isOK()) {
             StringData notSetUpWarning =
@@ -275,7 +280,7 @@ void LogicalSessionCacheImpl::_refresh(Client* client) {
     }
 
     // This will finish timing _refresh for our stats no matter when we return.
-    const auto timeRefreshJob = MakeGuard([this] {
+    const auto timeRefreshJob = makeGuard([this] {
         stdx::lock_guard<stdx::mutex> lk(_cacheMutex);
         auto millis = now() - _stats.getLastSessionsCollectionJobTimestamp();
         _stats.setLastSessionsCollectionJobDurationMillis(millis.count());
@@ -292,6 +297,8 @@ void LogicalSessionCacheImpl::_refresh(Client* client) {
         return uniqueCtx->get();
     }();
 
+    ON_BLOCK_EXIT([&opCtx] { clearShardingOperationFailedStatus(opCtx); });
+
     auto setupStatus = _sessionsColl->setupSessionsCollection(opCtx);
 
     if (!setupStatus.isOK()) {
@@ -304,29 +311,27 @@ void LogicalSessionCacheImpl::_refresh(Client* client) {
     LogicalSessionIdSet explicitlyEndingSessions;
     LogicalSessionIdMap<LogicalSessionRecord> activeSessions;
 
-    // backSwapper creates a guard that in the case of a exception
-    // replaces the ending or active sessions that swapped out of of LogicalSessionCache,
-    // and merges in any records that had been added since we swapped them
-    // out.
-    auto backSwapper = [this](auto& member, auto& temp) {
-        return MakeGuard([this, &member, &temp] {
-            stdx::lock_guard<stdx::mutex> lk(_cacheMutex);
-            using std::swap;
-            swap(member, temp);
-            for (const auto& it : temp) {
-                member.emplace(it);
-            }
-        });
-    };
-
     {
         using std::swap;
         stdx::lock_guard<stdx::mutex> lk(_cacheMutex);
         swap(explicitlyEndingSessions, _endingSessions);
         swap(activeSessions, _activeSessions);
     }
-    auto activeSessionsBackSwapper = backSwapper(_activeSessions, activeSessions);
-    auto explicitlyEndingBackSwaper = backSwapper(_endingSessions, explicitlyEndingSessions);
+
+    // Create guards that in the case of a exception replace the ending or active sessions that
+    // swapped out of LogicalSessionCache, and merges in any records that had been added since we
+    // swapped them out.
+    auto backSwap = [this](auto& member, auto& temp) {
+        stdx::lock_guard<stdx::mutex> lk(_cacheMutex);
+        using std::swap;
+        swap(member, temp);
+        for (const auto& it : temp) {
+            member.emplace(it);
+        }
+    };
+    auto activeSessionsBackSwapper = makeGuard([&] { backSwap(_activeSessions, activeSessions); });
+    auto explicitlyEndingBackSwaper =
+        makeGuard([&] { backSwap(_endingSessions, explicitlyEndingSessions); });
 
     // remove all explicitlyEndingSessions from activeSessions
     for (const auto& lsid : explicitlyEndingSessions) {
@@ -352,7 +357,7 @@ void LogicalSessionCacheImpl::_refresh(Client* client) {
 
     // Refresh the active sessions in the sessions collection.
     uassertStatusOK(_sessionsColl->refreshSessions(opCtx, activeSessionRecords));
-    activeSessionsBackSwapper.Dismiss();
+    activeSessionsBackSwapper.dismiss();
     {
         stdx::lock_guard<stdx::mutex> lk(_cacheMutex);
         _stats.setLastSessionsCollectionJobEntriesRefreshed(activeSessionRecords.size());
@@ -360,7 +365,7 @@ void LogicalSessionCacheImpl::_refresh(Client* client) {
 
     // Remove the ending sessions from the sessions collection.
     uassertStatusOK(_sessionsColl->removeRecords(opCtx, explicitlyEndingSessions));
-    explicitlyEndingBackSwaper.Dismiss();
+    explicitlyEndingBackSwaper.dismiss();
     {
         stdx::lock_guard<stdx::mutex> lk(_cacheMutex);
         _stats.setLastSessionsCollectionJobEntriesEnded(explicitlyEndingSessions.size());
@@ -371,7 +376,7 @@ void LogicalSessionCacheImpl::_refresh(Client* client) {
 
     KillAllSessionsByPatternSet patterns;
 
-    auto openCursorSessions = _service->getOpenCursorSessions();
+    auto openCursorSessions = _service->getOpenCursorSessions(opCtx);
     // Exclude sessions added to _activeSessions from the openCursorSession to avoid race between
     // killing cursors on the removed sessions and creating sessions.
     {

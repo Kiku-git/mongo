@@ -20,7 +20,7 @@ executor:
   config:
     shell_options:
       eval: >-
-        var testingReplication = true; 
+        var testingReplication = true;
         load('jstests/libs/override_methods/enable_causal_consistency_without_read_pref.js');
       readMode: commands
   hooks:
@@ -34,6 +34,5 @@ executor:
     mongod_options:
       set_parameters:
         enableTestCommands: 1
-        numInitialSyncAttempts: 1
     # Use a 1-node replica set.
     num_nodes: 1

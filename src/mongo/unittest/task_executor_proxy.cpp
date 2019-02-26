@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -103,7 +102,7 @@ StatusWith<executor::TaskExecutor::CallbackHandle> TaskExecutorProxy::scheduleWo
 StatusWith<executor::TaskExecutor::CallbackHandle> TaskExecutorProxy::scheduleRemoteCommand(
     const executor::RemoteCommandRequest& request,
     const RemoteCommandCallbackFn& cb,
-    const transport::BatonHandle& baton) {
+    const BatonHandle& baton) {
     return _executor->scheduleRemoteCommand(request, cb, baton);
 }
 

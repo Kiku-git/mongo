@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -56,6 +55,7 @@
 namespace mongo {
 
 MONGO_FAIL_POINT_DECLARE(failCommand);
+MONGO_FAIL_POINT_DECLARE(waitInCommandMarkKillOnClientDisconnect);
 
 class Command;
 class CommandInvocation;
@@ -149,38 +149,6 @@ struct CommandHelpers {
     static BSONObj appendMajorityWriteConcern(const BSONObj& cmdObj);
 
     /**
-     * Returns true if the provided argument is one that is handled by the command processing layer
-     * and should generally be ignored by individual command implementations. In particular,
-     * commands that fail on unrecognized arguments must not fail for any of these.
-     */
-    static bool isGenericArgument(StringData arg) {
-        // Not including "help" since we don't pass help requests through to the command parser.
-        // If that changes, it should be added. When you add to this list, consider whether you
-        // should also change the filterCommandRequestForPassthrough() function.
-        return arg == "$audit" ||                        //
-            arg == "$client" ||                          //
-            arg == "$configServerState" ||               //
-            arg == "$db" ||                              //
-            arg == "allowImplicitCollectionCreation" ||  //
-            arg == "$oplogQueryData" ||                  //
-            arg == "$queryOptions" ||                    //
-            arg == "$readPreference" ||                  //
-            arg == "$replData" ||                        //
-            arg == "$clusterTime" ||                     //
-            arg == "maxTimeMS" ||                        //
-            arg == "readConcern" ||                      //
-            arg == "databaseVersion" ||                  //
-            arg == "shardVersion" ||                     //
-            arg == "tracking_info" ||                    //
-            arg == "writeConcern" ||                     //
-            arg == "lsid" ||                             //
-            arg == "txnNumber" ||                        //
-            arg == "autocommit" ||                       //
-            arg == "startTransaction" ||                 //
-            false;  // These comments tell clang-format to keep this line-oriented.
-    }
-
-    /**
      * Rewrites cmdObj into a format safe to blindly forward to shards.
      *
      * This performs 2 transformations:
@@ -260,6 +228,12 @@ struct CommandHelpers {
      * Possibly uasserts according to the "failCommand" fail point.
      */
     static void evaluateFailCommandFailPoint(OperationContext* opCtx, StringData commandName);
+
+    /**
+     * Handles marking kill on client disconnect.
+     */
+    static void handleMarkKillOnClientDisconnect(OperationContext* opCtx,
+                                                 bool shouldMarkKill = true);
 };
 
 /**
@@ -301,14 +275,6 @@ public:
      */
     virtual std::size_t reserveBytesForReply() const {
         return 0u;
-    }
-
-    /**
-     * Return true for "user management commands", a distinction that affects
-     * backward compatible output formatting.
-     */
-    virtual bool isUserManagementCommand() const {
-        return false;
     }
 
     /**
@@ -436,6 +402,16 @@ public:
     static void generateHelpResponse(OperationContext* opCtx,
                                      rpc::ReplyBuilderInterface* replyBuilder,
                                      const Command& command);
+
+    /**
+     * If true, the logical sessions attached to the command request will be attached to the
+     * request's operation context. Note that returning false can potentially strip the logical
+     * session from the request in multi-staged invocations, like for example, mongos -> mongod.
+     * This can have security implications so think carefully before returning false.
+     */
+    virtual bool attachLogicalSessionsToOpCtx() const {
+        return true;
+    }
 
 private:
     // The full name of the command

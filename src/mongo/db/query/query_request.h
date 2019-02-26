@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -378,6 +377,26 @@ public:
         _replicationTerm = replicationTerm;
     }
 
+    bool isReadOnce() const {
+        return _readOnce;
+    }
+
+    void setReadOnce(bool readOnce) {
+        _readOnce = readOnce;
+    }
+
+    void setAllowSpeculativeMajorityRead(bool allowSpeculativeMajorityRead) {
+        _allowSpeculativeMajorityRead = allowSpeculativeMajorityRead;
+    }
+
+    bool allowSpeculativeMajorityRead() const {
+        return _allowSpeculativeMajorityRead;
+    }
+
+    boost::optional<Timestamp> getReadAtClusterTime() const {
+        return _internalReadAtClusterTime;
+    }
+
     /**
      * Return options as a bit vector.
      */
@@ -502,8 +521,14 @@ private:
     bool _noCursorTimeout = false;
     bool _exhaust = false;
     bool _allowPartialResults = false;
+    bool _readOnce = false;
+    bool _allowSpeculativeMajorityRead = false;
 
     boost::optional<long long> _replicationTerm;
+
+    // The Timestamp that RecoveryUnit::setTimestampReadSource() should be called with. The optional
+    // should only ever be engaged when testing commands are enabled.
+    boost::optional<Timestamp> _internalReadAtClusterTime;
 };
 
 }  // namespace mongo

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -173,10 +172,28 @@ const char* typeName(BinDataType type) {
             return "UUID";
         case MD5Type:
             return "MD5";
+        case Encrypt:
+            return "encrypt";
         case bdtCustom:
             return "Custom";
         default:
             return "invalid";
+    }
+}
+
+bool isValidBinDataType(int type) {
+    switch (type) {
+        case BinDataGeneral:
+        case Function:
+        case ByteArrayDeprecated:
+        case bdtUUID:
+        case newUUID:
+        case MD5Type:
+        case Encrypt:
+        case bdtCustom:
+            return true;
+        default:
+            return false;
     }
 }
 

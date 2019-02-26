@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -57,7 +56,8 @@ bool cursorCommandPassthrough(OperationContext* opCtx,
                               const CachedDatabaseInfo& dbInfo,
                               const BSONObj& cmdObj,
                               const NamespaceString& nss,
-                              BSONObjBuilder* out) {
+                              BSONObjBuilder* out,
+                              const PrivilegeVector& privileges) {
     auto response = executeCommandAgainstDatabasePrimary(
         opCtx,
         dbName,
@@ -74,7 +74,8 @@ bool cursorCommandPassthrough(OperationContext* opCtx,
                             cmdResponse.data,
                             nss,
                             Grid::get(opCtx)->getExecutorPool()->getArbitraryExecutor(),
-                            Grid::get(opCtx)->getCursorManager()));
+                            Grid::get(opCtx)->getCursorManager(),
+                            privileges));
 
     CommandHelpers::filterCommandReplyForPassthrough(transformedResponse, out);
     return true;
@@ -338,7 +339,7 @@ public:
                                const BSONObj& cmdObj) const final {
         AuthorizationSession* authzSession = AuthorizationSession::get(client);
 
-        if (authzSession->isAuthorizedToListCollections(dbname, cmdObj)) {
+        if (authzSession->checkAuthorizedToListCollections(dbname, cmdObj).isOK()) {
             return Status::OK();
         }
 
@@ -433,6 +434,8 @@ public:
              const std::string& dbName,
              const BSONObj& cmdObj,
              BSONObjBuilder& result) override {
+        CommandHelpers::handleMarkKillOnClientDisconnect(opCtx);
+
         const auto nss(NamespaceString::makeListCollectionsNSS(dbName));
 
         BSONObj newCmd = cmdObj;
@@ -447,9 +450,15 @@ public:
         }
 
         return cursorCommandPassthrough(
-            opCtx, dbName, dbInfoStatus.getValue(), newCmd, nss, &result);
+            opCtx,
+            dbName,
+            dbInfoStatus.getValue(),
+            newCmd,
+            nss,
+            &result,
+            uassertStatusOK(AuthorizationSession::get(opCtx->getClient())
+                                ->checkAuthorizedToListCollections(dbName, cmdObj)));
     }
-
 } cmdListCollections;
 
 class CmdListIndexes : public BasicCommand {
@@ -494,16 +503,20 @@ public:
              const std::string& dbName,
              const BSONObj& cmdObj,
              BSONObjBuilder& result) override {
+        CommandHelpers::handleMarkKillOnClientDisconnect(opCtx);
+
         const NamespaceString nss(parseNs(dbName, cmdObj));
         const auto routingInfo =
             uassertStatusOK(Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfo(opCtx, nss));
 
-        return cursorCommandPassthrough(opCtx,
-                                        nss.db(),
-                                        routingInfo.db(),
-                                        cmdObj,
-                                        NamespaceString::makeListIndexesNSS(nss.db(), nss.coll()),
-                                        &result);
+        return cursorCommandPassthrough(
+            opCtx,
+            nss.db(),
+            routingInfo.db(),
+            cmdObj,
+            nss,
+            &result,
+            {Privilege(ResourcePattern::forExactNamespace(nss), ActionType::listIndexes)});
     }
 
 } cmdListIndexes;

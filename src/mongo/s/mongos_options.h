@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -52,8 +51,6 @@ struct MongosGlobalParams {
 };
 
 extern MongosGlobalParams mongosGlobalParams;
-
-Status addMongosOptions(moe::OptionSection* options);
 
 void printMongosHelp(const moe::OptionSection& options);
 

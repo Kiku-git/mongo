@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -48,6 +47,7 @@
 #include "mongo/stdx/memory.h"
 #include "mongo/unittest/temp_dir.h"
 #include "mongo/unittest/unittest.h"
+#include "mongo/util/system_clock_source.h"
 
 namespace mongo {
 namespace {
@@ -61,7 +61,8 @@ public:
         int ret = wiredtiger_open(_dbpath.path().c_str(), NULL, config, &_conn);
         invariantWTOK(ret);
 
-        _sessionCache = new WiredTigerSessionCache(_conn);
+        _fastClockSource = stdx::make_unique<SystemClockSource>();
+        _sessionCache = new WiredTigerSessionCache(_conn, _fastClockSource.get());
     }
 
     ~MyHarnessHelper() final {
@@ -69,7 +70,7 @@ public:
         _conn->close(_conn, NULL);
     }
 
-    std::unique_ptr<SortedDataInterface> newSortedDataInterface(bool unique) final {
+    std::unique_ptr<SortedDataInterface> newSortedDataInterface(bool unique, bool partial) final {
         std::string ns = "test.wt";
         OperationContextNoop opCtx(newRecoveryUnit().release());
 
@@ -81,6 +82,13 @@ public:
                                   << ns
                                   << "unique"
                                   << unique);
+
+        if (partial) {
+            auto partialBSON =
+                BSON(IndexDescriptor::kPartialFilterExprFieldName.toString() << BSON(""
+                                                                                     << ""));
+            spec = spec.addField(partialBSON.firstElement());
+        }
 
         IndexDescriptor desc(NULL, "", spec);
 
@@ -103,6 +111,7 @@ public:
 
 private:
     unittest::TempDir _dbpath;
+    std::unique_ptr<ClockSource> _fastClockSource;
     WT_CONNECTION* _conn;
     WiredTigerSessionCache* _sessionCache;
     WiredTigerOplogManager _oplogManager;

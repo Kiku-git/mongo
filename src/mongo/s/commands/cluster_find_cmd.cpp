@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -169,12 +168,19 @@ public:
                 auto aggRequestOnView = uassertStatusOK(
                     AggregationRequest::parseFromBSON(ns(), aggCmdOnView, verbosity));
 
-                uassertStatusOK(ClusterAggregate::retryOnViewError(
-                    opCtx, aggRequestOnView, *ex.extraInfo<ResolvedView>(), ns(), &bodyBuilder));
+                // An empty PrivilegeVector is acceptable because these privileges are only checked
+                // on getMore and explain will not open a cursor.
+                uassertStatusOK(ClusterAggregate::retryOnViewError(opCtx,
+                                                                   aggRequestOnView,
+                                                                   *ex.extraInfo<ResolvedView>(),
+                                                                   ns(),
+                                                                   PrivilegeVector(),
+                                                                   &bodyBuilder));
             }
         }
 
         void run(OperationContext* opCtx, rpc::ReplyBuilderInterface* result) {
+            CommandHelpers::handleMarkKillOnClientDisconnect(opCtx);
             // We count find command as a query op.
             globalOpCounters.gotQuery();
 
@@ -215,7 +221,12 @@ public:
 
                 auto bodyBuilder = result->getBodyBuilder();
                 uassertStatusOK(ClusterAggregate::retryOnViewError(
-                    opCtx, aggRequestOnView, *ex.extraInfo<ResolvedView>(), ns(), &bodyBuilder));
+                    opCtx,
+                    aggRequestOnView,
+                    *ex.extraInfo<ResolvedView>(),
+                    ns(),
+                    {Privilege(ResourcePattern::forExactNamespace(ns()), ActionType::find)},
+                    &bodyBuilder));
             }
         }
 

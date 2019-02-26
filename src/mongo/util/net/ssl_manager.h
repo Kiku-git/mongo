@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -90,6 +89,24 @@ typedef SSLContextRef SSLConnectionType;
 #error "Unknown SSL Provider"
 #endif
 
+
+#if MONGO_CONFIG_SSL_PROVIDER == MONGO_CONFIG_SSL_PROVIDER_OPENSSL
+/*
+ * There are a number of OpenSSL types that we want to be able to use with unique_ptr that have a
+ * custom OpenSSL deleter function. This template implements a stateless deleter for types with
+ * C free functions:
+ * using UniqueX509 = std::unique_ptr<X509, OpenSSLDeleter<decltype(::X509_free), ::X509_free>>;
+ */
+template <typename Deleter, Deleter* impl>
+struct OpenSSLDeleter {
+    template <typename Obj>
+    void operator()(Obj* ptr) const {
+        if (ptr != nullptr) {
+            impl(ptr);
+        }
+    }
+};
+#endif
 /**
  * Maintain per connection SSL state for the Sock class. Used by SSLManagerInterface to perform SSL
  * operations.
@@ -101,14 +118,24 @@ public:
     virtual std::string getSNIServerName() const = 0;
 };
 
-struct SSLConfiguration {
+class SSLConfiguration {
+public:
     bool isClusterMember(StringData subjectName) const;
-    bool isClusterMember(const SSLX509Name& subjectName) const;
+    bool isClusterMember(SSLX509Name subjectName) const;
     BSONObj getServerStatusBSON() const;
-    SSLX509Name serverSubjectName;
+    Status setServerSubjectName(SSLX509Name name);
+
+    const SSLX509Name& serverSubjectName() const {
+        return _serverSubjectName;
+    }
+
     SSLX509Name clientSubjectName;
     Date_t serverCertificateExpirationDate;
     bool hasCA = false;
+
+private:
+    SSLX509Name _serverSubjectName;
+    std::vector<SSLX509Name::Entry> _canonicalServerSubjectName;
 };
 
 /**
@@ -133,11 +160,11 @@ const ASN1OID mongodbRolesOID("1.3.6.1.4.1.34601.2.1.1",
  * Counts of negogtiated version used by TLS connections.
  */
 struct TLSVersionCounts {
-    AtomicInt64 tlsUnknown;
-    AtomicInt64 tls10;
-    AtomicInt64 tls11;
-    AtomicInt64 tls12;
-    AtomicInt64 tls13;
+    AtomicWord<long long> tlsUnknown;
+    AtomicWord<long long> tls10;
+    AtomicWord<long long> tls11;
+    AtomicWord<long long> tls12;
+    AtomicWord<long long> tls13;
 
     static TLSVersionCounts& get(ServiceContext* serviceContext);
 };
@@ -244,11 +271,24 @@ StatusWith<stdx::unordered_set<RoleName>> parsePeerRoles(ConstDataRange cdrExten
 std::string removeFQDNRoot(std::string name);
 
 /**
- * Escape a string per RGC 2253
+ * Escape a string per RFC 2253
  *
  * See "2.4 Converting an AttributeValue from ASN.1 to a String" in RFC 2243
  */
 std::string escapeRfc2253(StringData str);
+
+/**
+ * Parse a DN from a string per RFC 4514
+ */
+StatusWith<SSLX509Name> parseDN(StringData str);
+
+/**
+ * These functions map short names for RDN components to numeric OID's and the other way around.
+ *
+ * The x509ShortNameToOid returns boost::none if no mapping exists for that oid.
+ */
+std::string x509OidToShortName(StringData name);
+boost::optional<std::string> x509ShortNameToOid(StringData name);
 
 /**
  * Platform neutral TLS version enum

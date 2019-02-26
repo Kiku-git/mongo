@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -198,9 +197,10 @@ Status AuthzManagerExternalStateMock::updateOne(OperationContext* opCtx,
         document.reset(*iter, mmb::Document::kInPlaceDisabled);
         const bool validateForStorage = false;
         const FieldRefSet emptyImmutablePaths;
+        const bool isInsert = false;
         BSONObj logObj;
         status = driver.update(
-            StringData(), &document, validateForStorage, emptyImmutablePaths, &logObj);
+            StringData(), &document, validateForStorage, emptyImmutablePaths, isInsert, &logObj);
         if (!status.isOK())
             return status;
         BSONObj newObj = document.getObject().copy();
@@ -226,7 +226,9 @@ Status AuthzManagerExternalStateMock::updateOne(OperationContext* opCtx,
 
         const bool validateForStorage = false;
         const FieldRefSet emptyImmutablePaths;
-        status = driver.update(StringData(), &document, validateForStorage, emptyImmutablePaths);
+        const bool isInsert = false;
+        status = driver.update(
+            StringData(), &document, validateForStorage, emptyImmutablePaths, isInsert);
         if (!status.isOK()) {
             return status;
         }

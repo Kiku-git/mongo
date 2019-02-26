@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -84,7 +83,7 @@ std::string errnoWithPdhDescription(PDH_STATUS status) {
         return str::stream() << "Format message failed with " << gle << " for status " << status;
     }
 
-    ScopeGuard errorTextGuard = MakeGuard([errorText]() { LocalFree(errorText); });
+    auto errorTextGuard = makeGuard([errorText] { LocalFree(errorText); });
     std::string utf8ErrorText = toUtf8String(errorText);
 
     auto size = utf8ErrorText.find_first_of("\r\n");

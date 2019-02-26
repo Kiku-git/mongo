@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -52,9 +51,9 @@ MinVisibleTimestampMap closeCatalog(OperationContext* opCtx) {
     std::vector<std::string> allDbs;
     opCtx->getServiceContext()->getStorageEngine()->listDatabases(&allDbs);
 
-    const auto& databaseHolder = DatabaseHolder::getDatabaseHolder();
+    auto databaseHolder = DatabaseHolder::get(opCtx);
     for (auto&& dbName : allDbs) {
-        const auto db = databaseHolder.get(opCtx, dbName);
+        const auto db = databaseHolder->getDb(opCtx, dbName);
         for (Collection* coll : *db) {
             OptionalCollectionUUID uuid = coll->uuid();
             boost::optional<Timestamp> minVisible = coll->getMinimumVisibleSnapshot();
@@ -70,7 +69,7 @@ MinVisibleTimestampMap closeCatalog(OperationContext* opCtx) {
     }
 
     // Need to mark the UUIDCatalog as open if we our closeAll fails, dismissed if successful.
-    auto reopenOnFailure = MakeGuard([opCtx] { UUIDCatalog::get(opCtx).onOpenCatalog(opCtx); });
+    auto reopenOnFailure = makeGuard([opCtx] { UUIDCatalog::get(opCtx).onOpenCatalog(opCtx); });
     // Closing UUID Catalog: only lookupNSSByUUID will fall back to using pre-closing state to
     // allow authorization for currently unknown UUIDs. This is needed because authorization needs
     // to work before acquiring locks, and might otherwise spuriously regard a UUID as unknown
@@ -80,14 +79,13 @@ MinVisibleTimestampMap closeCatalog(OperationContext* opCtx) {
 
     // Close all databases.
     log() << "closeCatalog: closing all databases";
-    constexpr auto reason = "closing databases for closeCatalog";
-    DatabaseHolder::getDatabaseHolder().closeAll(opCtx, reason);
+    databaseHolder->closeAll(opCtx);
 
     // Close the storage engine's catalog.
     log() << "closeCatalog: closing storage engine catalog";
     opCtx->getServiceContext()->getStorageEngine()->closeCatalog(opCtx);
 
-    reopenOnFailure.Dismiss();
+    reopenOnFailure.dismiss();
     return minVisibleTimestampMap;
 }
 
@@ -161,19 +159,21 @@ void openCatalog(OperationContext* opCtx, const MinVisibleTimestampMap& minVisib
             log() << "openCatalog: rebuilding index: collection: " << collNss.toString()
                   << ", index: " << indexName;
         }
+
+        std::vector<BSONObj> indexSpecs = entry.second.second;
         fassert(40690,
-                rebuildIndexesOnCollection(
-                    opCtx, dbCatalogEntry, collCatalogEntry, std::move(entry.second)));
+                rebuildIndexesOnCollection(opCtx, dbCatalogEntry, collCatalogEntry, indexSpecs));
     }
 
     // Open all databases and repopulate the UUID catalog.
     log() << "openCatalog: reopening all databases";
     auto& uuidCatalog = UUIDCatalog::get(opCtx);
+    auto databaseHolder = DatabaseHolder::get(opCtx);
     std::vector<std::string> databasesToOpen;
     storageEngine->listDatabases(&databasesToOpen);
     for (auto&& dbName : databasesToOpen) {
         LOG(1) << "openCatalog: dbholder reopening database " << dbName;
-        auto db = DatabaseHolder::getDatabaseHolder().openDb(opCtx, dbName);
+        auto db = databaseHolder->openDb(opCtx, dbName);
         invariant(db, str::stream() << "failed to reopen database " << dbName);
 
         std::list<std::string> collections;
@@ -201,7 +201,7 @@ void openCatalog(OperationContext* opCtx, const MinVisibleTimestampMap& minVisib
             // to the oplog.
             if (collNss.isOplog()) {
                 log() << "openCatalog: updating cached oplog pointer";
-                repl::establishOplogCollectionForLogging(opCtx, collection);
+                collection->establishOplogCollectionForLogging(opCtx);
             }
         }
     }

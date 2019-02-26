@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -36,14 +35,13 @@
 
 #include "mongo/base/checked_cast.h"
 #include "mongo/db/catalog_raii.h"
-#include "mongo/db/server_parameters.h"
+#include "mongo/db/s/sharding_runtime_d_params_gen.h"
+#include "mongo/util/duration.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
-namespace {
 
-// How long to wait before starting cleanup of an emigrated chunk range
-MONGO_EXPORT_SERVER_PARAMETER(orphanCleanupDelaySecs, int, 900);  // 900s = 15m
+namespace {
 
 /**
  * Returns whether the specified namespace is used for sharding-internal purposes only and can never
@@ -113,8 +111,8 @@ void CollectionShardingRuntime::forgetReceive(const ChunkRange& range) {
 
 auto CollectionShardingRuntime::cleanUpRange(ChunkRange const& range, CleanWhen when)
     -> CleanupNotification {
-    Date_t time = (when == kNow) ? Date_t{} : Date_t::now() +
-            stdx::chrono::seconds{orphanCleanupDelaySecs.load()};
+    Date_t time =
+        (when == kNow) ? Date_t{} : Date_t::now() + Seconds(orphanCleanupDelaySecs.load());
     return _metadataManager->cleanUpRange(range, time);
 }
 
@@ -182,19 +180,40 @@ boost::optional<ScopedCollectionMetadata> CollectionShardingRuntime::_getMetadat
 
 CollectionCriticalSection::CollectionCriticalSection(OperationContext* opCtx, NamespaceString ns)
     : _nss(std::move(ns)), _opCtx(opCtx) {
-    AutoGetCollection autoColl(_opCtx, _nss, MODE_IX, MODE_X);
-    CollectionShardingState::get(opCtx, _nss)->enterCriticalSectionCatchUpPhase(_opCtx);
+    AutoGetCollection autoColl(_opCtx,
+                               _nss,
+                               MODE_IX,
+                               MODE_X,
+                               AutoGetCollection::ViewMode::kViewsForbidden,
+                               opCtx->getServiceContext()->getPreciseClockSource()->now() +
+                                   Milliseconds(migrationLockAcquisitionMaxWaitMS.load()));
+    auto* const csr = CollectionShardingRuntime::get(_opCtx, _nss);
+    auto csrLock = CollectionShardingState::CSRLock::lockExclusive(_opCtx, csr);
+
+    csr->enterCriticalSectionCatchUpPhase(_opCtx, csrLock);
 }
 
 CollectionCriticalSection::~CollectionCriticalSection() {
     UninterruptibleLockGuard noInterrupt(_opCtx->lockState());
-    AutoGetCollection autoColl(_opCtx, _nss, MODE_IX, MODE_X);
-    CollectionShardingState::get(_opCtx, _nss)->exitCriticalSection(_opCtx);
+    AutoGetCollection autoColl(_opCtx, _nss, MODE_IX, MODE_IX);
+    auto* const csr = CollectionShardingRuntime::get(_opCtx, _nss);
+    auto csrLock = CollectionShardingRuntime::CSRLock::lockExclusive(_opCtx, csr);
+
+    csr->exitCriticalSection(_opCtx, csrLock);
 }
 
 void CollectionCriticalSection::enterCommitPhase() {
-    AutoGetCollection autoColl(_opCtx, _nss, MODE_IX, MODE_X);
-    CollectionShardingState::get(_opCtx, _nss)->enterCriticalSectionCommitPhase(_opCtx);
+    AutoGetCollection autoColl(_opCtx,
+                               _nss,
+                               MODE_IX,
+                               MODE_X,
+                               AutoGetCollection::ViewMode::kViewsForbidden,
+                               _opCtx->getServiceContext()->getPreciseClockSource()->now() +
+                                   Milliseconds(migrationLockAcquisitionMaxWaitMS.load()));
+    auto* const csr = CollectionShardingRuntime::get(_opCtx, _nss);
+    auto csrLock = CollectionShardingRuntime::CSRLock::lockExclusive(_opCtx, csr);
+
+    csr->enterCriticalSectionCommitPhase(_opCtx, csrLock);
 }
 
 }  // namespace mongo

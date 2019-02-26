@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -31,6 +30,7 @@
 #pragma once
 
 #include "mongo/base/string_data.h"
+#include "mongo/db/exec/delete.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/record_id.h"
 
@@ -42,7 +42,6 @@ class IndexDescriptor;
 class OperationContext;
 class PlanStage;
 class WorkingSet;
-struct DeleteStageParams;
 struct UpdateStageParams;
 
 /**
@@ -83,7 +82,7 @@ public:
     static std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> deleteWithCollectionScan(
         OperationContext* opCtx,
         Collection* collection,
-        const DeleteStageParams& params,
+        std::unique_ptr<DeleteStageParams> params,
         PlanExecutor::YieldPolicy yieldPolicy,
         Direction direction = FORWARD,
         const RecordId& startLoc = RecordId());
@@ -108,7 +107,7 @@ public:
     static std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> deleteWithIndexScan(
         OperationContext* opCtx,
         Collection* collection,
-        const DeleteStageParams& params,
+        std::unique_ptr<DeleteStageParams> params,
         const IndexDescriptor* descriptor,
         const BSONObj& startKey,
         const BSONObj& endKey,

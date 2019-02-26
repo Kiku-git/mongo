@@ -1,6 +1,3 @@
-// kv_catalog.cpp
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -60,6 +57,7 @@ const char kIsFeatureDocumentFieldName[] = "isFeatureDoc";
 const char kNamespaceFieldName[] = "ns";
 const char kNonRepairableFeaturesFieldName[] = "nonRepairable";
 const char kRepairableFeaturesFieldName[] = "repairable";
+const char kInternalIdentPrefix[] = "internal-";
 
 void appendPositionsOfBitsSet(uint64_t value, StringBuilder* sb) {
     invariant(sb);
@@ -338,6 +336,21 @@ bool KVCatalog::_hasEntryCollidingWithRand() const {
             return true;
     }
     return false;
+}
+
+std::string KVCatalog::newInternalIdent() {
+    StringBuilder buf;
+    buf << kInternalIdentPrefix;
+    buf << _next.fetchAndAdd(1) << '-' << _rand;
+    return buf.str();
+}
+
+std::string KVCatalog::getFilesystemPathForDb(const std::string& dbName) const {
+    if (_directoryPerDb) {
+        return storageGlobalParams.dbpath + '/' + escapeDbName(dbName);
+    } else {
+        return storageGlobalParams.dbpath;
+    }
 }
 
 std::string KVCatalog::_newUniqueIdent(StringData ns, const char* kind) {
@@ -621,12 +634,20 @@ std::vector<std::string> KVCatalog::getAllIdents(OperationContext* opCtx) const 
 }
 
 bool KVCatalog::isUserDataIdent(StringData ident) const {
+    // Indexes and collections are candidates for dropping when the storage engine's metadata does
+    // not align with the catalog metadata.
     return ident.find("index-") != std::string::npos || ident.find("index/") != std::string::npos ||
         ident.find("collection-") != std::string::npos ||
         ident.find("collection/") != std::string::npos;
 }
 
+bool KVCatalog::isInternalIdent(StringData ident) const {
+    return ident.find(kInternalIdentPrefix) != std::string::npos;
+}
+
 bool KVCatalog::isCollectionIdent(StringData ident) const {
+    // Internal idents prefixed "internal-" should not be considered collections, because
+    // they are not eligible for orphan recovery through repair.
     return ident.find("collection-") != std::string::npos ||
         ident.find("collection/") != std::string::npos;
 }

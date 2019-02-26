@@ -14,7 +14,6 @@ selector:
   roots:
   - jstests/gle/core/*.js
   exclude_files:
-  - jstests/gle/core/error1.js  # The getPrevError command is not supported under sharding.
   - jstests/gle/core/remove5.js
   - jstests/gle/core/update4.js
 
@@ -53,7 +52,6 @@ executor:
       set_parameters:
         enableTestCommands: 1
         enableLocalhostAuthBypass: false
-        numInitialSyncAttempts: 1
     num_shards: 2
     enable_sharding:
     - test

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -40,6 +39,7 @@
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/repl/storage_interface_impl.h"
+#include "mongo/db/repl/storage_interface_mock.h"
 #include "mongo/db/s/op_observer_sharding_impl.h"
 #include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/db/session_catalog_mongod.h"
@@ -52,6 +52,13 @@ namespace mongo {
 namespace repl {
 namespace {
 
+boost::optional<OplogEntry> onAllTransactionCommit(OperationContext* opCtx) {
+    OplogInterfaceLocal oplogInterface(opCtx, NamespaceString::kRsOplogNamespace.ns());
+    auto oplogIter = oplogInterface.makeIterator();
+    auto opEntry = unittest::assertGet(oplogIter->next());
+    return unittest::assertGet(OplogEntry::parse(opEntry.first));
+}
+
 /**
  * Mock OpObserver that tracks doTxn commit events.
  */
@@ -60,25 +67,36 @@ public:
     /**
      * Called by doTxn() when ops are ready to commit.
      */
-    void onTransactionCommit(OperationContext* opCtx,
-                             boost::optional<OplogSlot> commitOplogEntryOpTime,
-                             boost::optional<Timestamp> commitTimestamp) override;
+    void onUnpreparedTransactionCommit(OperationContext* opCtx,
+                                       const std::vector<repl::ReplOperation>& statements) override;
+
+
+    /**
+     * Called by doTxn() when ops are ready to commit.
+     */
+    void onPreparedTransactionCommit(
+        OperationContext* opCtx,
+        OplogSlot commitOplogEntryOpTime,
+        Timestamp commitTimestamp,
+        const std::vector<repl::ReplOperation>& statements) noexcept override;
 
     // If present, holds the applyOps oplog entry written out by the ObObserverImpl
-    // onTransactionCommit.
+    // onPreparedTransactionCommit or onUnpreparedTransactionCommit.
     boost::optional<OplogEntry> applyOpsOplogEntry;
 };
 
-void OpObserverMock::onTransactionCommit(OperationContext* opCtx,
-                                         boost::optional<OplogSlot> commitOplogEntryOpTime,
-                                         boost::optional<Timestamp> commitTimestamp) {
-    ASSERT(!commitOplogEntryOpTime) << commitOplogEntryOpTime->opTime;
-    ASSERT(!commitTimestamp) << *commitTimestamp;
+void OpObserverMock::onUnpreparedTransactionCommit(
+    OperationContext* opCtx, const std::vector<repl::ReplOperation>& statements) {
 
-    OplogInterfaceLocal oplogInterface(opCtx, NamespaceString::kRsOplogNamespace.ns());
-    auto oplogIter = oplogInterface.makeIterator();
-    auto opEntry = unittest::assertGet(oplogIter->next());
-    applyOpsOplogEntry = unittest::assertGet(OplogEntry::parse(opEntry.first));
+    applyOpsOplogEntry = onAllTransactionCommit(opCtx);
+}
+
+void OpObserverMock::onPreparedTransactionCommit(
+    OperationContext* opCtx,
+    OplogSlot commitOplogEntryOpTime,
+    Timestamp commitTimestamp,
+    const std::vector<repl::ReplOperation>& statements) noexcept {
+    applyOpsOplogEntry = onAllTransactionCommit(opCtx);
 }
 
 /**
@@ -107,9 +125,11 @@ protected:
         auto txnRecord = SessionTxnRecord::parse(IDLParserErrorContext("parse txn record for test"),
                                                  unittest::assertGet(result));
 
-        ASSERT_EQ(opCtx()->getTxnNumber(), txnRecord.getTxnNum());
+        ASSERT(opCtx()->getTxnNumber());
+        ASSERT_EQ(*opCtx()->getTxnNumber(), txnRecord.getTxnNum());
         ASSERT_EQ(_opObserver->applyOpsOplogEntry->getOpTime(), txnRecord.getLastWriteOpTime());
-        ASSERT_EQ(_opObserver->applyOpsOplogEntry->getWallClockTime(),
+        ASSERT(_opObserver->applyOpsOplogEntry->getWallClockTime());
+        ASSERT_EQ(*_opObserver->applyOpsOplogEntry->getWallClockTime(),
                   txnRecord.getLastWriteDate());
     }
 
@@ -152,14 +172,19 @@ void DoTxnTest::setUp() {
     // collections.
     _storage = stdx::make_unique<StorageInterfaceImpl>();
 
+    // We also need to give replication a StorageInterface for checking out the transaction.
+    // The test storage engine doesn't support the necessary call (getPointInTimeReadTimestamp()),
+    // so we use a mock.
+    repl::StorageInterface::set(service, stdx::make_unique<StorageInterfaceMock>());
+
     // Set up the transaction and session.
     _opCtx->setLogicalSessionId(makeLogicalSessionIdForTest());
     _opCtx->setTxnNumber(0);  // TxnNumber can always be 0 because we have a new session.
     _ocs.emplace(_opCtx.get());
 
     auto txnParticipant = TransactionParticipant::get(opCtx());
-    txnParticipant->beginOrContinue(*opCtx()->getTxnNumber(), false, true);
-    txnParticipant->unstashTransactionResources(opCtx(), "doTxn");
+    txnParticipant.beginOrContinue(opCtx(), *opCtx()->getTxnNumber(), false, true);
+    txnParticipant.unstashTransactionResources(opCtx(), "doTxn");
 }
 
 void DoTxnTest::tearDown() {
@@ -167,8 +192,6 @@ void DoTxnTest::tearDown() {
     _opCtx = nullptr;
     _storage = {};
     _opObserver = nullptr;
-
-    SessionCatalog::get(getServiceContext())->reset_forTest();
 
     // Reset default log level in case it was changed.
     logger::globalLogDomain()->setMinimumLoggedSeverity(logger::LogComponent::kReplication,
@@ -276,7 +299,7 @@ TEST_F(DoTxnTest, AtomicDoTxnInsertWithUuidIntoCollectionWithOtherUuid) {
     // Collection has a different UUID.
     CollectionOptions collectionOptions;
     collectionOptions.uuid = UUID::gen();
-    ASSERT_NOT_EQUALS(doTxnUuid, collectionOptions.uuid);
+    ASSERT_NOT_EQUALS(doTxnUuid, *collectionOptions.uuid);
     ASSERT_OK(_storage->createCollection(opCtx(), nss, collectionOptions));
 
     // The doTxn returns a NamespaceNotFound error because of the failed UUID lookup

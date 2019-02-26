@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -68,7 +67,7 @@ void MultiApplierTest::setUp() {
  */
 OplogEntry makeOplogEntry(int ts) {
     return OplogEntry(OpTime(Timestamp(ts, 1), 1),  // optime
-                      1LL,                          // hash
+                      boost::none,                  // hash
                       OpTypeEnum::kNoop,            // op type
                       NamespaceString("a.a"),       // namespace
                       boost::none,                  // uuid

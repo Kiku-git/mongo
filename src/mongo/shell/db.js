@@ -123,7 +123,7 @@ var DB;
         {
             const session = this.getSession();
 
-            const readPreference = session._serverSession.client.getReadPreference(session);
+            const readPreference = session._getSessionAwareClient().getReadPreference(session);
             if (readPreference !== null) {
                 obj = this._attachReadPreferenceToCommand(obj, readPreference);
 
@@ -505,6 +505,8 @@ var DB;
      * See also: db.cloneDatabase()
      */
     DB.prototype.cloneCollection = function(from, collection, query) {
+        print(
+            "WARNING: db.cloneCollection is deprecated. See http://dochub.mongodb.org/core/clonecollection-deprecation");
         assert(isString(from) && from.length);
         assert(isString(collection) && collection.length);
         collection = this._name + "." + collection;
@@ -614,7 +616,6 @@ var DB;
         print("\tdb.getMongo() get the server connection object");
         print("\tdb.getMongo().setSlaveOk() allow queries on a replication slave server");
         print("\tdb.getName()");
-        print("\tdb.getPrevError()");
         print("\tdb.getProfilingLevel() - deprecated");
         print("\tdb.getProfilingStatus() - returns if profiling is on and slow threshold");
         print("\tdb.getReplicationInfo()");
@@ -845,17 +846,6 @@ var DB;
         return res;
     };
     DB.prototype.getLastErrorCmd = DB.prototype.getLastErrorObj;
-
-    /* Return the last error which has occurred, even if not the very last error.
-
-       Returns:
-        { err : <error message>, nPrev : <how_many_ops_back_occurred>, ok : 1 }
-
-       result.err will be null if no error has occurred.
-     */
-    DB.prototype.getPrevError = function() {
-        return this.runCommand({getpreverror: 1});
-    };
 
     DB.prototype._getCollectionInfosCommand = function(
         filter, nameOnly = false, authorizedCollections = false) {
@@ -1828,7 +1818,7 @@ var DB;
 
         {
             const session = this.getSession();
-            return session._serverSession.client.getWriteConcern(session);
+            return session._getSessionAwareClient().getWriteConcern(session);
         }
     };
 

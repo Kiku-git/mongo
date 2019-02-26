@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -66,6 +65,42 @@ public:
         ReservedTimes times{opCtx};
         for (auto& o : _observers)
             o->onCreateIndex(opCtx, nss, uuid, indexDoc, fromMigrate);
+    }
+
+    virtual void onStartIndexBuild(OperationContext* opCtx,
+                                   const NamespaceString& nss,
+                                   CollectionUUID collUUID,
+                                   const UUID& indexBuildUUID,
+                                   const std::vector<BSONObj>& indexes,
+                                   bool fromMigrate) override {
+        ReservedTimes times{opCtx};
+        for (auto& o : _observers) {
+            o->onStartIndexBuild(opCtx, nss, collUUID, indexBuildUUID, indexes, fromMigrate);
+        }
+    }
+
+    virtual void onCommitIndexBuild(OperationContext* opCtx,
+                                    const NamespaceString& nss,
+                                    CollectionUUID collUUID,
+                                    const UUID& indexBuildUUID,
+                                    const std::vector<BSONObj>& indexes,
+                                    bool fromMigrate) override {
+        ReservedTimes times{opCtx};
+        for (auto& o : _observers) {
+            o->onCommitIndexBuild(opCtx, nss, collUUID, indexBuildUUID, indexes, fromMigrate);
+        }
+    }
+
+    virtual void onAbortIndexBuild(OperationContext* opCtx,
+                                   const NamespaceString& nss,
+                                   CollectionUUID collUUID,
+                                   const UUID& indexBuildUUID,
+                                   const std::vector<BSONObj>& indexes,
+                                   bool fromMigrate) override {
+        ReservedTimes times{opCtx};
+        for (auto& o : _observers) {
+            o->onAbortIndexBuild(opCtx, nss, collUUID, indexBuildUUID, indexes, fromMigrate);
+        }
     }
 
     void onInserts(OperationContext* const opCtx,
@@ -145,10 +180,12 @@ public:
     repl::OpTime onDropCollection(OperationContext* const opCtx,
                                   const NamespaceString& collectionName,
                                   const OptionalCollectionUUID uuid,
+                                  std::uint64_t numRecords,
                                   const CollectionDropType dropType) override {
         ReservedTimes times{opCtx};
         for (auto& observer : this->_observers) {
-            auto time = observer->onDropCollection(opCtx, collectionName, uuid, dropType);
+            auto time =
+                observer->onDropCollection(opCtx, collectionName, uuid, numRecords, dropType);
             invariant(time.isNull());
         }
         return _getOpTimeToReturn(times.get().reservedOpTimes);
@@ -170,11 +207,12 @@ public:
                             const NamespaceString& toCollection,
                             OptionalCollectionUUID uuid,
                             OptionalCollectionUUID dropTargetUUID,
+                            std::uint64_t numRecords,
                             bool stayTemp) override {
         ReservedTimes times{opCtx};
         for (auto& o : _observers)
             o->onRenameCollection(
-                opCtx, fromCollection, toCollection, uuid, dropTargetUUID, stayTemp);
+                opCtx, fromCollection, toCollection, uuid, dropTargetUUID, numRecords, stayTemp);
     }
 
     repl::OpTime preRenameCollection(OperationContext* const opCtx,
@@ -182,11 +220,12 @@ public:
                                      const NamespaceString& toCollection,
                                      OptionalCollectionUUID uuid,
                                      OptionalCollectionUUID dropTargetUUID,
+                                     std::uint64_t numRecords,
                                      bool stayTemp) override {
         ReservedTimes times{opCtx};
         for (auto& observer : this->_observers) {
             const auto time = observer->preRenameCollection(
-                opCtx, fromCollection, toCollection, uuid, dropTargetUUID, stayTemp);
+                opCtx, fromCollection, toCollection, uuid, dropTargetUUID, numRecords, stayTemp);
             invariant(time.isNull());
         }
         return _getOpTimeToReturn(times.get().reservedOpTimes);
@@ -219,18 +258,30 @@ public:
             o->onEmptyCapped(opCtx, collectionName, uuid);
     }
 
-    void onTransactionCommit(OperationContext* opCtx,
-                             boost::optional<OplogSlot> commitOplogEntryOpTime,
-                             boost::optional<Timestamp> commitTimestamp) override {
+    void onUnpreparedTransactionCommit(
+        OperationContext* opCtx, const std::vector<repl::ReplOperation>& statements) override {
         ReservedTimes times{opCtx};
         for (auto& o : _observers)
-            o->onTransactionCommit(opCtx, commitOplogEntryOpTime, commitTimestamp);
+            o->onUnpreparedTransactionCommit(opCtx, statements);
     }
 
-    void onTransactionPrepare(OperationContext* opCtx, const OplogSlot& prepareOpTime) override {
+    void onPreparedTransactionCommit(
+        OperationContext* opCtx,
+        OplogSlot commitOplogEntryOpTime,
+        Timestamp commitTimestamp,
+        const std::vector<repl::ReplOperation>& statements) noexcept override {
+        ReservedTimes times{opCtx};
+        for (auto& o : _observers)
+            o->onPreparedTransactionCommit(
+                opCtx, commitOplogEntryOpTime, commitTimestamp, statements);
+    }
+
+    void onTransactionPrepare(OperationContext* opCtx,
+                              const OplogSlot& prepareOpTime,
+                              std::vector<repl::ReplOperation>& statements) override {
         ReservedTimes times{opCtx};
         for (auto& observer : _observers) {
-            observer->onTransactionPrepare(opCtx, prepareOpTime);
+            observer->onTransactionPrepare(opCtx, prepareOpTime, statements);
         }
     }
 

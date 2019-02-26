@@ -1,6 +1,3 @@
-// repair_cursor.cpp
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -38,6 +35,7 @@
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/cursor_manager.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/exec/multi_iterator.h"
 #include "mongo/db/namespace_string.h"
@@ -100,13 +98,15 @@ public:
         exec->saveState();
         exec->detachFromOperationContext();
 
-        auto pinnedCursor = collection->getCursorManager()->registerCursor(
+        auto pinnedCursor = CursorManager::get(opCtx)->registerCursor(
             opCtx,
             {std::move(exec),
              ns,
              AuthorizationSession::get(opCtx->getClient())->getAuthenticatedUserNames(),
              repl::ReadConcernArgs::get(opCtx),
-             cmdObj});
+             cmdObj,
+             ClientCursorParams::LockPolicy::kLockExternally,
+             {Privilege(parseResourcePattern(dbname, cmdObj), ActionType::find)}});
 
         appendCursorResponseObject(
             pinnedCursor.getCursor()->cursorid(), ns.ns(), BSONArray(), &result);

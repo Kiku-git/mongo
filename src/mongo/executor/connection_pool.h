@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -41,6 +40,7 @@
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/transport/session.h"
+#include "mongo/transport/transport_layer.h"
 #include "mongo/util/future.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/time_support.h"
@@ -142,7 +142,7 @@ public:
 
     void shutdown();
 
-    void dropConnections(const HostAndPort& hostAndPort);
+    void dropConnections(const HostAndPort& hostAndPort) override;
 
     void dropConnections(transport::Session::TagMask tags) override;
 
@@ -150,8 +150,15 @@ public:
                     const stdx::function<transport::Session::TagMask(transport::Session::TagMask)>&
                         mutateFunc) override;
 
-    Future<ConnectionHandle> get(const HostAndPort& hostAndPort, Milliseconds timeout);
-    void get(const HostAndPort& hostAndPort, Milliseconds timeout, GetConnectionCallback cb);
+    Future<ConnectionHandle> get(const HostAndPort& hostAndPort,
+                                 transport::ConnectSSLMode sslMode,
+                                 Milliseconds timeout);
+    void get_forTest(const HostAndPort& hostAndPort,
+                     Milliseconds timeout,
+                     GetConnectionCallback cb);
+
+    boost::optional<ConnectionHandle> tryGet(const HostAndPort& hostAndPort,
+                                             transport::ConnectSSLMode sslMode);
 
     void appendConnectionStats(ConnectionPoolStats* stats) const;
 
@@ -200,6 +207,11 @@ public:
      * It should be safe to cancel a previously canceled, or never set, timer.
      */
     virtual void cancelTimeout() = 0;
+
+    /**
+     * Returns the current time for the clock used by the timer
+     */
+    virtual Date_t now() = 0;
 };
 
 /**
@@ -215,21 +227,22 @@ class ConnectionPool::ConnectionInterface : public TimerInterface {
     friend class ConnectionPool;
 
 public:
-    ConnectionInterface() = default;
+    explicit ConnectionInterface(size_t generation) : _generation(generation) {}
+
     virtual ~ConnectionInterface() = default;
 
     /**
      * Indicates that the user is now done with this connection. Users MUST call either
      * this method or indicateFailure() before returning the connection to its pool.
      */
-    virtual void indicateSuccess() = 0;
+    void indicateSuccess();
 
     /**
      * Indicates that a connection has failed. This will prevent the connection
      * from re-entering the connection pool. Users MUST call either this method or
      * indicateSuccess() before returning connections to the pool.
      */
-    virtual void indicateFailure(Status status) = 0;
+    void indicateFailure(Status status);
 
     /**
      * This method updates a 'liveness' timestamp to avoid unnecessarily refreshing
@@ -240,18 +253,39 @@ public:
      * back in without use, one would expect an indicateSuccess without an indicateUsed.  Only if we
      * checked it out and did work would we call indicateUsed.
      */
-    virtual void indicateUsed() = 0;
+    void indicateUsed();
 
     /**
      * The HostAndPort for the connection. This should be the same as the
      * HostAndPort passed to DependentTypeFactoryInterface::makeConnection.
      */
     virtual const HostAndPort& getHostAndPort() const = 0;
+    virtual transport::ConnectSSLMode getSslMode() const = 0;
 
     /**
      * Check if the connection is healthy using some implementation defined condition.
      */
     virtual bool isHealthy() = 0;
+
+    /**
+     * Returns the last used time point for the connection
+     */
+    Date_t getLastUsed() const;
+
+    /**
+     * Returns the status associated with the connection. If the status is not
+     * OK, the connection will not be returned to the pool.
+     */
+    const Status& getStatus() const;
+
+    /**
+     * Get the generation of the connection. This is used to track whether to
+     * continue using a connection after a call to dropConnections() by noting
+     * if the generation on the specific pool is the same as the generation on
+     * a connection (if not the connection is from a previous era and should
+     * not be re-used).
+     */
+    size_t getGeneration() const;
 
 protected:
     /**
@@ -260,18 +294,6 @@ protected:
      */
     using SetupCallback = stdx::function<void(ConnectionInterface*, Status)>;
     using RefreshCallback = stdx::function<void(ConnectionInterface*, Status)>;
-
-private:
-    /**
-     * Returns the last used time point for the connection
-     */
-    virtual Date_t getLastUsed() const = 0;
-
-    /**
-     * Returns the status associated with the connection. If the status is not
-     * OK, the connection will not be returned to the pool.
-     */
-    virtual const Status& getStatus() const = 0;
 
     /**
      * Sets up the connection. This should include connection + auth + any
@@ -282,7 +304,7 @@ private:
     /**
      * Resets the connection's state to kConnectionStateUnknown for the next user.
      */
-    virtual void resetToUnknown() = 0;
+    void resetToUnknown();
 
     /**
      * Refreshes the connection. This should involve a network round trip and
@@ -290,14 +312,10 @@ private:
      */
     virtual void refresh(Milliseconds timeout, RefreshCallback cb) = 0;
 
-    /**
-     * Get the generation of the connection. This is used to track whether to
-     * continue using a connection after a call to dropConnections() by noting
-     * if the generation on the specific pool is the same as the generation on
-     * a connection (if not the connection is from a previous era and should
-     * not be re-used).
-     */
-    virtual size_t getGeneration() const = 0;
+private:
+    size_t _generation;
+    Date_t _lastUsed;
+    Status _status = ConnectionPool::kConnectionStateUnknown;
 };
 
 /**
@@ -318,6 +336,7 @@ public:
      * Makes a new connection given a host and port
      */
     virtual std::shared_ptr<ConnectionInterface> makeConnection(const HostAndPort& hostAndPort,
+                                                                transport::ConnectSSLMode sslMode,
                                                                 size_t generation) = 0;
 
     /**

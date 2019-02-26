@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -34,7 +33,7 @@
 
 namespace mongo {
 
-class DocumentSourceSkip final : public DocumentSource, public NeedsMergerDocumentSource {
+class DocumentSourceSkip final : public DocumentSource {
 public:
     static constexpr StringData kStageName = "$skip"_sd;
 
@@ -84,11 +83,12 @@ public:
         return DepsTracker::State::SEE_NEXT;  // This doesn't affect needed fields
     }
 
-    boost::intrusive_ptr<DocumentSource> getShardSource() final {
-        return nullptr;
-    }
-    MergingLogic mergingLogic() final {
-        return {this};
+    /**
+     * The $skip stage must run on the merging half of the pipeline.
+     */
+    boost::optional<MergingLogic> mergingLogic() final {
+        // {shardsStage, mergingStage, sortPattern}
+        return MergingLogic{nullptr, this, boost::none};
     }
 
     long long getSkip() const {

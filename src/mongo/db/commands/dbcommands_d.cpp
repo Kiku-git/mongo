@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -132,7 +131,8 @@ protected:
             if (!db) {
                 // When setting the profiling level, create the database if it didn't already exist.
                 // When just reading the profiling level, we do not create the database.
-                db = DatabaseHolder::getDatabaseHolder().openDb(opCtx, dbName);
+                auto databaseHolder = DatabaseHolder::get(opCtx);
+                db = databaseHolder->openDb(opCtx, dbName);
             }
             uassertStatusOK(db->setProfilingLevel(opCtx, profilingLevel));
         }
@@ -319,7 +319,7 @@ public:
                 exec->restoreState();
             }
 
-            if (PlanExecutor::DEAD == state || PlanExecutor::FAILURE == state) {
+            if (PlanExecutor::FAILURE == state) {
                 uassertStatusOK(WorkingSetCommon::getMemberObjectStatus(obj).withContext(
                     "Executor error during filemd5 command"));
             }

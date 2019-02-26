@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Public Domain 2014-2018 MongoDB, Inc.
+# Public Domain 2014-2019 MongoDB, Inc.
 # Public Domain 2008-2014 WiredTiger, Inc.
 #
 # This is free and unencumbered software released into the public domain.
@@ -74,9 +74,6 @@ class test_prepare03(wttest.WiredTigerTestCase):
 
     # Create the table and test cursor operations.
     def test_prepare_cursor(self):
-        if not wiredtiger.timestamp_build():
-            self.skipTest('requires a timestamp build')
-
         tablearg = self.uri + ':' + self.table_name
         create_args = self.format
         preparemsg = "/ not permitted in a prepared transaction/"

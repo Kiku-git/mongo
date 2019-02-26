@@ -518,6 +518,54 @@ def _normalize_method_name(cpp_type_name, cpp_method_name):
     return cpp_method_name
 
 
+def _bind_expression(expr, allow_literal_string=True):
+    # type: (syntax.Expression, bool) -> ast.Expression
+    """Bind an expression."""
+    node = ast.Expression(expr.file_name, expr.line, expr.column)
+
+    if expr.literal is None:
+        node.expr = expr.expr
+        node.validate_constexpr = expr.is_constexpr
+        node.export = expr.is_constexpr
+        return node
+
+    node.validate_constexpr = False
+    node.export = True
+
+    # bool
+    if (expr.literal == "true") or (expr.literal == "false"):
+        node.expr = expr.literal
+        return node
+
+    # int32_t
+    try:
+        intval = int(expr.literal)
+        if (intval >= -0x80000000) and (intval <= 0x7FFFFFFF):
+            node.expr = repr(intval)
+            return node
+    except ValueError:
+        pass
+
+    # float
+    try:
+        node.expr = repr(float(expr.literal))
+        return node
+    except ValueError:
+        pass
+
+    # std::string
+    if allow_literal_string:
+        strval = expr.literal
+        for i in ['\\', '"', "'"]:
+            if i in strval:
+                strval = strval.replace(i, '\\' + i)
+        node.expr = '"' + strval + '"'
+        return node
+
+    # Unable to bind expression.
+    return None
+
+
 def _bind_validator(ctxt, validator):
     # type: (errors.ParserContext, syntax.Validator) -> ast.Validator
     """Bind a validator from the idl.syntax tree."""
@@ -526,24 +574,35 @@ def _bind_validator(ctxt, validator):
 
     # Parse syntax value as numeric if possible.
     for pred in ["gt", "lt", "gte", "lte"]:
-        val = getattr(validator, pred)
-        if val is None:
+        src = getattr(validator, pred)
+        if src is None:
             continue
 
-        try:
-            intval = int(val)
-            if (intval < -0x80000000) or (intval > 0x7FFFFFFF):
-                raise ValueError('IDL ints are limited to int32_t')
-            setattr(ast_validator, pred, intval)
-        except ValueError:
-            try:
-                setattr(ast_validator, pred, float(val))
-            except ValueError:
-                ctxt.add_value_not_numeric_error(ast_validator, pred, val)
-                return None
+        dest = _bind_expression(src, allow_literal_string=False)
+        if dest is None:
+            # This only happens if we have a non-numeric literal.
+            ctxt.add_value_not_numeric_error(ast_validator, pred, src)
+            return None
+
+        setattr(ast_validator, pred, dest)
 
     ast_validator.callback = validator.callback
     return ast_validator
+
+
+def _bind_condition(condition):
+    # type: (syntax.Condition) -> ast.Condition
+    """Bind a condition from the idl.syntax tree."""
+
+    if not condition:
+        return None
+
+    ast_condition = ast.Condition(condition.file_name, condition.line, condition.column)
+    ast_condition.expr = condition.expr
+    ast_condition.constexpr = condition.constexpr
+    ast_condition.preprocessor = condition.preprocessor
+
+    return ast_condition
 
 
 def _bind_field(ctxt, parsed_spec, field):
@@ -745,6 +804,21 @@ def _bind_globals(parsed_spec):
                                 parsed_spec.globals.column)
         ast_global.cpp_namespace = parsed_spec.globals.cpp_namespace
         ast_global.cpp_includes = parsed_spec.globals.cpp_includes
+
+        configs = parsed_spec.globals.configs
+        if configs:
+            ast_global.configs = ast.ConfigGlobal(configs.file_name, configs.line, configs.column)
+
+            if configs.initializer:
+                init = configs.initializer
+
+                ast_global.configs.initializer = ast.GlobalInitializer(
+                    init.file_name, init.line, init.column)
+                # Parser rule makes it impossible to have both name and register/store.
+                ast_global.configs.initializer.name = init.name
+                ast_global.configs.initializer.register = init.register
+                ast_global.configs.initializer.store = init.store
+
     else:
         ast_global = ast.Global("<implicit>", 0, 0)
 
@@ -819,43 +893,68 @@ def _bind_enum(ctxt, idl_enum):
     return ast_enum
 
 
-def _bind_server_parameter(ctxt, param):
-    # type: (errors.ParserContext, syntax.ServerParameter) -> ast.ServerParameter
-    # pylint: disable=too-many-branches
-    """Bind a serverParameter setting."""
-    ast_param = ast.ServerParameter(param.file_name, param.line, param.column)
-    ast_param.name = param.name
-    ast_param.description = param.description
+def _bind_server_parameter_class(ctxt, ast_param, param):
+    # type: (errors.ParserContext, ast.ServerParameter, syntax.ServerParameter) -> ast.ServerParameter
+    """Bind and validate ServerParameter attributes specific to specialized ServerParameters."""
+
+    # Fields specific to bound and unbound standard params.
+    for field in ['cpp_vartype', 'cpp_varname', 'on_update', 'validator']:
+        if getattr(param, field) is not None:
+            ctxt.add_server_parameter_invalid_attr(param, field, 'specialized')
+            return None
+
+    # Fields specific to specialized stroage.
+    cls = param.cpp_class
+
+    if param.default is not None:
+        if not param.default.is_constexpr:
+            ctxt.add_server_parameter_invalid_attr(param, 'default.is_constexpr=false',
+                                                   'specialized')
+            return None
+
+        ast_param.default = _bind_expression(param.default)
+        if ast_param.default is None:
+            return None
+
+    ast_param.cpp_class = ast.ServerParameterClass(cls.file_name, cls.line, cls.column)
+    ast_param.cpp_class.name = cls.name
+    ast_param.cpp_class.data = cls.data
+    ast_param.cpp_class.override_ctor = cls.override_ctor
+    ast_param.cpp_class.override_set = cls.override_set
+
+    return ast_param
+
+
+def _bind_server_parameter_with_storage(ctxt, ast_param, param):
+    # type: (errors.ParserContext, ast.ServerParameter, syntax.ServerParameter) -> ast.ServerParameter
+    """Bind and validate ServerParameter attributes specific to bound ServerParameters."""
+
+    # Fields specific to specialized and unbound standard params.
+    for field in ['cpp_class']:
+        if getattr(param, field) is not None:
+            ctxt.add_server_parameter_invalid_attr(param, field, 'bound')
+            return None
+
     ast_param.cpp_vartype = param.cpp_vartype
     ast_param.cpp_varname = param.cpp_varname
-    ast_param.deprecated_name = param.deprecated_name
+    ast_param.on_update = param.on_update
 
-    custom_required_fields = ["from_string", "append_bson"]
-    standard_optional_fields = ["default", "on_update", "validator"]
+    if param.default:
+        ast_param.default = _bind_expression(param.default)
+        if ast_param.default is None:
+            return None
 
-    if param.cpp_varname is None:
-        # Custom SCP, uses callbacks.
-        ast_param.append_bson = param.append_bson
-        ast_param.from_bson = param.from_bson
-        ast_param.from_string = param.from_string
+    if param.validator:
+        ast_param.validator = _bind_validator(ctxt, param.validator)
+        if ast_param.validator is None:
+            return None
 
-        # Check for required callbacks.
-        for req in custom_required_fields:
-            if getattr(param, req) is None:
-                ctxt.add_missing_server_parameter_method(param, req)
+    return ast_param
 
-        # Check for disallowed declared-storage fields.
-        for conflict in standard_optional_fields:
-            if getattr(param, conflict) is not None:
-                ctxt.add_server_parameter_attr_without_storage(param, conflict)
-    else:
-        # Standard SCP, allows optional fields, but not custom callbacks.
-        for conflict in custom_required_fields + ["from_bson"]:
-            if getattr(param, conflict) is not None:
-                ctxt.add_server_parameter_attr_with_storage(param, conflict)
 
-        ast_param.default = param.default
-        ast_param.on_update = param.on_update
+def _bind_server_parameter_set_at(ctxt, param):
+    # type: (errors.ParserContext, syntax.ServerParameter) -> unicode
+    """Translate set_at options to C++ enum value."""
 
     set_at = 0
     for psa in param.set_at:
@@ -868,21 +967,177 @@ def _bind_server_parameter(ctxt, param):
             return None
 
     if set_at == 1:
-        ast_param.set_at = "ServerParameterType::kStartupOnly"
+        return "ServerParameterType::kStartupOnly"
     elif set_at == 2:
-        ast_param.set_at = "ServerParameterType::kRuntimeOnly"
+        return "ServerParameterType::kRuntimeOnly"
     elif set_at == 3:
-        ast_param.set_at = "ServerParameterType::kStartupAndRuntime"
+        return "ServerParameterType::kStartupAndRuntime"
     else:
         # Can't happen based on above logic.
         ctxt.add_bad_setat_specifier(param, ','.join(param.set_at))
+        return None
 
-    if param.validator is not None:
-        ast_param.validator = _bind_validator(ctxt, param.validator)
-        if ast_param.validator is None:
+
+def _bind_server_parameter(ctxt, param):
+    # type: (errors.ParserContext, syntax.ServerParameter) -> ast.ServerParameter
+    """Bind a serverParameter setting."""
+    ast_param = ast.ServerParameter(param.file_name, param.line, param.column)
+    ast_param.name = param.name
+    ast_param.description = param.description
+    ast_param.condition = _bind_condition(param.condition)
+    ast_param.redact = param.redact
+    ast_param.test_only = param.test_only
+    ast_param.deprecated_name = param.deprecated_name
+
+    ast_param.set_at = _bind_server_parameter_set_at(ctxt, param)
+    if ast_param.set_at is None:
+        return None
+
+    if param.cpp_class:
+        return _bind_server_parameter_class(ctxt, ast_param, param)
+    elif param.cpp_varname:
+        return _bind_server_parameter_with_storage(ctxt, ast_param, param)
+    else:
+        ctxt.add_server_parameter_required_attr(param, 'cpp_varname', 'server_parameter')
+        return None
+
+
+def _is_invalid_config_short_name(name):
+    # type: (unicode) -> bool
+    """Check if a given name is valid as a short name."""
+    return ('.' in name) or (',' in name)
+
+
+def _parse_config_option_sources(source_list):
+    # type: (List[unicode]) -> unicode
+    """Parse source list into enum value used by runtime."""
+    sources = 0
+    if not source_list:
+        return None
+
+    for source in source_list:
+        if source == "cli":
+            sources |= 1
+        elif source == "ini":
+            sources |= 2
+        elif source == "yaml":
+            sources |= 4
+        else:
             return None
 
-    return ast_param
+    source_map = [
+        "SourceCommandLine",
+        "SourceINIConfig",
+        "SourceAllLegacy",  # cli + ini
+        "SourceYAMLConfig",
+        "SourceYAMLCLI",  # cli + yaml
+        "SourceAllConfig",  # ini + yaml
+        "SourceAll",
+    ]
+    return source_map[sources - 1]
+
+
+def _bind_config_option(ctxt, globals_spec, option):
+    # type: (errors.ParserContext, syntax.Global, syntax.ConfigOption) -> ast.ConfigOption
+    """Bind a config setting."""
+
+    # pylint: disable=too-many-branches,too-many-statements,too-many-return-statements
+    node = ast.ConfigOption(option.file_name, option.line, option.column)
+
+    if _is_invalid_config_short_name(option.short_name or ''):
+        ctxt.add_invalid_short_name(option, option.short_name)
+        return None
+
+    for name in option.deprecated_short_name:
+        if _is_invalid_config_short_name(name):
+            ctxt.add_invalid_short_name(option, name)
+            return None
+
+    if option.single_name is not None:
+        if (len(option.single_name) != 1) or not option.single_name.isalpha():
+            ctxt.add_invalid_single_name(option, option.single_name)
+            return None
+
+    node.name = option.name
+    node.short_name = option.short_name
+    node.deprecated_name = option.deprecated_name
+    node.deprecated_short_name = option.deprecated_short_name
+
+    if (node.short_name is None) and not _is_invalid_config_short_name(node.name):
+        # If the "dotted name" is usable as a "short name", mirror it by default.
+        node.short_name = node.name
+
+    if option.single_name:
+        # Compose short_name/single_name into boost::program_options format.
+        if not node.short_name:
+            ctxt.add_missing_short_name_with_single_name(option, option.single_name)
+            return None
+
+        node.short_name = node.short_name + ',' + option.single_name
+
+    node.description = _bind_expression(option.description)
+    node.arg_vartype = option.arg_vartype
+    node.cpp_vartype = option.cpp_vartype
+    node.cpp_varname = option.cpp_varname
+    node.condition = _bind_condition(option.condition)
+
+    node.requires = option.requires
+    node.conflicts = option.conflicts
+    node.hidden = option.hidden
+    node.redact = option.redact
+    node.canonicalize = option.canonicalize
+
+    if option.default:
+        node.default = _bind_expression(option.default)
+
+    if option.implicit:
+        node.implicit = _bind_expression(option.implicit)
+
+    # Commonly repeated attributes section and source may be set in globals.
+    if globals_spec and globals_spec.configs:
+        node.section = option.section or globals_spec.configs.section
+        source_list = option.source or globals_spec.configs.source or []
+    else:
+        node.section = option.section
+        source_list = option.source or []
+
+    node.source = _parse_config_option_sources(source_list)
+    if node.source is None:
+        ctxt.add_bad_source_specifier(option, ', '.join(source_list))
+        return None
+
+    if option.duplicate_behavior:
+        if option.duplicate_behavior == "append":
+            node.duplicates_append = True
+        elif option.duplicate_behavior != "overwrite":
+            ctxt.add_bad_duplicate_behavior(option, option.duplicate_behavior)
+            return None
+
+    if option.positional:
+        if not node.short_name:
+            ctxt.add_missing_shortname_for_positional_arg(option)
+            return None
+
+        # Parse single digit, closed range, or open range of digits.
+        spread = option.positional.split('-')
+        if len(spread) == 1:
+            # Make a single number behave like a range of that number, (e.g. "2" -> "2-2").
+            spread.append(spread[0])
+        if (len(spread) != 2) or ((spread[0] == "") and (spread[1] == "")):
+            ctxt.add_bad_numeric_range(option, 'positional', option.positional)
+        try:
+            node.positional_start = int(spread[0] or "-1")
+            node.positional_end = int(spread[1] or "-1")
+        except ValueError:
+            ctxt.add_bad_numeric_range(option, 'positional', option.positional)
+            return None
+
+    if option.validator is not None:
+        node.validator = _bind_validator(ctxt, option.validator)
+        if node.validator is None:
+            return None
+
+    return node
 
 
 def bind(parsed_spec):
@@ -912,6 +1167,9 @@ def bind(parsed_spec):
 
     for server_parameter in parsed_spec.server_parameters:
         bound_spec.server_parameters.append(_bind_server_parameter(ctxt, server_parameter))
+
+    for option in parsed_spec.configs:
+        bound_spec.configs.append(_bind_config_option(ctxt, parsed_spec.globals, option))
 
     if ctxt.errors.has_errors():
         return ast.IDLBoundSpec(None, ctxt.errors)

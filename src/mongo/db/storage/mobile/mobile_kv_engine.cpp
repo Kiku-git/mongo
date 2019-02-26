@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -206,6 +205,14 @@ std::unique_ptr<RecordStore> MobileKVEngine::getRecordStore(OperationContext* op
                                                             const CollectionOptions& options) {
     return stdx::make_unique<MobileRecordStore>(opCtx, ns, _path, ident.toString(), options);
 }
+
+std::unique_ptr<RecordStore> MobileKVEngine::makeTemporaryRecordStore(OperationContext* opCtx,
+                                                                      StringData ident) {
+    MobileRecordStore::create(opCtx, ident.toString());
+    return std::make_unique<MobileRecordStore>(
+        opCtx, "", _path, ident.toString(), CollectionOptions());
+}
+
 
 Status MobileKVEngine::createSortedDataInterface(OperationContext* opCtx,
                                                  StringData ident,

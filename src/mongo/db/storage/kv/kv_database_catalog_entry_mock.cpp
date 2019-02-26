@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -38,7 +37,7 @@
 #include "mongo/util/assert_util.h"
 
 std::unique_ptr<mongo::KVDatabaseCatalogEntryMock> mongo::kvDatabaseCatalogEntryMockFactory(
-    const StringData name, KVStorageEngine* const engine) {
+    const StringData name, KVStorageEngineInterface* const engine) {
     return stdx::make_unique<KVDatabaseCatalogEntryMock>(name, engine);
 }
 

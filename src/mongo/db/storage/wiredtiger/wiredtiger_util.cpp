@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -39,7 +38,6 @@
 #include "mongo/base/simple_string_data_comparator.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
-#include "mongo/db/server_options.h"
 #include "mongo/db/server_parameters.h"
 #include "mongo/db/snapshot_window_options.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_kv_engine.h"
@@ -139,7 +137,7 @@ StatusWith<std::string> WiredTigerUtil::getMetadata(OperationContext* opCtx, Str
         session->getCursor("metadata:create", WiredTigerSession::kMetadataTableId, false);
     invariant(cursor);
     auto releaser =
-        MakeGuard([&] { session->releaseCursor(WiredTigerSession::kMetadataTableId, cursor); });
+        makeGuard([&] { session->releaseCursor(WiredTigerSession::kMetadataTableId, cursor); });
 
     std::string strUri = uri.toString();
     cursor->set_key(cursor, strUri.c_str());
@@ -327,7 +325,7 @@ StatusWith<uint64_t> WiredTigerUtil::getStatisticsValue(WT_SESSION* session,
                                                   << wiredtiger_strerror(ret));
     }
     invariant(cursor);
-    ON_BLOCK_EXIT(cursor->close, cursor);
+    ON_BLOCK_EXIT([&] { cursor->close(cursor); });
 
     cursor->set_key(cursor, statisticsKey);
     ret = cursor->search(cursor);
@@ -403,7 +401,6 @@ int mdb_handle_error_with_startup_suppression(WT_EVENT_HANDLER* handler,
                 return 0;
             }
         }
-
         error() << "WiredTiger error (" << errorCode << ") " << redact(message)
                 << " Raw: " << message;
 
@@ -521,7 +518,7 @@ int WiredTigerUtil::verifyTable(OperationContext* opCtx,
     WT_CONNECTION* conn = WiredTigerRecoveryUnit::get(opCtx)->getSessionCache()->conn();
     WT_SESSION* session;
     invariantWTOK(conn->open_session(conn, &eventHandler, NULL, &session));
-    ON_BLOCK_EXIT(session->close, session, "");
+    ON_BLOCK_EXIT([&] { session->close(session, ""); });
 
     // Do the verify. Weird parens prevent treating "verify" as a macro.
     return (session->verify)(session, uri.c_str(), NULL);
@@ -530,10 +527,6 @@ int WiredTigerUtil::verifyTable(OperationContext* opCtx,
 bool WiredTigerUtil::useTableLogging(NamespaceString ns, bool replEnabled) {
     if (!replEnabled) {
         // All tables on standalones are logged.
-        return true;
-    }
-
-    if (!serverGlobalParams.enableMajorityReadConcern) {
         return true;
     }
 
@@ -622,7 +615,7 @@ Status WiredTigerUtil::exportTableToBSON(WT_SESSION* session,
     }
     bob->append("uri", uri);
     invariant(c);
-    ON_BLOCK_EXIT(c->close, c);
+    ON_BLOCK_EXIT([&] { c->close(c); });
 
     std::map<string, BSONObjBuilder*> subs;
     const char* desc;
@@ -649,7 +642,7 @@ Status WiredTigerUtil::exportTableToBSON(WT_SESSION* session,
             suffix = "num";
         }
 
-        long long v = _castStatisticsValue<long long>(value);
+        long long v = castStatisticsValue<long long>(value);
 
         if (prefix.size() == 0) {
             bob->appendNumber(desc, v);

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -34,13 +33,13 @@
 
 #include "mongo/bson/util/builder.h"
 #include "mongo/db/catalog/collection_catalog_entry.h"
-#include "mongo/db/catalog/multi_index_block.h"
-#include "mongo/db/catalog/multi_index_block_impl.h"
+#include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/uuid_catalog.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/db_raii.h"
+#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer.h"
@@ -167,7 +166,7 @@ TEST_F(DatabaseTest, CreateCollectionThrowsExceptionWhenDatabaseIsInADropPending
                 db->createCollection(_opCtx.get(), _nss.ns()),
                 AssertionException,
                 ErrorCodes::DatabaseDropPending,
-                (StringBuilder() << "Cannot create collection " << _nss.ns()
+                (StringBuilder() << "Cannot create collection " << _nss
                                  << " - database is in the process of being dropped.")
                     .stringData());
         });
@@ -300,13 +299,6 @@ void _testDropCollectionThrowsExceptionIfThereAreIndexesInProgress(OperationCont
             wuow.commit();
         }
 
-        MultiIndexBlockImpl indexer(opCtx, collection);
-        ON_BLOCK_EXIT([&indexer, opCtx] {
-            WriteUnitOfWork wuow(opCtx);
-            indexer.commit();
-            wuow.commit();
-        });
-
         auto indexCatalog = collection->getIndexCatalog();
         ASSERT_EQUALS(indexCatalog->numIndexesInProgress(opCtx), 0);
         auto indexInfoObj = BSON(
@@ -314,7 +306,21 @@ void _testDropCollectionThrowsExceptionIfThereAreIndexesInProgress(OperationCont
                 << "a_1"
                 << "ns"
                 << nss.ns());
-        ASSERT_OK(indexer.init(indexInfoObj).getStatus());
+
+        auto indexBuildBlock =
+            indexCatalog->createIndexBuildBlock(opCtx, indexInfoObj, IndexBuildMethod::kHybrid);
+        {
+            WriteUnitOfWork wuow(opCtx);
+            ASSERT_OK(indexBuildBlock->init(opCtx, collection));
+            wuow.commit();
+        }
+        ON_BLOCK_EXIT([&indexBuildBlock, opCtx, collection] {
+            WriteUnitOfWork wuow(opCtx);
+            indexBuildBlock->success(opCtx, collection);
+            wuow.commit();
+            indexBuildBlock->deleteTemporaryTables(opCtx);
+        });
+
         ASSERT_GREATER_THAN(indexCatalog->numIndexesInProgress(opCtx), 0);
 
         WriteUnitOfWork wuow(opCtx);
@@ -490,7 +496,7 @@ TEST_F(DatabaseTest, AutoGetDBSucceedsWithDeadlineMin) {
     Lock::DBLock lock(_opCtx.get(), nss.db(), MODE_X);
     ASSERT(_opCtx.get()->lockState()->isDbLockedForMode(nss.db(), MODE_X));
     try {
-        AutoGetDb db(_opCtx.get(), nss.db(), MODE_X, Date_t::min());
+        AutoGetDb db(_opCtx.get(), nss.db(), MODE_X, Date_t());
         ASSERT(_opCtx.get()->lockState()->isDbLockedForMode(nss.db(), MODE_X));
     } catch (const ExceptionFor<ErrorCodes::LockTimeout>&) {
         FAIL("Should get the db within the timeout");
@@ -519,7 +525,7 @@ TEST_F(DatabaseTest, AutoGetCollectionForReadCommandSucceedsWithDeadlineMin) {
     ASSERT(_opCtx.get()->lockState()->isCollectionLockedForMode(nss.toString(), MODE_X));
     try {
         AutoGetCollectionForReadCommand db(
-            _opCtx.get(), nss, AutoGetCollection::kViewsForbidden, Date_t::min());
+            _opCtx.get(), nss, AutoGetCollection::kViewsForbidden, Date_t());
     } catch (const ExceptionFor<ErrorCodes::LockTimeout>&) {
         FAIL("Should get the db within the timeout");
     }
@@ -544,7 +550,7 @@ TEST_F(DatabaseTest, CreateCollectionProhibitsReplicatedCollectionsWithoutIdInde
                 db->createCollection(_opCtx.get(), _nss.ns(), options),
                 AssertionException,
                 50001,
-                (StringBuilder() << "autoIndexId:false is not allowed for collection " << _nss.ns()
+                (StringBuilder() << "autoIndexId:false is not allowed for collection " << _nss
                                  << " because it can be replicated")
                     .stringData());
         });

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -43,7 +42,7 @@ class BSONObj;
 class CollatorInterface;
 class CompositeIndexabilityDiscriminator;
 class MatchExpression;
-struct IndexEntry;
+struct CoreIndexInfo;
 
 using IndexabilityDiscriminator = stdx::function<bool(const MatchExpression* me)>;
 using IndexabilityDiscriminators = std::vector<IndexabilityDiscriminator>;
@@ -104,9 +103,9 @@ public:
     IndexToDiscriminatorMap buildWildcardDiscriminators(StringData path) const;
 
     /**
-     * Clears discriminators for all paths, and regenerate them from 'indexEntries'.
+     * Clears discriminators for all paths, and regenerates them from 'indexCores'.
      */
-    void updateDiscriminators(const std::vector<IndexEntry>& indexEntries);
+    void updateDiscriminators(const std::vector<CoreIndexInfo>& indexCores);
 
 private:
     using PathDiscriminatorsMap = StringMap<IndexToDiscriminatorMap>;
@@ -174,7 +173,7 @@ private:
      * path, appropriate discriminators for the wildcard index will be included if it includes the
      * given path.
      */
-    void processWildcardIndex(const IndexEntry& ie);
+    void processWildcardIndex(const CoreIndexInfo& cii);
 
     // PathDiscriminatorsMap is a map from field path to index name to IndexabilityDiscriminator.
     PathDiscriminatorsMap _pathDiscriminatorsMap;

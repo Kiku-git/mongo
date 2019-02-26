@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -105,6 +104,7 @@ private:
     void _run(OperationContext* opCtx, BSONObjBuilder* result) override {
         uassertStatusOK(Grid::get(opCtx)->getBalancerConfiguration()->setBalancerMode(
             opCtx, BalancerSettingsType::kFull));
+        Balancer::get(opCtx)->notifyPersistedBalancerSettingsChanged();
     }
 };
 
@@ -121,6 +121,7 @@ private:
 
         uassertStatusOK(Grid::get(opCtx)->getBalancerConfiguration()->setBalancerMode(
             opCtx, BalancerSettingsType::kOff));
+        Balancer::get(opCtx)->notifyPersistedBalancerSettingsChanged();
         Balancer::get(opCtx)->joinCurrentRound(opCtx);
     }
 };

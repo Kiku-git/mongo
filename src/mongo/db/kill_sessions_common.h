@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -81,13 +80,17 @@ private:
  * two types share no code, but do share enough shape to re-use some boilerplate.
  */
 template <typename Eraser>
-class KillSessionsCursorManagerVisitor {
+class KillCursorsBySessionAdaptor {
 public:
-    KillSessionsCursorManagerVisitor(OperationContext* opCtx,
-                                     const SessionKiller::Matcher& matcher,
-                                     Eraser&& eraser)
+    KillCursorsBySessionAdaptor(OperationContext* opCtx,
+                                const SessionKiller::Matcher& matcher,
+                                Eraser&& eraser)
         : _opCtx(opCtx), _matcher(matcher), _cursorsKilled(0), _eraser(eraser) {}
 
+    /**
+     * Kills cursors in 'mgr' which belong to a session matching the SessionKilled::Matcher with
+     * which this adaptor was constructed.
+     */
     template <typename Mgr>
     void operator()(Mgr& mgr) {
         LogicalSessionIdSet activeSessions;
@@ -110,6 +113,10 @@ public:
         }
     }
 
+    /**
+     * Returns an OK status if no errors were encountered during cursor killing, or a non-OK status
+     * summarizing any errors encountered.
+     */
     Status getStatus() const {
         if (_failures.empty()) {
             return Status::OK();
@@ -126,6 +133,9 @@ public:
                                     << _failures.back().reason());
     }
 
+    /**
+     * Returns the number of cursors killed by operator().
+     */
     int getCursorsKilled() const {
         return _cursorsKilled;
     }
@@ -139,10 +149,10 @@ private:
 };
 
 template <typename Eraser>
-auto makeKillSessionsCursorManagerVisitor(OperationContext* opCtx,
-                                          const SessionKiller::Matcher& matcher,
-                                          Eraser&& eraser) {
-    return KillSessionsCursorManagerVisitor<std::decay_t<Eraser>>{
+auto makeKillCursorsBySessionAdaptor(OperationContext* opCtx,
+                                     const SessionKiller::Matcher& matcher,
+                                     Eraser&& eraser) {
+    return KillCursorsBySessionAdaptor<std::decay_t<Eraser>>{
         opCtx, matcher, std::forward<Eraser>(eraser)};
 }
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Public Domain 2014-2018 MongoDB, Inc.
+# Public Domain 2014-2019 MongoDB, Inc.
 # Public Domain 2008-2014 WiredTiger, Inc.
 #
 # This is free and unencumbered software released into the public domain.
@@ -108,9 +108,6 @@ class test_timestamp04(wttest.WiredTigerTestCase, suite_subprocess):
         self.session = self.conn.open_session(None)
 
     def test_rollback_to_stable(self):
-        if not wiredtiger.timestamp_build():
-            self.skipTest('requires a timestamp build')
-
         self.ConnectionOpen(self.cacheSize)
         # Configure small page sizes to ensure eviction comes through and we
         # have a somewhat complex tree.

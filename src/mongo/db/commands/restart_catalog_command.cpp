@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -86,7 +85,7 @@ public:
     }
 
     bool run(OperationContext* opCtx,
-             const std::string& db,
+             const std::string& dbNameUnused,
              const BSONObj& cmdObj,
              BSONObjBuilder& result) final {
         Lock::GlobalLock global(opCtx, MODE_X);
@@ -94,10 +93,11 @@ public:
         // This command will fail without modifying the catalog if there are any databases that are
         // marked drop-pending. (Otherwise, the Database object will be reconstructed when
         // re-opening the catalog, but with the drop pending flag cleared.)
+        auto databaseHolder = DatabaseHolder::get(opCtx);
         std::vector<std::string> allDbs;
         getGlobalServiceContext()->getStorageEngine()->listDatabases(&allDbs);
         for (auto&& dbName : allDbs) {
-            const auto db = DatabaseHolder::getDatabaseHolder().get(opCtx, dbName);
+            const auto db = databaseHolder->getDb(opCtx, dbName);
             if (db->isDropPending(opCtx)) {
                 uasserted(ErrorCodes::DatabaseDropPending,
                           str::stream() << "cannot restart the catalog because database " << dbName

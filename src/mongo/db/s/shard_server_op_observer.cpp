@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -322,7 +321,9 @@ void ShardServerOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateE
             if (setField.hasField(ShardDatabaseType::enterCriticalSectionCounter.name())) {
                 AutoGetDb autoDb(opCtx, db, MODE_X);
                 if (autoDb.getDb()) {
-                    DatabaseShardingState::get(autoDb.getDb()).setDbVersion(opCtx, boost::none);
+                    auto& dss = DatabaseShardingState::get(autoDb.getDb());
+                    auto dssLock = DatabaseShardingState::DSSLock::lockExclusive(opCtx, &dss);
+                    dss.setDbVersion(opCtx, boost::none, dssLock);
                 }
             }
         }
@@ -368,7 +369,9 @@ void ShardServerOpObserver::onDelete(OperationContext* opCtx,
 
         AutoGetDb autoDb(opCtx, deletedDatabase, MODE_X);
         if (autoDb.getDb()) {
-            DatabaseShardingState::get(autoDb.getDb()).setDbVersion(opCtx, boost::none);
+            auto& dss = DatabaseShardingState::get(autoDb.getDb());
+            auto dssLock = DatabaseShardingState::DSSLock::lockExclusive(opCtx, &dss);
+            dss.setDbVersion(opCtx, boost::none, dssLock);
         }
     }
 
@@ -392,6 +395,7 @@ void ShardServerOpObserver::onDelete(OperationContext* opCtx,
 repl::OpTime ShardServerOpObserver::onDropCollection(OperationContext* opCtx,
                                                      const NamespaceString& collectionName,
                                                      OptionalCollectionUUID uuid,
+                                                     std::uint64_t numRecords,
                                                      const CollectionDropType dropType) {
     if (collectionName == NamespaceString::kServerConfigurationNamespace) {
         // Dropping system collections is not allowed for end users

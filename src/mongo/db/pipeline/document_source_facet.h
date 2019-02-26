@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -57,7 +56,7 @@ class NamespaceString;
  * stage which will produce a document like the following:
  * {facetA: [<all input documents except the first one>], facetB: [<the first document>]}.
  */
-class DocumentSourceFacet final : public DocumentSource, public NeedsMergerDocumentSource {
+class DocumentSourceFacet final : public DocumentSource {
 public:
     struct FacetPipeline {
         FacetPipeline(std::string name, std::unique_ptr<Pipeline, PipelineDeleter> pipeline)
@@ -126,11 +125,9 @@ public:
      * TODO SERVER-24154: Should be smarter about splitting so that parts of the sub-pipelines can
      * potentially be run in parallel on multiple shards.
      */
-    boost::intrusive_ptr<DocumentSource> getShardSource() final {
-        return nullptr;
-    }
-    MergingLogic mergingLogic() final {
-        return {this};
+    boost::optional<MergingLogic> mergingLogic() final {
+        // {shardsStage, mergingStage, sortPattern}
+        return MergingLogic{nullptr, this, boost::none};
     }
 
     const std::vector<FacetPipeline>& getFacetPipelines() const {
@@ -138,7 +135,7 @@ public:
     }
 
     // The following are overridden just to forward calls to sub-pipelines.
-    void addInvolvedCollections(std::vector<NamespaceString>* collections) const final;
+    void addInvolvedCollections(stdx::unordered_set<NamespaceString>* involvedNssSet) const final;
     void detachFromOperationContext() final;
     void reattachToOperationContext(OperationContext* opCtx) final;
     StageConstraints constraints(Pipeline::SplitState pipeState) const final;

@@ -1,6 +1,3 @@
-// sorted_data_interface_test_fullvalidate.cpp
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -44,7 +41,8 @@ namespace {
 // the `numKeysOut` as the number of entries in the index, or as -1.
 TEST(SortedDataInterface, FullValidate) {
     const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
-    const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
+    const std::unique_ptr<SortedDataInterface> sorted(
+        harnessHelper->newSortedDataInterface(/*unique=*/false, /*partial=*/false));
 
     {
         const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());

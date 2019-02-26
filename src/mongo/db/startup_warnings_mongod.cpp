@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -366,12 +365,6 @@ void logMongodStartupWarnings(const StorageGlobalParams& storageParams,
         log() << "**          by enabling interleaving to avoid performance problems. "
               << startupWarningsLog;
         log() << "**          See your BIOS documentation for more information."
-              << startupWarningsLog;
-        warned = true;
-    }
-
-    if (p.isDataFileZeroingNeeded()) {
-        log() << "Hotfix KB2731284 or later update is not installed, will zero-out data files."
               << startupWarningsLog;
         warned = true;
     }

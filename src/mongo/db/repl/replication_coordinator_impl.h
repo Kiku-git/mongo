@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -137,6 +136,13 @@ public:
 
     virtual Status checkIfWriteConcernCanBeSatisfied(const WriteConcernOptions& writeConcern) const;
 
+    virtual Status checkIfCommitQuorumCanBeSatisfied(
+        const CommitQuorumOptions& commitQuorum) const override;
+
+    virtual StatusWith<bool> checkIfCommitQuorumIsSatisfied(
+        const CommitQuorumOptions& commitQuorum,
+        const std::vector<HostAndPort>& commitReadyMembers) const override;
+
     virtual Status checkCanServeReadsFor(OperationContext* opCtx,
                                          const NamespaceString& ns,
                                          bool slaveOk);
@@ -165,7 +171,7 @@ public:
 
     virtual Status waitUntilOpTimeForRead(OperationContext* opCtx,
                                           const ReadConcernArgs& readConcern) override;
-
+    Status awaitOpTimeCommitted(OperationContext* opCtx, OpTime opTime) override;
     virtual OID getElectionId() override;
 
     virtual int getMyId() const override;
@@ -268,8 +274,6 @@ public:
 
     virtual bool getWriteConcernMajorityShouldJournal() override;
 
-    virtual void summarizeAsHtml(ReplSetHtmlSummary* s) override;
-
     virtual void dropAllSnapshots() override;
     /**
      * Get current term from topology coordinator
@@ -297,9 +301,6 @@ public:
     virtual WriteConcernOptions populateUnsetWriteConcernOptionsSyncMode(
         WriteConcernOptions wc) override;
 
-    virtual ReplSettings::IndexPrefetchConfig getIndexPrefetchConfig() const override;
-    virtual void setIndexPrefetchConfig(const ReplSettings::IndexPrefetchConfig cfg) override;
-
     virtual Status stepUpIfEligible(bool skipDryRun) override;
 
     virtual Status abortCatchupIfNeeded() override;
@@ -309,6 +310,8 @@ public:
     virtual boost::optional<Timestamp> getRecoveryTimestamp() override;
 
     virtual bool setContainsArbiter() const override;
+
+    virtual void attemptToAdvanceStableTimestamp() override;
 
     // ================== Test support API ===================
 
@@ -361,11 +364,10 @@ public:
     /**
      * Simple test wrappers that expose private methods.
      */
-    boost::optional<OpTime> calculateStableOpTime_forTest(const std::set<OpTime>& candidates,
-                                                          const OpTime& commitPoint);
+    boost::optional<OpTime> chooseStableOpTimeFromCandidates_forTest(
+        const std::set<OpTime>& candidates, const OpTime& maximumStableOpTime);
     void cleanupStableOpTimeCandidates_forTest(std::set<OpTime>* candidates, OpTime stableOpTime);
     std::set<OpTime> getStableOpTimeCandidates_forTest();
-    boost::optional<OpTime> getStableOpTime_forTest();
 
     /**
      * Non-blocking version of updateTerm.
@@ -444,10 +446,74 @@ private:
      */
     enum PostMemberStateUpdateAction {
         kActionNone,
-        kActionCloseAllConnections,  // Also indicates that we should clear sharding state.
+        kActionSteppedDown,
+        kActionRollbackOrRemoved,
         kActionFollowerModeStateChange,
-        kActionWinElection,
         kActionStartSingleNodeElection
+    };
+
+    // This object handles killing user operations and aborting stashed running
+    // transactions during step down.
+    class KillOpContainer {
+    public:
+        KillOpContainer(ReplicationCoordinatorImpl* repl, OperationContext* opCtx)
+            : _replCord(repl), _stepDownOpCtx(opCtx){};
+
+        /**
+         * It will spawn a new thread killOpThread to kill user operations.
+         */
+        void startKillOpThread();
+
+        /**
+         * On stepdown, we need to kill all write operations and all transactional operations,
+         * so that unprepared and prepared transactions can release or yield their locks.
+         * The required ordering between stepdown steps is:
+         * 1) Enqueue RSTL in X mode.
+         * 2) Kill all write operations and operations with S locks
+         * 3) Abort unprepared transactions.
+         * 4) Repeat step 2) and 3) until the stepdown thread can acquire RSTL.
+         * 5) Yield locks of all prepared transactions.
+         *
+         * Since prepared transactions don't hold RSTL, step 1) to step 3) make sure all
+         * running transactions that may hold RSTL finish, get killed or yield their locks,
+         * so that we can acquire RSTL at step 4). Holding the locks of prepared transactions
+         * until step 5) guarantees if any conflict operations (e.g. DDL operations) failed
+         * to be killed for any reason, we will get a deadlock instead of a silent data corruption.
+         *
+         * Loops continuously to kill all user operations that have global lock except in IS mode.
+         * And, aborts all stashed (inactive) transactions.
+         * Terminates once killSignaled is set true.
+        */
+        void killOpThreadFn();
+
+        /*
+         * Signals killOpThread to stop killing user operations.
+         */
+        void stopAndWaitForKillOpThread();
+
+        /*
+         * Returns _userOpsRunning value.
+         */
+        size_t getUserOpsRunning() const;
+
+        /*
+         * Increments _userOpsRunning by val.
+         */
+        void incrUserOpsRunningBy(size_t val = 1);
+
+    private:
+        ReplicationCoordinatorImpl* const _replCord;  // not owned.
+        OperationContext* const _stepDownOpCtx;       // not owned.
+        // Thread that will run killOpThreadFn().
+        std::unique_ptr<stdx::thread> _killOpThread;
+        // Protects killSignaled and stopKillingOps cond. variable.
+        stdx::mutex _mutex;
+        // Signals thread about the change of killSignaled value.
+        stdx::condition_variable _stopKillingOps;
+        // Once this is set to true, the killOpThreadFn method will terminate.
+        bool _killSignaled = false;
+        // Tracks number of operations left running on step down.
+        size_t _userOpsRunning = 0;
     };
 
     // Abstract struct that holds information about clients waiting for replication.
@@ -588,18 +654,18 @@ private:
     private:
         // Flag that indicates whether writes to databases other than "local" are allowed.  Used to
         // answer canAcceptWritesForDatabase() and canAcceptWritesFor() questions. In order to read
-        // it, must have either the RSTL in some intent mode or the replication coordinator mutex.
-        // To set it, must have both the RSTL in mode X and the replication coordinator mutex.
+        // it, must have either the RSTL or the replication coordinator mutex. To set it, must have
+        // both the RSTL in mode X and the replication coordinator mutex.
         // Always true for standalone nodes.
         bool _canAcceptNonLocalWrites;
 
         // Flag that indicates whether reads from databases other than "local" are allowed. Unlike
         // _canAcceptNonLocalWrites, above, this question is about admission control on secondaries.
         // Accidentally providing the prior value for a limited period of time is acceptable, except
-        // during rollback. In order to read it, must have the RSTL in some intent mode. To set it
-        // when transitioning into RS_ROLLBACK, must have the RSTL in mode X. Otherwise, no lock or
-        // mutex is necessary to set it.
-        AtomicUInt32 _canServeNonLocalReads;
+        // during rollback. In order to read it, must have the RSTL. To set it when transitioning
+        // into RS_ROLLBACK, must have the RSTL in mode X. Otherwise, no lock or mutex is necessary
+        // to set it.
+        AtomicWord<unsigned> _canServeNonLocalReads;
     };
 
     void _resetMyLastOpTimes(WithLock lk);
@@ -678,6 +744,9 @@ private:
                                            const WriteConcernOptions& writeConcern);
 
     Status _checkIfWriteConcernCanBeSatisfied_inlock(const WriteConcernOptions& writeConcern) const;
+
+    Status _checkIfCommitQuorumCanBeSatisfied(WithLock,
+                                              const CommitQuorumOptions& commitQuorum) const;
 
     bool _canAcceptWritesFor_inlock(const NamespaceString& ns);
 
@@ -850,6 +919,16 @@ private:
     void _performPostMemberStateUpdateAction(PostMemberStateUpdateAction action);
 
     /**
+     * Update state after winning an election.
+     */
+    void _postWonElectionUpdateMemberState(WithLock lk);
+
+    /**
+     * Helper to select appropriate sync source after transitioning from a follower state.
+     */
+    void _onFollowerModeStateChange();
+
+    /**
      * Begins an attempt to elect this node.
      * Called after an incoming heartbeat changes this node's view of the set such that it
      * believes it can be elected PRIMARY.
@@ -918,6 +997,17 @@ private:
      * Schedules stepdown to run with the global exclusive lock.
      */
     executor::TaskExecutor::EventHandle _stepDownStart();
+
+    /**
+     * Update the "repl.stepDown.userOperationsRunning" counter and log number of operations
+     * killed and left running on step down.
+     */
+    void _updateAndLogStatsOnStepDown(const KillOpContainer* koc) const;
+
+    /**
+     * kill all user operations that have taken a global lock except in IS mode.
+     */
+    void _killUserOperationsOnStepDown(const OperationContext* stepDownOpCtx, KillOpContainer* koc);
 
     /**
      * Completes a step-down of the current node.  Must be run with a global
@@ -1017,16 +1107,18 @@ private:
      * A helper method that returns the current stable optime based on the current commit point and
      * set of stable optime candidates.
      */
-    boost::optional<OpTime> _getStableOpTime(WithLock lk);
+    boost::optional<OpTime> _recalculateStableOpTime(WithLock lk);
 
     /**
-     * Calculates the 'stable' replication optime given a set of optime candidates and the
-     * current commit point. The stable optime is the greatest optime in 'candidates' that is
-     * also less than or equal to 'commitPoint'.
+     * Calculates the 'stable' replication optime given a set of optime candidates and a maximum
+     * stable optime. The stable optime is the greatest optime in 'candidates' that is also less
+     * than or equal to 'maximumStableOpTime' and other criteria.
+     *
+     * Returns boost::none if there is no satisfactory candidate.
      */
-    boost::optional<OpTime> _calculateStableOpTime(WithLock lk,
-                                                   const std::set<OpTime>& candidates,
-                                                   const OpTime& commitPoint);
+    boost::optional<OpTime> _chooseStableOpTimeFromCandidates(WithLock lk,
+                                                              const std::set<OpTime>& candidates,
+                                                              OpTime maximumStableOpTime);
 
     /**
      * Removes any optimes from the optime set 'candidates' that are less than
@@ -1035,9 +1127,9 @@ private:
     void _cleanupStableOpTimeCandidates(std::set<OpTime>* candidates, OpTime stableOpTime);
 
     /**
-     * Calculates and sets the value of the 'stable' replication optime for the storage engine.
-     * See ReplicationCoordinatorImpl::_calculateStableOpTime for a definition of 'stable', in
-     * this context.
+     * Calculates and sets the value of the 'stable' replication optime for the storage engine.  See
+     * ReplicationCoordinatorImpl::_chooseStableOpTimeFromCandidates for a definition of 'stable',
+     * in this context.
      */
     void _setStableTimestampForStorage(WithLock lk);
 
@@ -1261,7 +1353,7 @@ private:
         _initialSyncer;  // (I) pointer set under mutex, copied by callers.
 
     // Hands out the next snapshot name.
-    AtomicUInt64 _snapshotNameGenerator;  // (S)
+    AtomicWord<unsigned long long> _snapshotNameGenerator;  // (S)
 
     // The OpTimes and SnapshotNames for all snapshots newer than the current commit point, kept in
     // sorted order. Any time this is changed, you must also update _uncommitedSnapshotsSize.
@@ -1269,7 +1361,7 @@ private:
 
     // A cache of the size of _uncommittedSnaphots that can be read without any locking.
     // May only be written to while holding _mutex.
-    AtomicUInt64 _uncommittedSnapshotsSize;  // (I)
+    AtomicWord<unsigned long long> _uncommittedSnapshotsSize;  // (I)
 
     // The non-null OpTime and SnapshotName of the current snapshot used for committed reads, if
     // there is one.
@@ -1322,15 +1414,10 @@ private:
     int _earliestMemberId = -1;  // (M)
 
     // Cached copy of the current config protocol version.
-    AtomicInt64 _protVersion{1};  // (S)
+    AtomicWord<long long> _protVersion{1};  // (S)
 
     // Source of random numbers used in setting election timeouts, etc.
     PseudoRandom _random;  // (M)
-
-    // This setting affects the Applier prefetcher behavior.
-    mutable stdx::mutex _indexPrefetchMutex;
-    ReplSettings::IndexPrefetchConfig _indexPrefetchConfig =
-        ReplSettings::IndexPrefetchConfig::PREFETCH_ALL;  // (I)
 
     // The catchup state including all catchup logic. The presence of a non-null pointer indicates
     // that the node is currently in catchup mode.
@@ -1340,7 +1427,7 @@ private:
     // function.
     // This variable must be written immediately after _term, and thus its value can lag.
     // Reading this value does not require the replication coordinator mutex to be locked.
-    AtomicInt64 _termShadow;  // (S)
+    AtomicWord<long long> _termShadow;  // (S)
 
     // When we decide to step down due to hearing about a higher term, we remember the term we heard
     // here so we can update our term to match as part of finishing stepdown.

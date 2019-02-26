@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -66,6 +65,12 @@ public:
     std::vector<FieldPath> collectDocumentKeyFieldsActingAsRouter(
         OperationContext* opCtx, const NamespaceString& nss) const override {
         return {"_id"};
+    }
+
+    void checkRoutingInfoEpochOrThrow(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                      const NamespaceString&,
+                                      ChunkVersion) const override {
+        return;  // Pretend it always matches for our tests here.
     }
 };
 
@@ -359,21 +364,38 @@ TEST_F(DocumentSourceOutTest, FailsToParseIfUniqueKeyHasDuplicateFields) {
     ASSERT_THROWS_CODE(createOutStage(spec), AssertionException, ErrorCodes::BadValue);
 }
 
-TEST_F(DocumentSourceOutTest, FailsToParseIfTargetEpochIsSpecifiedOnMongos) {
+TEST_F(DocumentSourceOutTest, FailsToParseIfTargetCollectionVersionIsSpecifiedOnMongos) {
     BSONObj spec = BSON("$out" << BSON("to"
                                        << "test"
                                        << "mode"
                                        << kDefaultMode
                                        << "uniqueKey"
                                        << BSON("_id" << 1)
-                                       << "epoch"
-                                       << OID::gen()));
+                                       << "targetCollectionVersion"
+                                       << ChunkVersion(0, 0, OID::gen()).toBSON()));
     getExpCtx()->inMongos = true;
     ASSERT_THROWS_CODE(createOutStage(spec), AssertionException, 50984);
 
-    // Test that 'targetEpoch' is accepted if not in mongos.
+    // Test that 'targetCollectionVersion' is accepted if _from_ mongos.
     getExpCtx()->inMongos = false;
+    getExpCtx()->fromMongos = true;
     ASSERT(createOutStage(spec) != nullptr);
+
+    // Test that 'targetCollectionVersion' is not accepted if on mongod but not from mongos.
+    getExpCtx()->inMongos = false;
+    getExpCtx()->fromMongos = false;
+    ASSERT_THROWS_CODE(createOutStage(spec), AssertionException, 51018);
+}
+
+TEST_F(DocumentSourceOutTest, FailsToParseifUniqueKeyIsNotSentFromMongos) {
+    BSONObj spec = BSON("$out" << BSON("to"
+                                       << "test"
+                                       << "mode"
+                                       << kDefaultMode
+                                       << "targetCollectionVersion"
+                                       << ChunkVersion(0, 0, OID::gen()).toBSON()));
+    getExpCtx()->fromMongos = true;
+    ASSERT_THROWS_CODE(createOutStage(spec), AssertionException, 51017);
 }
 
 TEST_F(DocumentSourceOutTest, CorrectlyUsesTargetDbThatMatchesAggregationDb) {

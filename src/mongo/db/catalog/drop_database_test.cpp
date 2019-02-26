@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -33,6 +32,7 @@
 #include <set>
 
 #include "mongo/db/catalog/create_collection.h"
+#include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/drop_database.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
@@ -70,6 +70,7 @@ public:
     repl::OpTime onDropCollection(OperationContext* opCtx,
                                   const NamespaceString& collectionName,
                                   OptionalCollectionUUID uuid,
+                                  std::uint64_t numRecords,
                                   CollectionDropType dropType) override;
 
     std::set<std::string> droppedDatabaseNames;
@@ -89,9 +90,11 @@ void OpObserverMock::onDropDatabase(OperationContext* opCtx, const std::string& 
 repl::OpTime OpObserverMock::onDropCollection(OperationContext* opCtx,
                                               const NamespaceString& collectionName,
                                               OptionalCollectionUUID uuid,
+                                              std::uint64_t numRecords,
                                               const CollectionDropType dropType) {
     ASSERT_TRUE(opCtx->lockState()->inAWriteUnitOfWork());
-    auto opTime = OpObserverNoop::onDropCollection(opCtx, collectionName, uuid, dropType);
+    auto opTime =
+        OpObserverNoop::onDropCollection(opCtx, collectionName, uuid, numRecords, dropType);
     invariant(opTime.isNull());
     // Do not update 'droppedCollectionNames' if OpObserverNoop::onDropCollection() throws.
     droppedCollectionNames.insert(collectionName);
@@ -199,8 +202,10 @@ void _removeDatabaseFromCatalog(OperationContext* opCtx, StringData dbName) {
     auto db = autoDB.getDb();
     // dropDatabase can call awaitReplication more than once, so do not attempt to drop the database
     // twice.
-    if (db)
-        Database::dropDatabase(opCtx, db);
+    if (db) {
+        auto databaseHolder = DatabaseHolder::get(opCtx);
+        databaseHolder->dropDb(opCtx, db);
+    }
 }
 
 TEST_F(DropDatabaseTest, DropDatabaseReturnsNamespaceNotFoundIfDatabaseDoesNotExist) {

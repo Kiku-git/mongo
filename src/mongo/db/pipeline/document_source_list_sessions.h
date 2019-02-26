@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -83,9 +82,7 @@ public:
         return kStageName;
     }
 
-    Value serialize(boost::optional<ExplainOptions::Verbosity> explain = boost::none) const final {
-        return Value(Document{{getSourceName(), _spec.toBSON()}});
-    }
+    Value serialize(boost::optional<ExplainOptions::Verbosity> explain = boost::none) const final;
 
     StageConstraints constraints(Pipeline::SplitState pipeState) const final {
         return {StreamType::kStreaming,
@@ -102,10 +99,12 @@ public:
 private:
     DocumentSourceListSessions(const BSONObj& query,
                                const boost::intrusive_ptr<ExpressionContext>& pExpCtx,
-                               const ListSessionsSpec& spec)
-        : DocumentSourceMatch(query, pExpCtx), _spec(spec) {}
+                               const bool allUsers,
+                               const boost::optional<std::vector<mongo::ListSessionsUser>>& users)
+        : DocumentSourceMatch(query, pExpCtx), _allUsers(allUsers), _users(users) {}
 
-    const ListSessionsSpec _spec;
+    bool _allUsers;
+    boost::optional<std::vector<mongo::ListSessionsUser>> _users;
 };
 
 }  // namespace mongo

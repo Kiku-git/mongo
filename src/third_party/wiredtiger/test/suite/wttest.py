@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Public Domain 2014-2018 MongoDB, Inc.
+# Public Domain 2014-2019 MongoDB, Inc.
 # Public Domain 2008-2014 WiredTiger, Inc.
 #
 # This is free and unencumbered software released into the public domain.
@@ -584,6 +584,15 @@ class WiredTigerTestCase(unittest.TestCase):
         myname = self.simpleName()
         msg = '**** ' + myname + ' HAS A KNOWN LIMITATION: ' + name + ' ****'
         self.printOnce(msg)
+
+    def databaseCorrupted(self, directory = None):
+        """
+        Mark this test as having a corrupted database by creating a
+        DATABASE_CORRUPTED file in the home directory.
+        """
+        if directory == None:
+            directory = self.home
+        open(os.path.join(directory, "DATABASE_CORRUPTED"), "a").close()
 
     @staticmethod
     def printVerbose(level, message):

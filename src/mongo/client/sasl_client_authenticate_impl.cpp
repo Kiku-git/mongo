@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -211,7 +210,7 @@ Future<void> asyncSaslConversation(auth::RunCommandHook runCommand,
             }
 
             // Exit if we have finished
-            if (session->isDone()) {
+            if (session->isSuccess()) {
                 bool isServerDone = serverResponse[saslCommandDoneFieldName].trueValue();
                 if (!isServerDone) {
                     return Status(ErrorCodes::ProtocolError, "Client finished before server.");

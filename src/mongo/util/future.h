@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -61,6 +60,14 @@ class Future;
 template <>
 class Future<void>;
 
+template <typename T>
+class SharedPromise;
+
+template <typename T>
+class SharedSemiFuture;
+template <>
+class SharedSemiFuture<void>;
+
 // Using extern constexpr to prevent the compiler from allocating storage as a poor man's c++17
 // inline constexpr variable.
 // TODO delete extern in c++17 because inline is the default for constexper variables.
@@ -68,6 +75,13 @@ template <typename T>
 extern constexpr bool isFuture = false;
 template <typename T>
 extern constexpr bool isFuture<Future<T>> = true;
+
+template <typename T>
+extern constexpr bool isFutureLike = false;
+template <typename T>
+extern constexpr bool isFutureLike<Future<T>> = true;
+template <typename T>
+extern constexpr bool isFutureLike<SharedSemiFuture<T>> = true;
 
 // This is used to "normalize" void since it can't be used as an argument and it becomes Status
 // rather than StatusWith<void>.
@@ -238,58 +252,6 @@ struct FutureContinuationResultImpl<Status> {
     using type = void;
 };
 
-/**
- * A base class that handles the ref-count for boost::intrusive_ptr compatibility.
- *
- * This is taken from RefCountable which is used for the aggregation types, adding in a way to set
- * the refcount non-atomically during initialization. Also using explicit memory orderings for all
- * operations on the count.
- * TODO look into merging back.
- */
-class FutureRefCountable {
-    MONGO_DISALLOW_COPYING(FutureRefCountable);
-
-public:
-    /**
-     * Sets the refcount to count, assuming it is currently one less. This should only be used
-     * during logical initialization before another thread could possibly have access to this
-     * object.
-     */
-    void threadUnsafeIncRefCountTo(uint32_t count) const {
-        dassert(_count.load(std::memory_order_relaxed) == (count - 1));
-        _count.store(count, std::memory_order_relaxed);
-    }
-
-    friend void intrusive_ptr_add_ref(const FutureRefCountable* ptr) {
-        // See this for a description of why relaxed is OK here. It is also used in libc++.
-        // http://www.boost.org/doc/libs/1_66_0/doc/html/atomic/usage_examples.html#boost_atomic.usage_examples.example_reference_counters.discussion
-        ptr->_count.fetch_add(1, std::memory_order_relaxed);
-    };
-
-    friend void intrusive_ptr_release(const FutureRefCountable* ptr) {
-        if (ptr->_count.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-            delete ptr;
-        }
-    };
-
-protected:
-    FutureRefCountable() = default;
-    virtual ~FutureRefCountable() = default;
-
-private:
-    mutable std::atomic<uint32_t> _count{0};  // NOLINT
-};
-
-template <typename T,
-          typename... Args,
-          typename = std::enable_if_t<std::is_base_of<FutureRefCountable, T>::value>>
-boost::intrusive_ptr<T> make_intrusive(Args&&... args) {
-    auto ptr = new T(std::forward<Args>(args)...);
-    ptr->threadUnsafeIncRefCountTo(1);
-    return boost::intrusive_ptr<T>(ptr, /*add ref*/ false);
-}
-
-
 template <typename T>
 struct SharedStateImpl;
 
@@ -335,7 +297,7 @@ enum class SSBState : uint8_t {
     kFinished,
 };
 
-class SharedStateBase : public FutureRefCountable {
+class SharedStateBase : public RefCountable {
 public:
     SharedStateBase(const SharedStateBase&) = delete;
     SharedStateBase(SharedStateBase&&) = delete;
@@ -504,17 +466,16 @@ struct SharedStateImpl final : SharedStateBase {
 // public API.
 using future_details::Promise;
 using future_details::Future;
+using future_details::SharedPromise;
+using future_details::SharedSemiFuture;
 
 /**
  * This class represents the producer side of a Future.
  *
- * This is a single-shot class. You may only extract the Future once, and you may either set a value
- * or error at most once. Extracting the future and setting the value/error can be done in either
- * order.
- *
- * If the Future has been extracted, but no value or error has been set at the time this Promise is
- * destroyed, a error will be set with ErrorCode::BrokenPromise. This should generally be considered
- * a programmer error, and should not be relied upon. We may make it debug-fatal in the future.
+ * This is a single-shot class: you may either set a value or error at most once. If no value or
+ * error has been set at the time this Promise is destroyed, a error will be set with
+ * ErrorCode::BrokenPromise. This should generally be considered a programmer error, and should not
+ * be relied upon. We may make it debug-fatal in the future.
  *
  * Only one thread can use a given Promise at a time, but another thread may be using the associated
  * Future object.
@@ -658,7 +619,8 @@ public:
     static_assert(!std::is_same<T, Status>::value,
                   "Future<Status> is banned. Use Future<void> instead.");
     static_assert(!isStatusWith<T>, "Future<StatusWith<T>> is banned. Just use Future<T> instead.");
-    static_assert(!isFuture<T>, "Future<Future<T>> is banned. Just use Future<T> instead.");
+    static_assert(!isFutureLike<T>,
+                  "Future of Future types is banned. Just use Future<T> instead.");
     static_assert(!std::is_reference<T>::value, "Future<T&> is banned.");
     static_assert(!std::is_const<T>::value, "Future<const T> is banned.");
     static_assert(!std::is_array<T>::value, "Future<T[]> is banned.");
@@ -709,6 +671,11 @@ public:
             return makeReady(std::move(val.getValue()));
         return makeReady(val.getStatus());
     }
+
+    /**
+     * Convert this Future to a SharedSemiFuture.
+     */
+    SharedSemiFuture<T> share() && noexcept;
 
     /**
      * If this returns true, get() is guaranteed not to block and callbacks will be immediately
@@ -929,11 +896,109 @@ public:
     }
 
     /**
+     * Callbacks passed to onCompletion() are called if the input Future completes with or without
+     * an error.
+     *
+     * The callback can either produce a replacement value (which must be a T), return a replacement
+     * Future<T> (such as by retrying), or return/throw a replacement error.
+     */
+    template <
+        // T -> Result, T -> StatusWith<Result>, Status -> Result or Status -> StatusWith<Result>
+        typename Func,
+        typename Result = NormalizedCallResult<Func, Status>,
+        typename = std::enable_if_t<!isFuture<Result>>>
+        Future<Result> onCompletion(Func&& func) && noexcept {
+        static_assert(std::is_same<Result, NormalizedCallResult<Func, T>>::value,
+                      "func passed to Future<T>::onCompletion must return the same type for "
+                      "arguments of Status and T");
+
+        return generalImpl(
+            // on ready success:
+            [&](T&& val) {
+                return Future<Result>::makeReady(
+                    statusCall(std::forward<Func>(func), std::move(val)));
+            },
+            // on ready failure:
+            [&](Status&& status) {
+                return Future<Result>::makeReady(
+                    statusCall(std::forward<Func>(func), std::move(status)));
+            },
+            // on not ready yet:
+            [&] {
+                return makeContinuation<Result>([func = std::forward<Func>(func)](
+                    SharedState<T> * input, SharedState<Result> * output) mutable noexcept {
+                    if (!input->status.isOK())
+                        return output->setFromStatusWith(
+                            statusCall(func, std::move(input->status)));
+
+                    output->setFromStatusWith(statusCall(func, std::move(*input->data)));
+                });
+            });
+    }
+
+    /**
+     * Same as above onCompletion() but for the case where func returns a Future that needs to be
+     * unwrapped.
+     */
+    template <typename Func,  // T -> Future<UnwrappedResult> or Status -> Future<UnwrappedResult>
+              typename RawResult = NormalizedCallResult<Func, Status>,
+              typename = std::enable_if_t<isFuture<RawResult>>,
+              typename UnwrappedResult = typename RawResult::value_type>
+        Future<UnwrappedResult> onCompletion(Func&& func) && noexcept {
+        static_assert(std::is_same<UnwrappedResult,
+                                   typename NormalizedCallResult<Func, T>::value_type>::value,
+                      "func passed to Future<T>::onCompletion must return the same type for "
+                      "arguments of Status and T");
+
+        return generalImpl(
+            // on ready success:
+            [&](T&& val) {
+                try {
+                    return Future<UnwrappedResult>(
+                        throwingCall(std::forward<Func>(func), std::move(val)));
+                } catch (const DBException& ex) {
+                    return Future<UnwrappedResult>::makeReady(ex.toStatus());
+                }
+            },
+            // on ready failure:
+            [&](Status&& status) {
+                try {
+                    return Future<UnwrappedResult>(
+                        throwingCall(std::forward<Func>(func), std::move(status)));
+                } catch (const DBException& ex) {
+                    return Future<UnwrappedResult>::makeReady(ex.toStatus());
+                }
+            },
+            // on not ready yet:
+            [&] {
+                return makeContinuation<UnwrappedResult>([func = std::forward<Func>(func)](
+                    SharedState<T> * input,
+                    SharedState<UnwrappedResult> * output) mutable noexcept {
+                    if (!input->status.isOK()) {
+                        try {
+                            throwingCall(func, std::move(input->status)).propagateResultTo(output);
+                        } catch (const DBException& ex) {
+                            output->setError(ex.toStatus());
+                        }
+
+                        return;
+                    }
+
+                    try {
+                        throwingCall(func, std::move(*input->data)).propagateResultTo(output);
+                    } catch (const DBException& ex) {
+                        output->setError(ex.toStatus());
+                    }
+                });
+            });
+    }
+
+    /**
      * Callbacks passed to onError() are only called if the input Future completes with an error.
      * Otherwise, the successful result propagates automatically, bypassing the callback.
      *
      * The callback can either produce a replacement value (which must be a T), return a replacement
-     * Future<T> (such as a by retrying), or return/throw a replacement error.
+     * Future<T> (such as by retrying), or return/throw a replacement error.
      *
      * Note that this will only catch errors produced by earlier stages; it is not registering a
      * general error handler for the entire chain.
@@ -1025,6 +1090,29 @@ public:
         return std::move(*this).onError([func =
                                              std::forward<Func>(func)](Status && status) mutable {
             if (status != code)
+                uassertStatusOK(status);
+            return throwingCall(func, std::move(status));
+        });
+    }
+
+    /**
+     * Similar to the first two onErrors, but only calls the callback if the category matches
+     * the template parameter. Otherwise lets the error propagate unchanged.
+     */
+    template <ErrorCategory category, typename Func>
+        Future<T> onErrorCategory(Func&& func) && noexcept {
+        using Result = RawNormalizedCallResult<Func, Status>;
+        static_assert(
+            std::is_same<Result, T>::value || std::is_same<Result, Future<T>>::value ||
+                (std::is_same<T, FakeVoid>::value && std::is_same<Result, Future<void>>::value),
+            "func passed to Future<T>::onErrorCategory must return T, StatusWith<T>, or Future<T>");
+
+        if (_immediate || (isReady() && _shared->status.isOK()))
+            return std::move(*this);
+
+        return std::move(*this).onError([func =
+                                             std::forward<Func>(func)](Status && status) mutable {
+            if (!ErrorCodes::isA<category>(status.code()))
                 uassertStatusOK(status);
             return throwingCall(func, std::move(status));
         });
@@ -1267,6 +1355,8 @@ public:
         return Future<FakeVoid>::makeReady(std::move(status));
     }
 
+    SharedSemiFuture<void> share() && noexcept;
+
     bool isReady() const {
         return _inner.isReady();
     }
@@ -1297,6 +1387,11 @@ public:
     template <typename Func>  // () -> T or StatusWith<T> or Future<T>
         auto then(Func&& func) && noexcept {
         return std::move(_inner).then(std::forward<Func>(func));
+    }
+
+    template <typename Func>  // Status -> T or StatusWith<T> or Future<T>
+        auto onCompletion(Func&& func) && noexcept {
+        return std::move(_inner).onCompletion(std::forward<Func>(func));
     }
 
     template <typename Func>  // Status -> T or StatusWith<T> or Future<T>
@@ -1351,6 +1446,228 @@ private:
 };
 
 /**
+ * SharedSemiFuture<T> is logically a possibly-deferred StatusWith<T> (or Status when T is void).
+ *
+ * All methods that are present do the same as on a Future<T> so see it for documentation.
+ *
+ * Unlike Future<T> it only supports blocking operation, not chained continuations. This is intended
+ * to protect the promise-completer's execution context from needing to perform arbitrary
+ * operations requested by other subsystem's continuations.
+ * TODO Support continuation chaining when supplied with an executor to run them on.
+ *
+ * A SharedSemiFuture may be passed between threads, but only one thread may use it at a time.
+ */
+template <typename T>
+class MONGO_WARN_UNUSED_RESULT_CLASS future_details::SharedSemiFuture {
+public:
+    static_assert(!std::is_same<T, Status>::value,
+                  "SharedSemiFuture<Status> is banned. Use SharedSemiFuture<void> instead.");
+    static_assert(
+        !isStatusWith<T>,
+        "SharedSemiFuture<StatusWith<T>> is banned. Just use SharedSemiFuture<T> instead.");
+    static_assert(
+        !isFutureLike<T>,
+        "SharedSemiFuture of Future types is banned. Just use SharedSemiFuture<T> instead.");
+    static_assert(!std::is_reference<T>::value, "SharedSemiFuture<T&> is banned.");
+    static_assert(!std::is_const<T>::value, "SharedSemiFuture<const T> is banned.");
+    static_assert(!std::is_array<T>::value, "SharedSemiFuture<T[]> is banned.");
+
+    using value_type = T;
+
+    SharedSemiFuture() = default;
+
+    /*implicit*/ SharedSemiFuture(const Future<T>& fut) = delete;
+    /*implicit*/ SharedSemiFuture(Future<T>&& fut) : SharedSemiFuture(std::move(fut).share()) {}
+    /*implicit*/ SharedSemiFuture(T val) : SharedSemiFuture(Future<T>(std::move(val))) {}
+    /*implicit*/ SharedSemiFuture(Status error) : SharedSemiFuture(Future<T>(std::move(error))) {}
+    /*implicit*/ SharedSemiFuture(StatusWith<T> sw) : SharedSemiFuture(Future<T>(std::move(sw))) {}
+
+    bool isReady() const {
+        return _shared->state.load(std::memory_order_acquire) == SSBState::kFinished;
+    }
+
+    void wait(Interruptible* interruptible = Interruptible::notInterruptible()) const {
+        _shared->wait(interruptible);
+    }
+
+    Status waitNoThrow(Interruptible* interruptible = Interruptible::notInterruptible()) const
+        noexcept {
+        try {
+            _shared->wait(interruptible);
+        } catch (const DBException& ex) {
+            return ex.toStatus();
+        }
+
+        return Status::OK();
+    }
+
+    const T& get(Interruptible* interruptible = Interruptible::notInterruptible()) const& {
+        _shared->wait(interruptible);
+        uassertStatusOK(_shared->status);
+        return *(_shared->data);
+    }
+
+    StatusWith<T> getNoThrow(
+        Interruptible* interruptible = Interruptible::notInterruptible()) const& noexcept {
+        try {
+            _shared->wait(interruptible);
+        } catch (const DBException& ex) {
+            return ex.toStatus();
+        }
+
+        if (!_shared->status.isOK())
+            return _shared->status;
+        return *_shared->data;
+    }
+
+private:
+    template <typename T2>
+    friend class SharedPromise;
+    template <typename T2>
+    friend class Future;
+    friend class SharedSemiFuture<void>;
+
+    explicit SharedSemiFuture(boost::intrusive_ptr<SharedState<T>> ptr) : _shared(std::move(ptr)) {}
+
+    boost::intrusive_ptr<SharedState<T>> _shared;
+};
+
+template <>
+class MONGO_WARN_UNUSED_RESULT_CLASS future_details::SharedSemiFuture<void> {
+public:
+    using value_type = void;
+
+    SharedSemiFuture() = default;
+
+    /*implicit*/ SharedSemiFuture(const Future<void>& fut) = delete;
+    /*implicit*/ SharedSemiFuture(Future<void>&& fut) : SharedSemiFuture(std::move(fut).share()) {}
+    /*implicit*/ SharedSemiFuture(Status err) : SharedSemiFuture(Future<void>(std::move(err))) {}
+
+    bool isReady() const {
+        return _inner.isReady();
+    }
+
+    void wait(Interruptible* interruptible = Interruptible::notInterruptible()) const {
+        _inner.wait(interruptible);
+    }
+
+    Status waitNoThrow(Interruptible* interruptible = Interruptible::notInterruptible()) const
+        noexcept {
+        return _inner.waitNoThrow(interruptible);
+    }
+
+    void get(Interruptible* interruptible = Interruptible::notInterruptible()) const {
+        _inner.get(interruptible);
+    }
+
+    Status getNoThrow(Interruptible* interruptible = Interruptible::notInterruptible()) const
+        noexcept {
+        return _inner.getNoThrow(interruptible).getStatus();
+    }
+
+private:
+    friend class SharedPromise<void>;
+    friend class Future<void>;
+
+    explicit SharedSemiFuture(boost::intrusive_ptr<SharedState<FakeVoid>> ptr)
+        : _inner(std::move(ptr)) {}
+
+    /*implicit*/ SharedSemiFuture(SharedSemiFuture<FakeVoid>&& inner) : _inner(std::move(inner)) {}
+    /*implicit*/ operator SharedSemiFuture<FakeVoid>() && {
+        return std::move(_inner);
+    }
+
+    SharedSemiFuture<FakeVoid> _inner;
+};
+
+/**
+ * This class represents the producer of SharedSemiFutures.
+ *
+ * This is a single-shot class: you may either set a value or error at most once. However you may
+ * extract as many futures as you want and they will all be completed at the same time. Any number
+ * of threads can extract a future at the same time. It is also safe to extract a future
+ * concurrently with completing the promise. If you extract a future after the promise has been
+ * completed, a ready future will be returned. You must still ensure that all calls to getFuture()
+ * complete prior to destroying the Promise.
+ *
+ * If no value or error has been set at the time this Promise is destroyed, an error will be set
+ * with ErrorCode::BrokenPromise. This should generally be considered a programmer error, and should
+ * not be relied upon. We may make it debug-fatal in the future.
+ *
+ * Unless otherwise specified, all methods behave the same as on Promise<T>.
+ */
+template <typename T>
+class future_details::SharedPromise {
+public:
+    using value_type = T;
+
+    /**
+     * Creates a `SharedPromise` ready for use.
+     */
+    SharedPromise() = default;
+
+    ~SharedPromise() {
+        if (MONGO_unlikely(!haveCompleted())) {
+            _sharedState->setError({ErrorCodes::BrokenPromise, "broken promise"});
+        }
+    }
+
+    SharedPromise(const SharedPromise&) = delete;
+    SharedPromise(SharedPromise&&) = delete;
+    SharedPromise& operator=(const SharedPromise&) = delete;
+    SharedPromise& operator=(SharedPromise&& p) noexcept = delete;
+
+    /**
+     * Returns a future associated with this promise. All returned futures will be completed when
+     * the promise is completed.
+     */
+    SharedSemiFuture<T> getFuture() const {
+        return SharedSemiFuture<T>(_sharedState);
+    }
+
+    template <typename Func>
+    void setWith(Func&& func) noexcept {
+        invariant(!haveCompleted());
+        setFrom(Future<void>::makeReady().then(std::forward<Func>(func)));
+    }
+
+    void setFrom(Future<T>&& future) noexcept {
+        invariant(!haveCompleted());
+        std::move(future).propagateResultTo(_sharedState.get());
+    }
+
+    template <typename... Args>
+    void emplaceValue(Args&&... args) noexcept {
+        invariant(!haveCompleted());
+        _sharedState->emplaceValue(std::forward<Args>(args)...);
+    }
+
+    void setError(Status status) noexcept {
+        invariant(!status.isOK());
+        invariant(!haveCompleted());
+        _sharedState->setError(std::move(status));
+    }
+
+    // TODO rename to not XXXWith and handle void
+    void setFromStatusWith(StatusWith<T> sw) noexcept {
+        invariant(!haveCompleted());
+        _sharedState->setFromStatusWith(std::move(sw));
+    }
+
+private:
+    friend class Future<void>;
+
+    bool haveCompleted() const noexcept {
+        // This can be relaxed because it is only called from the Promise thread which is also the
+        // only thread that will transition this from returning false to true. Additionally it isn't
+        // used to establish synchronization with any other thread.
+        return _sharedState->state.load(std::memory_order_relaxed) == SSBState::kFinished;
+    }
+
+    const boost::intrusive_ptr<SharedState<T>> _sharedState = make_intrusive<SharedState<T>>();
+};
+
+/**
  * Makes a ready Future with the return value of a nullary function. This has the same semantics as
  * Promise::setWith, and has the same reasons to prefer it over Future<T>::makeReady(). Also, it
  * deduces the T, so it is easier to use.
@@ -1392,8 +1709,8 @@ inline auto makePromiseFuture() {
  * FutureContinuationResult<std::function<int(bool)>, NotBool> SFINAE-safe substitution failure.
  */
 template <typename Func, typename... Args>
-using FutureContinuationResult =
-    typename future_details::FutureContinuationResultImpl<std::result_of_t<Func(Args&&...)>>::type;
+using FutureContinuationResult = typename future_details::FutureContinuationResultImpl<
+    std::invoke_result_t<Func, Args&&...>>::type;
 
 //
 // Implementations of methods that couldn't be defined in the class due to ordering requirements.
@@ -1401,12 +1718,14 @@ using FutureContinuationResult =
 
 template <typename T>
 inline Future<T> Promise<T>::getFuture() noexcept {
+    using namespace future_details;
     _sharedState->threadUnsafeIncRefCountTo(2);
     return Future<T>(boost::intrusive_ptr<SharedState<T>>(_sharedState.get(), /*add ref*/ false));
 }
 
 template <typename T>
 inline void Promise<T>::setFrom(Future<T>&& future) noexcept {
+    using namespace future_details;
     setImpl([&](boost::intrusive_ptr<SharedState<T>>&& sharedState) {
         future.propagateResultTo(sharedState.get());
     });
@@ -1419,8 +1738,23 @@ inline void Promise<T>::setWith(Func&& func) noexcept {
 }
 
 template <typename T>
-    Future<void> Future<T>::ignoreValue() && noexcept {
+    inline Future<void> Future<T>::ignoreValue() && noexcept {
     return std::move(*this).then([](auto&&) {});
+}
+
+template <typename T>
+    inline SharedSemiFuture<T> Future<T>::share() && noexcept {
+    using namespace future_details;
+    if (!_immediate)
+        return SharedSemiFuture<T>(std::move(_shared));
+
+    auto shared = make_intrusive<SharedState<T>>();
+    shared->emplaceValue(std::move(*_immediate));
+    return SharedSemiFuture<T>(std::move(shared));
+}
+
+inline SharedSemiFuture<void> Future<void>::share() && noexcept {
+    return std::move(_inner).share();
 }
 
 }  // namespace mongo

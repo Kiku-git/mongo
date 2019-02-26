@@ -26,7 +26,8 @@ env.Library(
         'write_conflict_exception.cpp'
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/db/server_parameters'
+        '$BUILD_DIR/mongo/db/server_parameters',
+        '$BUILD_DIR/mongo/util/log_and_backoff',
     ],
 )
 
@@ -38,6 +39,7 @@ env.Library(
         'lock_manager.cpp',
         'lock_state.cpp',
         'lock_stats.cpp',
+        'replication_state_transition_lock_guard.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',

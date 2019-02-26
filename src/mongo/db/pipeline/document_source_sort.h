@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -34,12 +33,12 @@
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_limit.h"
 #include "mongo/db/pipeline/expression.h"
-#include "mongo/db/query/query_knobs.h"
+#include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/sorter/sorter.h"
 
 namespace mongo {
 
-class DocumentSourceSort final : public DocumentSource, public NeedsMergerDocumentSource {
+class DocumentSourceSort final : public DocumentSource {
 public:
     static constexpr StringData kStageName = "$sort"_sd;
     enum class SortKeySerialization {
@@ -83,8 +82,7 @@ public:
 
     DepsTracker::State getDependencies(DepsTracker* deps) const final;
 
-    boost::intrusive_ptr<DocumentSource> getShardSource() final;
-    MergingLogic mergingLogic() final;
+    boost::optional<MergingLogic> mergingLogic() final;
     bool canRunInParallelBeforeOut(
         const std::set<std::string>& nameOfShardKeyFieldsUponEntryToStage) const final;
 

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -207,8 +206,8 @@ void DocumentSourceGraphLookUp::doBreadthFirstSearch() {
 
             // We've already allocated space for the trailing $match stage in '_fromPipeline'.
             _fromPipeline.back() = *matchStage;
-            auto pipeline = uassertStatusOK(
-                pExpCtx->mongoProcessInterface->makePipeline(_fromPipeline, _fromExpCtx));
+            auto pipeline =
+                pExpCtx->mongoProcessInterface->makePipeline(_fromPipeline, _fromExpCtx);
             while (auto next = pipeline->getNext()) {
                 uassert(40271,
                         str::stream()
@@ -289,7 +288,7 @@ boost::optional<BSONObj> DocumentSourceGraphLookUp::makeMatchStageFromFrontier(
         if (auto entry = _cache[*it]) {
             cached->insert(entry->begin(), entry->end());
             size_t valueSize = it->getApproximateSize();
-            it = _frontier.erase(it);
+            _frontier.erase(it++);
 
             // If the cached value increased in size while in the cache, we don't want to underflow
             // '_frontierUsageBytes'.
@@ -477,7 +476,7 @@ DocumentSourceGraphLookUp::DocumentSourceGraphLookUp(
     // We append an additional BSONObj to '_fromPipeline' as a placeholder for the $match stage
     // we'll eventually construct from the input document.
     _fromPipeline.reserve(_fromPipeline.size() + 1);
-    _fromPipeline.push_back(BSONObj());
+    _fromPipeline.push_back(BSON("$match" << BSONObj()));
 }
 
 intrusive_ptr<DocumentSourceGraphLookUp> DocumentSourceGraphLookUp::create(
@@ -602,5 +601,14 @@ intrusive_ptr<DocumentSource> DocumentSourceGraphLookUp::createFromBson(
                                       boost::none));
 
     return std::move(newSource);
+}
+
+void DocumentSourceGraphLookUp::addInvolvedCollections(
+    stdx::unordered_set<NamespaceString>* collectionNames) const {
+    collectionNames->insert(_fromExpCtx->ns);
+    auto introspectionPipeline = uassertStatusOK(Pipeline::parse(_fromPipeline, _fromExpCtx));
+    for (auto&& stage : introspectionPipeline->getSources()) {
+        stage->addInvolvedCollections(collectionNames);
+    }
 }
 }  // namespace mongo

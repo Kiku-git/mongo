@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -29,7 +28,7 @@
  */
 
 /**
- * This file tests db/exec/update.cpp (UpdateStage).
+ * This file tests the UpdateStage class
  */
 
 #include "mongo/platform/basic.h"
@@ -43,7 +42,7 @@
 #include "mongo/db/exec/collection_scan.h"
 #include "mongo/db/exec/eof.h"
 #include "mongo/db/exec/queued_data_stage.h"
-#include "mongo/db/exec/update.h"
+#include "mongo/db/exec/update_stage.h"
 #include "mongo/db/exec/working_set.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/json.h"

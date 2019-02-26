@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -42,7 +41,7 @@ namespace mozjs {
  */
 struct NumberIntInfo : public BaseInfo {
     static void construct(JSContext* cx, JS::CallArgs args);
-    static void finalize(JSFreeOp* fop, JSObject* obj);
+    static void finalize(js::FreeOp* fop, JSObject* obj);
 
     struct Functions {
         MONGO_DECLARE_JS_FUNCTION(toNumber);

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -49,10 +48,9 @@ public:
 
     StatusWith<CallbackHandle> scheduleWork(CallbackFn work) override;
     StatusWith<CallbackHandle> scheduleWorkAt(Date_t when, CallbackFn work) override;
-    StatusWith<CallbackHandle> scheduleRemoteCommand(
-        const executor::RemoteCommandRequest& request,
-        const RemoteCommandCallbackFn& cb,
-        const transport::BatonHandle& baton = nullptr) override;
+    StatusWith<CallbackHandle> scheduleRemoteCommand(const executor::RemoteCommandRequest& request,
+                                                     const RemoteCommandCallbackFn& cb,
+                                                     const BatonHandle& baton = nullptr) override;
 
     // Override to make scheduleWork() fail during testing.
     ShouldFailScheduleWorkRequestFn shouldFailScheduleWorkRequest = []() { return false; };

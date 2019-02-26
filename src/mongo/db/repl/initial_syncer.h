@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -144,14 +143,14 @@ class InitialSyncer {
 
 public:
     /**
-     * Callback function to report last applied optime (with hash) of initial sync.
+     * Callback function to report last applied optime of initial sync.
      */
-    typedef stdx::function<void(const StatusWith<OpTimeWithHash>& lastApplied)> OnCompletionFn;
+    typedef stdx::function<void(const StatusWith<OpTime>& lastApplied)> OnCompletionFn;
 
     /**
      * Callback completion guard for initial syncer.
      */
-    using OnCompletionGuard = CallbackCompletionGuard<StatusWith<OpTimeWithHash>>;
+    using OnCompletionGuard = CallbackCompletionGuard<StatusWith<OpTime>>;
 
     using StartCollectionClonerFn = DatabaseCloner::StartCollectionClonerFn;
 
@@ -296,7 +295,11 @@ private:
      *         |
      *         |
      *         V
-     *    _lastOplogEntryFetcherCallbackForBeginTimestamp()
+     *   _getBeginFetchingTimestampCallback()
+     *         |
+     *         |
+     *         V
+     *    _lastOplogEntryFetcherCallbackForBeginApplyingTimestamp()
      *         |
      *         |
      *         V
@@ -360,7 +363,7 @@ private:
     /**
      * Tears down internal state before reporting final status to caller.
      */
-    void _tearDown_inlock(OperationContext* opCtx, const StatusWith<OpTimeWithHash>& lastApplied);
+    void _tearDown_inlock(OperationContext* opCtx, const StatusWith<OpTime>& lastApplied);
 
     /**
      * Callback to start a single initial sync attempt.
@@ -399,10 +402,27 @@ private:
      * setting a reference point for the state of the sync source's oplog when data cloning
      * completes.
      */
-    void _lastOplogEntryFetcherCallbackForBeginTimestamp(
+    void _lastOplogEntryFetcherCallbackForBeginApplyingTimestamp(
         const StatusWith<Fetcher::QueryResponse>& result,
-        std::shared_ptr<OnCompletionGuard> onCompletionGuard);
+        std::shared_ptr<OnCompletionGuard> onCompletionGuard,
+        OpTime& beginFetchingOpTime);
 
+    /**
+     * Callback that gets the oldestActiveOplogEntryOptime from the transactions field in the
+     * serverStatus response, which refers to the optime of the oldest active transaction with an
+     * oplog entry. It will be used as the beginFetchingTimestamp.
+     */
+    void _getBeginFetchingOpTimeCallback(const executor::TaskExecutor::ResponseStatus& response,
+                                         std::shared_ptr<OnCompletionGuard> onCompletionGuard);
+
+    /**
+     * Schedules a remote command to call serverStatus on the sync source. From the response, we
+     * will be able to get the oldestActiveOplogEntryOptime from the transactions field, which
+     * refers to the optime of the oldest active transaction with an oplog entry. It will be used as
+     * the beginFetchingTimestamp.
+     */
+    Status _scheduleGetBeginFetchingOpTime_inlock(
+        std::shared_ptr<OnCompletionGuard> onCompletionGuard);
 
     /**
      * Callback for the '_fCVFetcher'. A successful response lets us check if the remote node
@@ -410,7 +430,8 @@ private:
      */
     void _fcvFetcherCallback(const StatusWith<Fetcher::QueryResponse>& result,
                              std::shared_ptr<OnCompletionGuard> onCompletionGuard,
-                             const OpTimeWithHash& lastOpTimeWithHash);
+                             const OpTime& lastOpTime,
+                             OpTime& beginFetchingOpTime);
 
     /**
      * Callback for oplog fetcher.
@@ -443,7 +464,7 @@ private:
      * Callback for MultiApplier completion.
      */
     void _multiApplierCallback(const Status& status,
-                               OpTimeWithHash lastApplied,
+                               OpTime lastApplied,
                                std::uint32_t numApplied,
                                std::shared_ptr<OnCompletionGuard> onCompletionGuard);
 
@@ -469,12 +490,12 @@ private:
      * Reports result of current initial sync attempt. May schedule another initial sync attempt
      * depending on shutdown state and whether we've exhausted all initial sync retries.
      */
-    void _finishInitialSyncAttempt(const StatusWith<OpTimeWithHash>& lastApplied);
+    void _finishInitialSyncAttempt(const StatusWith<OpTime>& lastApplied);
 
     /**
      * Invokes completion callback and transitions state to State::kComplete.
      */
-    void _finishCallback(StatusWith<OpTimeWithHash> lastApplied);
+    void _finishCallback(StatusWith<OpTime> lastApplied);
 
     // Obtains a valid sync source from the sync source selector.
     // Returns error if a sync source cannot be found.
@@ -568,7 +589,7 @@ private:
     void _shutdownComponent_inlock(Component& component);
 
     // Counts how many documents have been refetched from the source in the current batch.
-    AtomicUInt32 _fetchCount;
+    AtomicWord<unsigned> _fetchCount;
 
     //
     // All member variables are labeled with one of the following codes indicating the
@@ -590,8 +611,8 @@ private:
     ReplicationProcess* _replicationProcess;                                    // (S)
 
     // This is invoked with the final status of the initial sync. If startup() fails, this callback
-    // is never invoked. The caller gets the last applied optime with hash when the initial sync
-    // completes successfully or an error status.
+    // is never invoked. The caller gets the last applied optime when the initial sync completes
+    // successfully or an error status.
     // '_onCompletion' is cleared on completion (in _finishCallback()) in order to release any
     // resources that might be held by the callback function object.
     OnCompletionFn _onCompletion;  // (M)
@@ -620,8 +641,8 @@ private:
     std::unique_ptr<Fetcher> _fCVFetcher;                 // (S)
     std::unique_ptr<MultiApplier> _applier;               // (M)
     HostAndPort _syncSource;                              // (M)
-    OpTimeWithHash _lastFetched;                          // (MX)
-    OpTimeWithHash _lastApplied;                          // (MX)
+    OpTime _lastFetched;                                  // (MX)
+    OpTime _lastApplied;                                  // (MX)
     std::unique_ptr<OplogBuffer> _oplogBuffer;            // (M)
     std::unique_ptr<OplogApplier::Observer> _observer;    // (S)
     std::unique_ptr<OplogApplier> _oplogApplier;          // (M)

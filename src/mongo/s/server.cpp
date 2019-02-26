@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -51,6 +50,7 @@
 #include "mongo/db/client.h"
 #include "mongo/db/ftdc/ftdc_mongos.h"
 #include "mongo/db/initialize_server_global_state.h"
+#include "mongo/db/initialize_server_security_state.h"
 #include "mongo/db/kill_sessions.h"
 #include "mongo/db/lasterror.h"
 #include "mongo/db/log_process_details.h"
@@ -600,6 +600,9 @@ ExitCode mongoSMain(int argc, char* argv[], char** envp) {
     try {
         if (!initializeServerGlobalState(service))
             return EXIT_ABRUPT;
+
+        if (!initializeServerSecurityGlobalState(service))
+            quickExit(EXIT_FAILURE);
 
         startSignalProcessingThread();
 

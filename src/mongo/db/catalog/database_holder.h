@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -33,54 +32,38 @@
 #include <set>
 #include <string>
 
-#include "mongo/base/shim.h"
 #include "mongo/base/string_data.h"
-#include "mongo/db/namespace_string.h"
-#include "mongo/stdx/functional.h"
-#include "mongo/stdx/mutex.h"
-#include "mongo/util/concurrency/mutex.h"
-#include "mongo/util/string_map.h"
+#include "mongo/db/catalog/collection.h"
+#include "mongo/db/catalog/collection_options.h"
 
 namespace mongo {
+
+class CollectionCatalogEntry;
 class Database;
+class DatabaseCatalogEntry;
 class OperationContext;
+class RecordStore;
 
 /**
  * Registry of opened databases.
  */
 class DatabaseHolder {
 public:
-    class Impl {
-    public:
-        virtual ~Impl() = 0;
+    // Operation Context binding.
+    static DatabaseHolder* get(ServiceContext* service);
+    static DatabaseHolder* get(ServiceContext& service);
+    static DatabaseHolder* get(OperationContext* opCtx);
+    static void set(ServiceContext* service, std::unique_ptr<DatabaseHolder> databaseHolder);
 
-        virtual Database* get(OperationContext* opCtx, StringData ns) const = 0;
+    virtual ~DatabaseHolder() = default;
 
-        virtual Database* openDb(OperationContext* opCtx, StringData ns, bool* justCreated) = 0;
-
-        virtual void close(OperationContext* opCtx, StringData ns, const std::string& reason) = 0;
-
-        virtual void closeAll(OperationContext* opCtx, const std::string& reason) = 0;
-
-        virtual std::set<std::string> getNamesWithConflictingCasing(StringData name) = 0;
-    };
-
-public:
-    static MONGO_DECLARE_SHIM(()->DatabaseHolder&) getDatabaseHolder;
-
-    static MONGO_DECLARE_SHIM((PrivateTo<DatabaseHolder>)->std::unique_ptr<Impl>) makeImpl;
-
-    inline ~DatabaseHolder() = default;
-
-    inline explicit DatabaseHolder() : _pimpl(makeImpl(PrivateCall<DatabaseHolder>{})) {}
+    DatabaseHolder() = default;
 
     /**
-     * Retrieves an already opened database or returns NULL. Must be called with the database
+     * Retrieves an already opened database or returns nullptr. Must be called with the database
      * locked in at least IS-mode.
      */
-    inline Database* get(OperationContext* const opCtx, const StringData ns) const {
-        return this->_impl().get(opCtx, ns);
-    }
+    virtual Database* getDb(OperationContext* const opCtx, const StringData ns) const = 0;
 
     /**
      * Retrieves a database reference if it is already opened, or opens it if it hasn't been
@@ -89,62 +72,47 @@ public:
      * @param justCreated Returns whether the database was newly created (true) or it already
      *          existed (false). Can be NULL if this information is not necessary.
      */
-    inline Database* openDb(OperationContext* const opCtx,
-                            const StringData ns,
-                            bool* const justCreated = nullptr) {
-        return this->_impl().openDb(opCtx, ns, justCreated);
-    }
+    virtual Database* openDb(OperationContext* const opCtx,
+                             const StringData ns,
+                             bool* const justCreated = nullptr) = 0;
+
+    /**
+     * Physically drops the specified opened database and removes it from the server's metadata. It
+     * doesn't notify the replication subsystem or do any other consistency checks, so it should
+     * not be used directly from user commands.
+     *
+     * Must be called with the specified database locked in X mode.
+     */
+    virtual void dropDb(OperationContext* opCtx, Database* db) = 0;
 
     /**
      * Closes the specified database. Must be called with the database locked in X-mode.
      * No background jobs must be in progress on the database when this function is called.
      */
-    inline void close(OperationContext* const opCtx,
-                      const StringData ns,
-                      const std::string& reason) {
-        return this->_impl().close(opCtx, ns, reason);
-    }
+    virtual void close(OperationContext* opCtx, const StringData ns) = 0;
 
     /**
      * Closes all opened databases. Must be called with the global lock acquired in X-mode.
      * Will uassert if any background jobs are running when this function is called.
-     *
-     * @param reason The reason for close.
      */
-    inline void closeAll(OperationContext* const opCtx, const std::string& reason) {
-        this->_impl().closeAll(opCtx, reason);
-    }
+    virtual void closeAll(OperationContext* opCtx) = 0;
 
     /**
      * Returns the set of existing database names that differ only in casing.
      */
-    inline std::set<std::string> getNamesWithConflictingCasing(const StringData name) {
-        return this->_impl().getNamesWithConflictingCasing(name);
-    }
+    virtual std::set<std::string> getNamesWithConflictingCasing(const StringData name) = 0;
 
-private:
-    // This structure exists to give us a customization point to decide how to force users of this
-    // class to depend upon the corresponding `database_holder.cpp` Translation Unit (TU).  All
-    // public forwarding functions call `_impl(), and `_impl` creates an instance of this structure.
-    struct TUHook {
-        static void hook() noexcept;
-
-        explicit inline TUHook() noexcept {
-            if (kDebugBuild)
-                this->hook();
-        }
-    };
-
-    inline const Impl& _impl() const {
-        TUHook{};
-        return *this->_pimpl;
-    }
-
-    inline Impl& _impl() {
-        TUHook{};
-        return *this->_pimpl;
-    }
-
-    std::unique_ptr<Impl> _pimpl;
+    /**
+     * Returns a new Collection.
+     * This function supports rebuilding indexes during the repair process and should not be used
+     * for any other purpose.
+     */
+    virtual std::unique_ptr<Collection> makeCollection(OperationContext* const opCtx,
+                                                       const StringData fullNS,
+                                                       OptionalCollectionUUID uuid,
+                                                       CollectionCatalogEntry* const details,
+                                                       RecordStore* const recordStore,
+                                                       DatabaseCatalogEntry* const dbce) = 0;
 };
+
 }  // namespace mongo

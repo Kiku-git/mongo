@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -40,11 +39,14 @@
 #include "mongo/db/storage/journal_listener.h"
 #include "mongo/db/storage/kv/kv_catalog.h"
 #include "mongo/db/storage/kv/kv_database_catalog_entry_base.h"
+#include "mongo/db/storage/kv/kv_drop_pending_ident_reaper.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/storage_engine.h"
+#include "mongo/db/storage/temporary_record_store.h"
 #include "mongo/stdx/functional.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/stdx/mutex.h"
+#include "mongo/util/periodic_runner.h"
 
 namespace mongo {
 
@@ -57,6 +59,21 @@ struct KVStorageEngineOptions {
     bool forRepair = false;
 };
 
+/**
+ * Minimal interface for KVDatabaseCatalogEntryBase to access KVStorageEngine.
+ */
+class KVStorageEngineInterface {
+public:
+    KVStorageEngineInterface() = default;
+    virtual ~KVStorageEngineInterface() = default;
+    virtual StorageEngine* getStorageEngine() = 0;
+    virtual KVEngine* getEngine() = 0;
+    virtual void addDropPendingIdent(const Timestamp& dropTimestamp,
+                                     const NamespaceString& nss,
+                                     StringData ident) = 0;
+    virtual KVCatalog* getCatalog() = 0;
+};
+
 /*
  * The actual definition for this function is in
  * `src/mongo/db/storage/kv/kv_database_catalog_entry.cpp` This unusual forward declaration is to
@@ -65,17 +82,17 @@ struct KVStorageEngineOptions {
  * `KVDatabaseCatalogEntry` code.
  */
 std::unique_ptr<KVDatabaseCatalogEntryBase> defaultDatabaseCatalogEntryFactory(
-    const StringData name, KVStorageEngine* const engine);
+    const StringData name, KVStorageEngineInterface* const engine);
 
 using KVDatabaseCatalogEntryFactory = decltype(defaultDatabaseCatalogEntryFactory);
 
-class KVStorageEngine final : public StorageEngine {
+class KVStorageEngine final : public KVStorageEngineInterface, public StorageEngine {
 public:
     /**
      * @param engine - ownership passes to me
      */
     KVStorageEngine(KVEngine* engine,
-                    const KVStorageEngineOptions& options = KVStorageEngineOptions(),
+                    KVStorageEngineOptions options = KVStorageEngineOptions(),
                     stdx::function<KVDatabaseCatalogEntryFactory> databaseCatalogEntryFactory =
                         defaultDatabaseCatalogEntryFactory);
 
@@ -116,16 +133,22 @@ public:
 
     virtual void endNonBlockingBackup(OperationContext* opCtx);
 
+    virtual StatusWith<std::vector<std::string>> extendBackupCursor(OperationContext* opCtx);
+
     virtual bool isDurable() const;
 
     virtual bool isEphemeral() const;
 
     virtual Status repairRecordStore(OperationContext* opCtx, const std::string& ns);
 
+    virtual std::unique_ptr<TemporaryRecordStore> makeTemporaryRecordStore(
+        OperationContext* opCtx) override;
+
     virtual void cleanShutdown();
 
     virtual void setStableTimestamp(Timestamp stableTimestamp,
-                                    boost::optional<Timestamp> maximumTruncationTimestamp) override;
+                                    boost::optional<Timestamp> maximumTruncationTimestamp,
+                                    bool force = false) override;
 
     virtual void setInitialDataTimestamp(Timestamp initialDataTimestamp) override;
 
@@ -149,9 +172,15 @@ public:
 
     virtual Timestamp getAllCommittedTimestamp() const override;
 
+    virtual Timestamp getOldestOpenReadTimestamp() const override;
+
     bool supportsReadConcernSnapshot() const final;
 
     bool supportsReadConcernMajority() const final;
+
+    bool supportsPendingDrops() const final;
+
+    void clearDropPendingState() final;
 
     virtual void replicationBatchIsComplete() const override;
 
@@ -161,12 +190,151 @@ public:
 
     // ------ kv ------
 
+    /**
+     * A TimestampMonitor is used to listen for any changes in the timestamps implemented by the
+     * storage engine and to notify any registered listeners upon changes to these timestamps.
+     *
+     * The monitor follows the same lifecycle as the storage engine, started when the storage
+     * engine starts and stopped when the storage engine stops.
+     *
+     * The PeriodicRunner must be started before the Storage Engine is started, and the Storage
+     * Engine must be shutdown after the PeriodicRunner is shutdown.
+     */
+    class TimestampMonitor {
+    public:
+        /**
+         * Timestamps that can be listened to for changes.
+         */
+        enum class TimestampType { kCheckpoint, kOldest, kStable, kMinOfCheckpointAndOldest };
+
+        /**
+         * A TimestampListener is used to listen for changes in a given timestamp and to execute the
+         * user-provided callback to the change with a custom user-provided callback.
+         *
+         * The TimestampListener must be registered in the TimestampMonitor in order to be notified
+         * of timestamp changes and react to changes for the duration it's part of the monitor.
+         */
+        class TimestampListener {
+        public:
+            // Caller must ensure that the lifetime of the variables used in the callback are valid.
+            using Callback = stdx::function<void(Timestamp timestamp)>;
+
+            /**
+             * A TimestampListener saves a 'callback' that will be executed whenever the specified
+             * 'type' timestamp changes. The 'callback' function will be passed the new 'type'
+             * timestamp.
+             */
+            TimestampListener(TimestampType type, Callback callback)
+                : _type(type), _callback(std::move(callback)) {}
+
+            /**
+             * Executes the appropriate function with the callback of the listener with the new
+             * timestamp.
+             */
+            void notify(Timestamp newTimestamp) {
+                if (_type == TimestampType::kCheckpoint)
+                    _onCheckpointTimestampChanged(newTimestamp);
+                else if (_type == TimestampType::kOldest)
+                    _onOldestTimestampChanged(newTimestamp);
+                else if (_type == TimestampType::kStable)
+                    _onStableTimestampChanged(newTimestamp);
+                else if (_type == TimestampType::kMinOfCheckpointAndOldest)
+                    _onMinOfCheckpointAndOldestTimestampChanged(newTimestamp);
+            }
+
+            TimestampType getType() const {
+                return _type;
+            }
+
+        private:
+            void _onCheckpointTimestampChanged(Timestamp newTimestamp) noexcept {
+                _callback(newTimestamp);
+            }
+
+            void _onOldestTimestampChanged(Timestamp newTimestamp) noexcept {
+                _callback(newTimestamp);
+            }
+
+            void _onStableTimestampChanged(Timestamp newTimestamp) noexcept {
+                _callback(newTimestamp);
+            }
+
+            void _onMinOfCheckpointAndOldestTimestampChanged(Timestamp newTimestamp) noexcept {
+                _callback(newTimestamp);
+            }
+
+            // Timestamp type this listener monitors.
+            TimestampType _type;
+
+            // Function to execute when the timestamp changes.
+            Callback _callback;
+        };
+
+        TimestampMonitor(KVEngine* engine, PeriodicRunner* runner);
+        ~TimestampMonitor();
+
+        /**
+         * Monitor changes in timestamps and to notify the listeners on change.
+         */
+        void startup();
+
+        /**
+         * Notify all of the listeners listening for the given TimestampType when a change for that
+         * timestamp has occured.
+         */
+        void notifyAll(TimestampType type, Timestamp newTimestamp);
+
+        /**
+         * Adds a new listener to the monitor if it isn't already registered. A listener can only be
+         * bound to one type of timestamp at a time.
+         */
+        void addListener(TimestampListener* listener);
+
+        /**
+         * Removes an existing listener from the monitor if it was registered.
+         */
+        void removeListener(TimestampListener* listener);
+
+        bool isRunning_forTestOnly() const {
+            return _running;
+        }
+
+    private:
+        struct MonitoredTimestamps {
+            Timestamp checkpoint;
+            Timestamp oldest;
+            Timestamp stable;
+            Timestamp minOfCheckpointAndOldest;
+        };
+
+        KVEngine* _engine;
+        bool _running;
+
+        // The set of timestamps that were last reported to the listeners by the monitor.
+        MonitoredTimestamps _currentTimestamps;
+
+        // Periodic runner that the timestamp monitor schedules its job on.
+        PeriodicRunner* _periodicRunner;
+
+        // Protects access to _listeners below.
+        stdx::mutex _monitorMutex;
+        std::vector<TimestampListener*> _listeners;
+    };
+
+    StorageEngine* getStorageEngine() override {
+        return this;
+    }
+
     KVEngine* getEngine() {
         return _engine.get();
     }
     const KVEngine* getEngine() const {
         return _engine.get();
     }
+
+    void addDropPendingIdent(const Timestamp& dropTimestamp,
+                             const NamespaceString& nss,
+                             StringData ident) override;
 
     KVCatalog* getCatalog() {
         return _catalog.get();
@@ -181,6 +349,8 @@ public:
     StatusWith<std::vector<StorageEngine::CollectionIndexNamePair>> reconcileCatalogAndIdents(
         OperationContext* opCtx) override;
 
+    std::string getFilesystemPathForDb(const std::string& dbName) const override;
+
     /**
      * When loading after an unclean shutdown, this performs cleanup on the KVCatalog and unsets the
      * startingAfterUncleanShutdown decoration on the global ServiceContext.
@@ -188,6 +358,14 @@ public:
     void loadCatalog(OperationContext* opCtx) final;
 
     void closeCatalog(OperationContext* opCtx) final;
+
+    TimestampMonitor* getTimestampMonitor() const {
+        return _timestampMonitor.get();
+    }
+
+    std::set<std::string> getDropPendingIdents() const {
+        return _dropPendingIdentReaper.getAllIdents();
+    }
 
 private:
     using CollIter = std::list<std::string>::iterator;
@@ -219,14 +397,26 @@ private:
 
     void _dumpCatalog(OperationContext* opCtx);
 
+    /**
+     * Called when the min of checkpoint timestamp (if exists) and oldest timestamp advances in the
+     * KVEngine.
+     */
+    void _onMinOfCheckpointAndOldestTimestampChanged(const Timestamp& timestamp);
+
     class RemoveDBChange;
-
-    stdx::function<KVDatabaseCatalogEntryFactory> _databaseCatalogEntryFactory;
-
-    KVStorageEngineOptions _options;
 
     // This must be the first member so it is destroyed last.
     std::unique_ptr<KVEngine> _engine;
+
+    const KVStorageEngineOptions _options;
+
+    stdx::function<KVDatabaseCatalogEntryFactory> _databaseCatalogEntryFactory;
+
+    // Manages drop-pending idents. Requires access to '_engine'.
+    KVDropPendingIdentReaper _dropPendingIdentReaper;
+
+    // Listener for min of checkpoint and oldest timestamp changes.
+    TimestampMonitor::TimestampListener _minOfCheckpointAndOldestTimestampListener;
 
     const bool _supportsDocLocking;
     const bool _supportsDBLocking;
@@ -236,11 +426,14 @@ private:
     std::unique_ptr<RecordStore> _catalogRecordStore;
     std::unique_ptr<KVCatalog> _catalog;
 
-    typedef std::map<std::string, KVDatabaseCatalogEntryBase*> DBMap;
-    DBMap _dbs;
-    mutable stdx::mutex _dbsLock;
-
     // Flag variable that states if the storage engine is in backup mode.
     bool _inBackupMode = false;
+
+    std::unique_ptr<TimestampMonitor> _timestampMonitor;
+
+    // Protects '_dbs'.
+    mutable stdx::mutex _dbsLock;
+    using DBMap = std::map<std::string, KVDatabaseCatalogEntryBase*>;
+    DBMap _dbs;
 };
 }  // namespace mongo

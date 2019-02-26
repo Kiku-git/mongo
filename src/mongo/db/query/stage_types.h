@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -76,9 +75,14 @@ enum StageType {
 
     STAGE_MULTI_PLAN,
     STAGE_OR,
-    STAGE_PROJECTION,
 
-    // Stage for running aggregation pipelines.
+    // Projection has three alternate implementations.
+    STAGE_PROJECTION_DEFAULT,
+    STAGE_PROJECTION_COVERED,
+    STAGE_PROJECTION_SIMPLE,
+
+    // Stages for running aggregation pipelines.
+    STAGE_CHANGE_STREAM_PROXY,
     STAGE_PIPELINE_PROXY,
 
     STAGE_QUEUED_DATA,
@@ -94,6 +98,9 @@ enum StageType {
     STAGE_TEXT,
     STAGE_TEXT_OR,
     STAGE_TEXT_MATCH,
+
+    // Stage for choosing between two alternate plans based on an initial trial period.
+    STAGE_TRIAL,
 
     STAGE_UNKNOWN,
 

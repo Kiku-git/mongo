@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -40,9 +39,40 @@
 
 namespace mongo {
 
+/**
+ * Helper that will find the previous oplog entry for that transaction, transform it to be a normal
+ * applyOps command and applies the oplog entry. Currently used for oplog application of a
+ * commitTransaction oplog entry during recovery, rollback and initial sync.
+ */
+Status _applyTransactionFromOplogChain(OperationContext* opCtx,
+                                       const repl::OplogEntry& entry,
+                                       repl::OplogApplication::Mode mode) {
+    invariant(mode == repl::OplogApplication::Mode::kRecovering ||
+              mode == repl::OplogApplication::Mode::kInitialSync);
+
+    // Since the TransactionHistoryIterator uses DBDirectClient, it cannot come with snapshot
+    // isolation.
+    invariant(!opCtx->recoveryUnit()->getPointInTimeReadTimestamp());
+
+    // Get the corresponding prepareTransaction oplog entry.
+    const auto prepareOpTime = entry.getPrevWriteOpTimeInTransaction();
+    invariant(prepareOpTime);
+    TransactionHistoryIterator iter(prepareOpTime.get());
+    invariant(iter.hasNext());
+    const auto prepareOplogEntry = iter.next(opCtx);
+
+    // Transform prepare command into a normal applyOps command.
+    const auto prepareCmd = prepareOplogEntry.getOperationToApply().removeField("prepare");
+
+    BSONObjBuilder resultWeDontCareAbout;
+    return applyOps(
+        opCtx, entry.getNss().db().toString(), prepareCmd, mode, &resultWeDontCareAbout);
+}
+
 Status applyCommitTransaction(OperationContext* opCtx,
                               const repl::OplogEntry& entry,
-                              repl::OplogApplication::Mode mode) {
+                              repl::OplogApplication::Mode mode,
+                              boost::optional<Timestamp> stableTimestampForRecovery) {
     // Return error if run via applyOps command.
     uassert(50987,
             "commitTransaction is only used internally by secondaries.",
@@ -52,33 +82,22 @@ Status applyCommitTransaction(OperationContext* opCtx,
     auto commitCommand = CommitTransactionOplogObject::parse(ctx, entry.getObject());
 
     if (mode == repl::OplogApplication::Mode::kRecovering) {
-        const auto replCoord = repl::ReplicationCoordinator::get(opCtx);
-        const auto recoveryTimestamp = replCoord->getRecoveryTimestamp();
-        invariant(recoveryTimestamp);
+        invariant(stableTimestampForRecovery);
 
-        // If the commitTimestamp is before the recoveryTimestamp, then the data already
-        // reflects the operations from the transaction.
+        // If the commitTimestamp is before the stableTimestampForRecovery, then the data
+        // already reflects the operations from the transaction.
         const auto& commitTimestamp = commitCommand.getCommitTimestamp();
-        if (recoveryTimestamp.get() > commitTimestamp) {
+        if (stableTimestampForRecovery.get() > commitTimestamp) {
             return Status::OK();
         }
 
-        // Get the corresponding prepareTransaction oplog entry.
-        TransactionHistoryIterator iter(entry.getOpTime());
-        invariant(iter.hasNext());
-        const auto commitOplogEntry = iter.next(opCtx);
-        invariant(iter.hasNext());
-        const auto prepareOplogEntry = iter.next(opCtx);
-
-        // Transform prepare command into a normal applyOps command.
-        const auto prepareCmd = prepareOplogEntry.getOperationToApply().removeField("prepare");
-
-        BSONObjBuilder resultWeDontCareAbout;
-        return applyOps(
-            opCtx, entry.getNss().db().toString(), prepareCmd, mode, &resultWeDontCareAbout);
+        return _applyTransactionFromOplogChain(opCtx, entry, mode);
     }
 
-    // TODO: SERVER-36492 Only run on secondary until we support initial sync.
+    if (mode == repl::OplogApplication::Mode::kInitialSync) {
+        return _applyTransactionFromOplogChain(opCtx, entry, mode);
+    }
+
     invariant(mode == repl::OplogApplication::Mode::kSecondary);
 
     // Transaction operations are in its own batch, so we can modify their opCtx.
@@ -93,8 +112,9 @@ Status applyCommitTransaction(OperationContext* opCtx,
 
     auto transaction = TransactionParticipant::get(opCtx);
     invariant(transaction);
-    transaction->unstashTransactionResources(opCtx, "commitTransaction");
-    transaction->commitPreparedTransaction(opCtx, commitCommand.getCommitTimestamp());
+    transaction.unstashTransactionResources(opCtx, "commitTransaction");
+    transaction.commitPreparedTransaction(
+        opCtx, commitCommand.getCommitTimestamp(), entry.getOpTime());
     return Status::OK();
 }
 
@@ -126,8 +146,8 @@ Status applyAbortTransaction(OperationContext* opCtx,
     MongoDOperationContextSessionWithoutRefresh sessionCheckout(opCtx);
 
     auto transaction = TransactionParticipant::get(opCtx);
-    transaction->unstashTransactionResources(opCtx, "abortTransaction");
-    transaction->abortActiveTransaction(opCtx);
+    transaction.unstashTransactionResources(opCtx, "abortTransaction");
+    transaction.abortActiveTransaction(opCtx);
     return Status::OK();
 }
 

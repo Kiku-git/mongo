@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -47,7 +46,7 @@ namespace mongo {
  * Queries separate collection for equality matches with documents in the pipeline collection.
  * Adds matching documents to a new array field in the input document.
  */
-class DocumentSourceLookUp final : public DocumentSource, public NeedsMergerDocumentSource {
+class DocumentSourceLookUp final : public DocumentSource {
 public:
     static constexpr size_t kMaxSubPipelineDepth = 20;
 
@@ -82,9 +81,14 @@ public:
         }
 
         /**
-         * Lookup from a sharded collection is not allowed.
+         * Lookup from a sharded collection may not be allowed.
          */
-        bool allowShardedForeignCollection(NamespaceString nss) const final {
+        bool allowShardedForeignCollection(NamespaceString nss) const override final {
+            const bool foreignShardedAllowed =
+                getTestCommandsEnabled() && internalQueryAllowShardedLookup.load();
+            if (foreignShardedAllowed) {
+                return true;
+            }
             return (_foreignNssSet.find(nss) == _foreignNssSet.end());
         }
 
@@ -117,17 +121,12 @@ public:
         return DocumentSource::truncateSortSet(pSource->getOutputSorts(), {_as.fullPath()});
     }
 
-    boost::intrusive_ptr<DocumentSource> getShardSource() final {
-        return nullptr;
+    boost::optional<MergingLogic> mergingLogic() final {
+        // {shardsStage, mergingStage, sortPattern}
+        return MergingLogic{nullptr, this, boost::none};
     }
 
-    MergingLogic mergingLogic() final {
-        return {this};
-    }
-
-    void addInvolvedCollections(std::vector<NamespaceString>* collections) const final {
-        collections->push_back(_fromNs);
-    }
+    void addInvolvedCollections(stdx::unordered_set<NamespaceString>* collectionNames) const final;
 
     void detachFromOperationContext() final;
 
@@ -136,13 +135,13 @@ public:
     bool usedDisk() final;
 
     static boost::intrusive_ptr<DocumentSource> createFromBson(
-        BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& pExpCtx);
+        BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
     static boost::intrusive_ptr<DocumentSource> createFromBsonWithCacheSize(
         BSONElement elem,
-        const boost::intrusive_ptr<ExpressionContext>& pExpCtx,
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
         size_t maxCacheSizeBytes) {
-        auto dsLookup = createFromBson(elem, pExpCtx);
+        auto dsLookup = createFromBson(elem, expCtx);
         static_cast<DocumentSourceLookUp*>(dsLookup.get())->reInitializeCache(maxCacheSizeBytes);
         return dsLookup;
     }
@@ -209,7 +208,7 @@ private:
      */
     DocumentSourceLookUp(NamespaceString fromNs,
                          std::string as,
-                         const boost::intrusive_ptr<ExpressionContext>& pExpCtx);
+                         const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
     /**
      * Constructor used for a $lookup stage specified using the {from: ..., localField: ...,
@@ -219,7 +218,7 @@ private:
                          std::string as,
                          std::string localField,
                          std::string foreignField,
-                         const boost::intrusive_ptr<ExpressionContext>& pExpCtx);
+                         const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
     /**
      * Constructor used for a $lookup stage specified using the {from: ..., pipeline: [...], as:
@@ -229,7 +228,7 @@ private:
                          std::string as,
                          std::vector<BSONObj> pipeline,
                          BSONObj letVariables,
-                         const boost::intrusive_ptr<ExpressionContext>& pExpCtx);
+                         const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
     /**
      * Should not be called; use serializeToArray instead.
@@ -256,19 +255,13 @@ private:
      * Builds a parsed pipeline for introspection (e.g. constraints, dependencies). Any sub-$lookup
      * pipelines will be built recursively.
      */
-    void initializeIntrospectionPipeline();
+    void initializeResolvedIntrospectionPipeline();
 
     /**
      * Builds the $lookup pipeline and resolves any variables using the passed 'inputDoc', adding a
      * cursor and/or cache source as appropriate.
      */
     std::unique_ptr<Pipeline, PipelineDeleter> buildPipeline(const Document& inputDoc);
-
-    /**
-     * The pipeline supplied via the $lookup 'pipeline' argument. This may differ from pipeline that
-     * is executed in that it will not include optimizations or resolved views.
-     */
-    std::string getUserPipelineDefinition();
 
     /**
      * Reinitialize the cache with a new max size. May only be called if this DSLookup was created
@@ -315,7 +308,7 @@ private:
     std::vector<BSONObj> _userPipeline;
     // A pipeline parsed from _resolvedPipeline at creation time, intended to support introspective
     // functions. If sub-$lookup stages are present, their pipelines are constructed recursively.
-    std::unique_ptr<Pipeline, PipelineDeleter> _parsedIntrospectionPipeline;
+    std::unique_ptr<Pipeline, PipelineDeleter> _resolvedIntrospectionPipeline;
 
     std::vector<LetVariable> _letVariables;
 

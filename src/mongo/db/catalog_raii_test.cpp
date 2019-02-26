@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -34,6 +33,7 @@
 
 #include <string>
 
+#include "mongo/db/catalog/database_holder_mock.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/d_concurrency.h"
@@ -62,7 +62,14 @@ public:
     const Milliseconds timeoutMs = Seconds(1);
     const ClientAndCtx client1 = makeClientWithLocker("client1");
     const ClientAndCtx client2 = makeClientWithLocker("client2");
+
+private:
+    void setUp() override;
 };
+
+void CatalogRAIITestFixture::setUp() {
+    DatabaseHolder::set(getServiceContext(), std::make_unique<DatabaseHolderMock>());
+}
 
 void failsWithLockTimeout(stdx::function<void()> func, Milliseconds timeoutMillis) {
     Date_t t1 = Date_t::now();
@@ -200,7 +207,7 @@ TEST_F(CatalogRAIITestFixture, AutoGetCollectionDeadlineMin) {
                                    MODE_IX,
                                    MODE_X,
                                    AutoGetCollection::ViewMode::kViewsForbidden,
-                                   Date_t::min());
+                                   Date_t());
         },
         Milliseconds(0));
 }

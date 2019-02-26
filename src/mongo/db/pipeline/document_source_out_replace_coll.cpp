@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -35,7 +34,7 @@
 
 namespace mongo {
 
-static AtomicUInt32 aggOutCounter;
+static AtomicWord<unsigned> aggOutCounter;
 
 void DocumentSourceOutReplaceColl::initializeWriteNs() {
     LocalReadConcernBlock readLocal(pExpCtx->opCtx);

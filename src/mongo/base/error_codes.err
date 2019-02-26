@@ -273,6 +273,15 @@ error_code("MigrationConflict", 272)
 error_code("ProducerConsumerQueueProducerQueueDepthExceeded", 273)
 error_code("ProducerConsumerQueueConsumed", 274)
 error_code("ExchangePassthrough", 275) # For exchange execution in aggregation. Do not reuse.
+error_code("IndexBuildAborted", 276)
+error_code("AlarmAlreadyFulfilled", 277)
+error_code("UnsatisfiableCommitQuorum", 278)
+error_code("ClientDisconnect", 279)
+error_code("ChangeStreamFatalError", 280)
+# The two codes below are for internal use only and must never be returned in a network response
+error_code("TransactionCoordinatorSteppingDown", 281) # Gets converted to InterruptedDueToStepDown
+error_code("TransactionCoordinatorReachedAbortDecision", 282)
+
 # Error codes 4000-8999 are reserved.
 
 # Non-sequential error codes (for compatibility only)
@@ -305,7 +314,8 @@ error_class("Interruption", ["Interrupted",
                              "ExceededTimeLimit",
                              "MaxTimeMSExpired",
                              "CursorKilled",
-                             "LockTimeout"])
+                             "LockTimeout",
+                             "ClientDisconnect"])
 
 # isNotMasterError() includes all codes that indicate that the node that received the request was
 # not master at some point during command processing, regardless of whether some write may have

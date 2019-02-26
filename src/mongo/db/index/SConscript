@@ -14,6 +14,10 @@ env.Library(
             '$BUILD_DIR/mongo/db/catalog/collection',
             '$BUILD_DIR/mongo/db/catalog/index_catalog',
         ],
+        LIBDEPS_PRIVATE=[
+            '$BUILD_DIR/mongo/db/index_names',
+            '$BUILD_DIR/mongo/db/namespace_string',
+        ],
 )
 
 env.Library(
@@ -26,26 +30,11 @@ env.Library(
         ],
         LIBDEPS_PRIVATE=[
             '$BUILD_DIR/mongo/base',
-            '$BUILD_DIR/mongo/db/dbhelpers',
+            '$BUILD_DIR/mongo/db/curop',
             '$BUILD_DIR/mongo/db/storage/index_entry_comparison',
         ],
 )
 
-env.CppUnitTest(
-        target='duplicate_key_tracker_test',
-        source=[
-            'duplicate_key_tracker_test.cpp',
-        ],
-        LIBDEPS=[
-            '$BUILD_DIR/mongo/db/auth/authmocks',
-            '$BUILD_DIR/mongo/db/catalog/multi_index_block',
-            '$BUILD_DIR/mongo/db/catalog_raii',
-            '$BUILD_DIR/mongo/db/repl/replmocks',
-            '$BUILD_DIR/mongo/db/service_context_d_test_fixture',
-            '$BUILD_DIR/mongo/db/storage/ephemeral_for_test/storage_ephemeral_for_test_core',
-            'duplicate_key_tracker',
-        ],
-)
 env.Library(
         target='key_generator',
         source=[
@@ -105,11 +94,12 @@ env.CppUnitTest(
 )
 
 serveronlyEnv = env.Clone()
-serveronlyEnv.InjectThirdPartyIncludePaths(libraries=['snappy'])
+serveronlyEnv.InjectThirdParty(libraries=['snappy'])
 serveronlyEnv.Library(
     target="index_access_method",
     source=[
         "index_access_method.cpp",
+        env.Idlc('index_access_method.idl')[0],
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
@@ -125,6 +115,7 @@ serveronlyEnv.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/logical_clock',
+        '$BUILD_DIR/mongo/idl/server_parameter',
     ],
 )
 
@@ -154,10 +145,11 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
+        'duplicate_key_tracker',
     ],
     LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/catalog/index_timestamp_helper',
         '$BUILD_DIR/mongo/db/multi_key_path_tracker',
-        '$BUILD_DIR/mongo/db/s/sharding_api_d',
         'index_access_methods',
     ],
 )

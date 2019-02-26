@@ -1,6 +1,3 @@
-// wiredtiger_record_store.cpp
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -622,7 +619,10 @@ StatusWith<std::string> WiredTigerRecordStore::generateCreateString(
 
     bool replicatedWrites = getGlobalReplSettings().usingReplSets() ||
         repl::ReplSettings::shouldRecoverFromOplogAsStandalone();
-    if (WiredTigerUtil::useTableLogging(NamespaceString(ns), replicatedWrites)) {
+
+    // Do not journal writes when 'ns' is an empty string, which is the case for internal-only
+    // temporary tables.
+    if (ns.size() && WiredTigerUtil::useTableLogging(NamespaceString(ns), replicatedWrites)) {
         ss << ",log=(enabled=true)";
     } else {
         ss << ",log=(enabled=false)";
@@ -635,7 +635,8 @@ WiredTigerRecordStore::WiredTigerRecordStore(WiredTigerKVEngine* kvEngine,
                                              OperationContext* ctx,
                                              Params params)
     : RecordStore(params.ns),
-      _uri(params.uri),
+      _uri(WiredTigerKVEngine::kTableUriPrefix + params.ident),
+      _ident(params.ident),
       _tableId(WiredTigerSession::genTableId()),
       _engineName(params.engineName),
       _isCapped(params.isCapped),
@@ -651,9 +652,12 @@ WiredTigerRecordStore::WiredTigerRecordStore(WiredTigerKVEngine* kvEngine,
       _cappedDeleteCheckCount(0),
       _sizeStorer(params.sizeStorer),
       _kvEngine(kvEngine) {
+    invariant(_ident.size() > 0);
+
     Status versionStatus = WiredTigerUtil::checkApplicationMetadataFormatVersion(
                                ctx, _uri, kMinimumRecordStoreVersion, kMaximumRecordStoreVersion)
                                .getStatus();
+
     if (!versionStatus.isOK()) {
         std::cout << " Version: " << versionStatus.reason() << std::endl;
         if (versionStatus.code() == ErrorCodes::FailedToParse) {
@@ -671,7 +675,7 @@ WiredTigerRecordStore::WiredTigerRecordStore(WiredTigerKVEngine* kvEngine,
         invariant(_cappedMaxDocs == -1);
     }
 
-    if (!params.isReadOnly) {
+    if (!params.isReadOnly && !isTemp()) {
         bool replicatedWrites = getGlobalReplSettings().usingReplSets() ||
             repl::ReplSettings::shouldRecoverFromOplogAsStandalone();
         uassertStatusOK(WiredTigerUtil::setTableLogging(
@@ -683,7 +687,7 @@ WiredTigerRecordStore::WiredTigerRecordStore(WiredTigerKVEngine* kvEngine,
         // The oplog always needs to be marked for size adjustment since it is journaled and also
         // may change during replication recovery (if truncated).
         sizeRecoveryState(getGlobalServiceContext())
-            .markCollectionAsAlwaysNeedsSizeAdjustment(_uri);
+            .markCollectionAsAlwaysNeedsSizeAdjustment(_ident);
     }
 }
 
@@ -693,7 +697,11 @@ WiredTigerRecordStore::~WiredTigerRecordStore() {
         _shuttingDown = true;
     }
 
-    LOG(1) << "~WiredTigerRecordStore for: " << ns();
+    if (!isTemp()) {
+        LOG(1) << "~WiredTigerRecordStore for: " << ns();
+    } else {
+        LOG(1) << "~WiredTigerRecordStore for temporary ident: " << getIdent();
+    }
 
     if (_oplogStones) {
         _oplogStones->kill();
@@ -741,9 +749,9 @@ void WiredTigerRecordStore::postConstructorInit(OperationContext* opCtx) {
         // time but not as of the top of the oplog.
         LOG_FOR_RECOVERY(2) << "Record store was empty; setting count metadata to zero but marking "
                                "record store as needing size adjustment during recovery. ns: "
-                            << ns() << ", ident: " << _uri;
+                            << (isTemp() ? "(temp)" : ns()) << ", ident: " << _ident;
         sizeRecoveryState(getGlobalServiceContext())
-            .markCollectionAsAlwaysNeedsSizeAdjustment(_uri);
+            .markCollectionAsAlwaysNeedsSizeAdjustment(_ident);
         _sizeInfo->dataSize.store(0);
         _sizeInfo->numRecords.store(0);
 
@@ -904,7 +912,7 @@ int64_t WiredTigerRecordStore::_cappedDeleteAsNeeded(OperationContext* opCtx,
     // replication recovery. If we don't mark the collection for size adjustment then we will not
     // perform the capped deletions as expected. In that case, the collection is guaranteed to be
     // empty at the stable timestamp and thus guaranteed to be marked for size adjustment.
-    if (!sizeRecoveryState(getGlobalServiceContext()).collectionNeedsSizeAdjustment(_uri)) {
+    if (!sizeRecoveryState(getGlobalServiceContext()).collectionNeedsSizeAdjustment(_ident)) {
         return 0;
     }
 
@@ -1627,20 +1635,27 @@ boost::optional<RecordId> WiredTigerRecordStore::oplogStartHack(
     if (!_isOplog)
         return boost::none;
 
-    if (_isOplog) {
-        WiredTigerRecoveryUnit::get(opCtx)->setIsOplogReader();
+    auto wtRu = WiredTigerRecoveryUnit::get(opCtx);
+    wtRu->setIsOplogReader();
+
+    RecordId searchFor = startingPosition;
+    auto visibilityTs = wtRu->getOplogVisibilityTs();
+    if (visibilityTs && searchFor.repr() > *visibilityTs) {
+        searchFor = RecordId(*visibilityTs);
     }
 
     WiredTigerCursor cursor(_uri, _tableId, true, opCtx);
     WT_CURSOR* c = cursor.get();
 
     int cmp;
-    setKey(c, startingPosition);
-    int ret = wiredTigerPrepareConflictRetry(opCtx, [&] { return c->search_near(c, &cmp); });
+    setKey(c, searchFor);
+    int ret = c->search_near(c, &cmp);
     if (ret == 0 && cmp > 0)
         ret = c->prev(c);  // landed one higher than startingPosition
     if (ret == WT_NOTFOUND)
         return RecordId();  // nothing <= startingPosition
+    // It's illegal for oplog documents to be in a prepare state.
+    invariant(ret != WT_PREPARE_CONFLICT);
     invariantWTOK(ret);
 
     return getKey(c);
@@ -1650,7 +1665,7 @@ void WiredTigerRecordStore::updateStatsAfterRepair(OperationContext* opCtx,
                                                    long long numRecords,
                                                    long long dataSize) {
     // We're correcting the size as of now, future writes should be tracked.
-    sizeRecoveryState(getGlobalServiceContext()).markCollectionAsAlwaysNeedsSizeAdjustment(_uri);
+    sizeRecoveryState(getGlobalServiceContext()).markCollectionAsAlwaysNeedsSizeAdjustment(_ident);
 
     _sizeInfo->numRecords.store(numRecords);
     _sizeInfo->dataSize.store(dataSize);
@@ -1686,7 +1701,7 @@ private:
 };
 
 void WiredTigerRecordStore::_changeNumRecords(OperationContext* opCtx, int64_t diff) {
-    if (!sizeRecoveryState(getGlobalServiceContext()).collectionNeedsSizeAdjustment(_uri)) {
+    if (!sizeRecoveryState(getGlobalServiceContext()).collectionNeedsSizeAdjustment(_ident)) {
         return;
     }
 
@@ -1709,7 +1724,7 @@ private:
 };
 
 void WiredTigerRecordStore::_increaseDataSize(OperationContext* opCtx, int64_t amount) {
-    if (!sizeRecoveryState(getGlobalServiceContext()).collectionNeedsSizeAdjustment(_uri)) {
+    if (!sizeRecoveryState(getGlobalServiceContext()).collectionNeedsSizeAdjustment(_ident)) {
         return;
     }
 
@@ -1787,10 +1802,12 @@ void WiredTigerRecordStore::cappedTruncateAfter(OperationContext* opCtx,
         // transactions from appearing.
         Timestamp truncTs(lastKeptId.repr());
 
-        if (!serverGlobalParams.enableMajorityReadConcern) {
-            // If majority read concern is disabled, we must set the oldest timestamp along with the
-            // commit timestamp. Otherwise, the commit timestamp might be set behind the oldest
-            // timestamp.
+        if (!serverGlobalParams.enableMajorityReadConcern &&
+            _kvEngine->getOldestTimestamp() > truncTs) {
+            // If majority read concern is disabled, the oldest timestamp can be ahead of 'truncTs'.
+            // In that case, we must set the oldest timestamp along with the commit timestamp.
+            // Otherwise, the commit timestamp will be set behind the oldest timestamp, which is
+            // illegal.
             const bool force = true;
             _kvEngine->setOldestTimestamp(truncTs, force);
         } else {
@@ -1844,6 +1861,9 @@ WiredTigerRecordStoreCursorBase::WiredTigerRecordStoreCursorBase(OperationContex
                                                                  const WiredTigerRecordStore& rs,
                                                                  bool forward)
     : _rs(rs), _opCtx(opCtx), _forward(forward) {
+    if (_rs._isOplog) {
+        _oplogVisibleTs = WiredTigerRecoveryUnit::get(opCtx)->getOplogVisibilityTs();
+    }
     _cursor.emplace(rs.getURI(), rs.tableId(), true, opCtx);
 }
 
@@ -1876,6 +1896,11 @@ boost::optional<Record> WiredTigerRecordStoreCursorBase::next() {
         id = getKey(c);
     }
 
+    if (_oplogVisibleTs && id.repr() > *_oplogVisibleTs) {
+        _eof = true;
+        return {};
+    }
+
     if (_forward && _lastReturnedId >= id) {
         log() << "WTCursor::next -- c->next_key ( " << id
               << ") was not greater than _lastReturnedId (" << _lastReturnedId
@@ -1893,6 +1918,11 @@ boost::optional<Record> WiredTigerRecordStoreCursorBase::next() {
 }
 
 boost::optional<Record> WiredTigerRecordStoreCursorBase::seekExact(const RecordId& id) {
+    if (_oplogVisibleTs && id.repr() > *_oplogVisibleTs) {
+        _eof = true;
+        return {};
+    }
+
     _skipNextAdvance = false;
     WT_CURSOR* c = _cursor->get();
     setKey(c, id);
@@ -1918,6 +1948,7 @@ void WiredTigerRecordStoreCursorBase::save() {
     try {
         if (_cursor)
             _cursor->reset();
+        _oplogVisibleTs = boost::none;
     } catch (const WriteConflictException&) {
         // Ignore since this is only called when we are about to kill our transaction
         // anyway.
@@ -1931,7 +1962,9 @@ void WiredTigerRecordStoreCursorBase::saveUnpositioned() {
 
 bool WiredTigerRecordStoreCursorBase::restore() {
     if (_rs._isOplog && _forward) {
-        WiredTigerRecoveryUnit::get(_opCtx)->setIsOplogReader();
+        auto wtRu = WiredTigerRecoveryUnit::get(_opCtx);
+        wtRu->setIsOplogReader();
+        _oplogVisibleTs = wtRu->getOplogVisibilityTs();
     }
 
     if (!_cursor)
@@ -2024,10 +2057,8 @@ std::unique_ptr<SeekableRecordCursor> StandardWiredTigerRecordStore::getCursor(
         WiredTigerRecoveryUnit* wru = WiredTigerRecoveryUnit::get(opCtx);
         // If we already have a snapshot we don't know what it can see, unless we know no one
         // else could be writing (because we hold an exclusive lock).
-        if (wru->inActiveTxn() && !opCtx->lockState()->isNoop() &&
-            !opCtx->lockState()->isCollectionLockedForMode(_ns, MODE_X)) {
-            throw WriteConflictException();
-        }
+        invariant(!wru->inActiveTxn() ||
+                  opCtx->lockState()->isCollectionLockedForMode(_ns, MODE_X));
         wru->setIsOplogReader();
     }
 
@@ -2077,10 +2108,8 @@ std::unique_ptr<SeekableRecordCursor> PrefixedWiredTigerRecordStore::getCursor(
         WiredTigerRecoveryUnit* wru = WiredTigerRecoveryUnit::get(opCtx);
         // If we already have a snapshot we don't know what it can see, unless we know no one
         // else could be writing (because we hold an exclusive lock).
-        if (wru->inActiveTxn() && !opCtx->lockState()->isNoop() &&
-            !opCtx->lockState()->isCollectionLockedForMode(_ns, MODE_X)) {
-            throw WriteConflictException();
-        }
+        invariant(!wru->inActiveTxn() ||
+                  opCtx->lockState()->isCollectionLockedForMode(_ns, MODE_X));
         wru->setIsOplogReader();
     }
 

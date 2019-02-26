@@ -195,18 +195,6 @@ shellPrint = function(x) {
     it = x;
     if (x != undefined)
         shellPrintHelper(x);
-
-    if (db) {
-        var e = db.getPrevError();
-        if (e.err) {
-            if (e.nPrev <= 1)
-                print("error on last call: " + tojson(e.err));
-            else
-                print("an error " + tojson(e.err) + " occurred " + e.nPrev +
-                      " operations back in the command invocation");
-        }
-        db.resetError();
-    }
 };
 
 print.captureAllOutput = function(fn, args) {
@@ -911,7 +899,18 @@ shellHelper.show = function(what) {
     }
 
     if (what == "dbs" || what == "databases") {
-        var dbs = db.getMongo().getDBs(db.getSession());
+        var mongo = db.getMongo();
+        var dbs;
+        try {
+            dbs = mongo.getDBs(db.getSession(), undefined, false);
+        } catch (ex) {
+            // Unable to get detailed information, retry name-only.
+            mongo.getDBs(db.getSession(), undefined, true).forEach(function(x) {
+                print(x);
+            });
+            return "";
+        }
+
         var dbinfo = [];
         var maxNameLength = 0;
         var maxGbDigits = 0;

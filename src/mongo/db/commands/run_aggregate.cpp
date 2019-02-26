@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -40,8 +39,9 @@
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/cursor_manager.h"
 #include "mongo/db/db_raii.h"
-#include "mongo/db/exec/pipeline_proxy.h"
+#include "mongo/db/exec/change_stream_proxy.h"
 #include "mongo/db/exec/working_set_common.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/accumulator.h"
@@ -62,6 +62,7 @@
 #include "mongo/db/read_concern.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/read_concern_args.h"
+#include "mongo/db/repl/speculative_majority_read_info.h"
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/storage_options.h"
@@ -138,6 +139,7 @@ bool handleCursorCommand(OperationContext* opCtx,
     invariant(cursor);
 
     BSONObj next;
+    bool stashedResult = false;
     for (int objCount = 0; objCount < batchSize; objCount++) {
         // The initial getNext() on a PipelineProxyStage may be very expensive so we don't
         // do it when batchSize is 0 since that indicates a desire for a fast return.
@@ -154,8 +156,6 @@ bool handleCursorCommand(OperationContext* opCtx,
         }
 
         if (state == PlanExecutor::IS_EOF) {
-            responseBuilder.setLatestOplogTimestamp(
-                cursor->getExecutor()->getLatestOplogTimestamp());
             if (!cursor->isTailable()) {
                 // make it an obvious error to use cursor or executor after this point
                 cursor = nullptr;
@@ -172,14 +172,27 @@ bool handleCursorCommand(OperationContext* opCtx,
         // for later.
         if (!FindCommon::haveSpaceForNext(next, objCount, responseBuilder.bytesUsed())) {
             cursor->getExecutor()->enqueue(next);
+            stashedResult = true;
             break;
         }
 
+        // TODO SERVER-38539: We need to set both the latestOplogTimestamp and the PBRT until the
+        // former is removed in a future release.
         responseBuilder.setLatestOplogTimestamp(cursor->getExecutor()->getLatestOplogTimestamp());
+        responseBuilder.setPostBatchResumeToken(cursor->getExecutor()->getPostBatchResumeToken());
         responseBuilder.append(next);
     }
 
     if (cursor) {
+        // For empty batches, or in the case where the final result was added to the batch rather
+        // than being stashed, we update the PBRT to ensure that it is the most recent available.
+        const auto* exec = cursor->getExecutor();
+        if (!stashedResult) {
+            // TODO SERVER-38539: We need to set both the latestOplogTimestamp and the PBRT until
+            // the former is removed in a future release.
+            responseBuilder.setLatestOplogTimestamp(exec->getLatestOplogTimestamp());
+            responseBuilder.setPostBatchResumeToken(exec->getPostBatchResumeToken());
+        }
         // If a time limit was set on the pipeline, remaining time is "rolled over" to the
         // cursor (for use by future getmore ops).
         cursor->setLeftoverMaxTimeMicros(opCtx->getRemainingMaxTimeMicros());
@@ -282,11 +295,11 @@ StatusWith<StringMap<ExpressionContext::ResolvedNamespace>> resolveInvolvedNames
 Status collatorCompatibleWithPipeline(OperationContext* opCtx,
                                       Database* db,
                                       const CollatorInterface* collator,
-                                      const Pipeline* pipeline) {
-    if (!db || !pipeline) {
+                                      const LiteParsedPipeline& liteParsedPipeline) {
+    if (!db) {
         return Status::OK();
     }
-    for (auto&& potentialViewNs : pipeline->getInvolvedCollections()) {
+    for (auto&& potentialViewNs : liteParsedPipeline.getInvolvedNamespaces()) {
         if (db->getCollection(opCtx, potentialViewNs)) {
             continue;
         }
@@ -336,16 +349,49 @@ boost::intrusive_ptr<ExpressionContext> makeExpressionContext(
     expCtx->tempDir = storageGlobalParams.dbpath + "/_tmp";
     auto txnParticipant = TransactionParticipant::get(opCtx);
     expCtx->inMultiDocumentTransaction =
-        txnParticipant && txnParticipant->inMultiDocumentTransaction();
+        txnParticipant && txnParticipant.inMultiDocumentTransaction();
 
     return expCtx;
 }
+
+/**
+ * Upconverts the read concern for a change stream aggregation, if necesssary.
+ *
+ * If there is no given read concern level on the given object, upgrades the level to 'majority' and
+ * waits for read concern. If a read concern level is already specified on the given read concern
+ * object, this method does nothing.
+ */
+void _adjustChangeStreamReadConcern(OperationContext* opCtx) {
+    repl::ReadConcernArgs& readConcernArgs = repl::ReadConcernArgs::get(opCtx);
+    // There is already a read concern level set. Do nothing.
+    if (readConcernArgs.hasLevel()) {
+        return;
+    }
+    // We upconvert an empty read concern to 'majority'.
+    {
+        // We must obtain the client lock to set the ReadConcernArgs on the operation
+        // context as it may be concurrently read by CurrentOp.
+        stdx::lock_guard<Client> lk(*opCtx->getClient());
+        readConcernArgs = repl::ReadConcernArgs(repl::ReadConcernLevel::kMajorityReadConcern);
+
+        // Change streams are allowed to use the speculative majority read mechanism, if
+        // the storage engine doesn't support majority reads directly.
+        if (!serverGlobalParams.enableMajorityReadConcern) {
+            readConcernArgs.setMajorityReadMechanism(
+                repl::ReadConcernArgs::MajorityReadMechanism::kSpeculative);
+        }
+    }
+    // Wait for read concern again since we changed the original read concern.
+    uassertStatusOK(waitForReadConcern(opCtx, readConcernArgs, true));
+}
+
 }  // namespace
 
 Status runAggregate(OperationContext* opCtx,
                     const NamespaceString& origNss,
                     const AggregationRequest& request,
                     const BSONObj& cmdObj,
+                    const PrivilegeVector& privileges,
                     rpc::ReplyBuilderInterface* result) {
     // For operations on views, this will be the underlying namespace.
     NamespaceString nss = request.getNamespaceString();
@@ -366,12 +412,13 @@ Status runAggregate(OperationContext* opCtx,
 
         try {
             // Check whether the parsed pipeline supports the given read concern.
-            liteParsedPipeline.assertSupportsReadConcern(opCtx, request.getExplain());
+            liteParsedPipeline.assertSupportsReadConcern(
+                opCtx, request.getExplain(), serverGlobalParams.enableMajorityReadConcern);
         } catch (const DBException& ex) {
             auto txnParticipant = TransactionParticipant::get(opCtx);
             // If we are in a multi-document transaction, we intercept the 'readConcern'
             // assertion in order to provide a more descriptive error message and code.
-            if (txnParticipant && txnParticipant->inMultiDocumentTransaction()) {
+            if (txnParticipant && txnParticipant.inMultiDocumentTransaction()) {
                 return {ErrorCodes::OperationNotSupportedInTransaction,
                         ex.toStatus("Operation not permitted in transaction").reason()};
             }
@@ -381,21 +428,10 @@ Status runAggregate(OperationContext* opCtx,
         if (liteParsedPipeline.hasChangeStream()) {
             nss = NamespaceString::kRsOplogNamespace;
 
-            // If the read concern is not specified, upgrade to 'majority' and wait to make sure
-            // we have a snapshot available.
-            auto& readConcernArgs = repl::ReadConcernArgs::get(opCtx);
-            if (!readConcernArgs.hasLevel()) {
-                {
-                    // We must obtain the client lock to set the ReadConcernArgs on the operation
-                    // context as it may be concurrently read by CurrentOp.
-                    stdx::lock_guard<Client> lk(*opCtx->getClient());
-                    readConcernArgs =
-                        repl::ReadConcernArgs(repl::ReadConcernLevel::kMajorityReadConcern);
-                }
-                uassertStatusOK(waitForReadConcern(opCtx, readConcernArgs, true));
-            }
+            // Upgrade and wait for read concern if necessary.
+            _adjustChangeStreamReadConcern(opCtx);
 
-            if (!origNss.isCollectionlessAggregateNS()) {
+            if (liteParsedPipeline.shouldResolveUUIDAndCollation()) {
                 // AutoGetCollectionForReadCommand will raise an error if 'origNss' is a view.
                 AutoGetCollectionForReadCommand origNssCtx(opCtx, origNss);
 
@@ -425,7 +461,11 @@ Status runAggregate(OperationContext* opCtx,
         // If this is a collectionless aggregation with no foreign namespaces, we don't want to
         // acquire any locks. Otherwise, lock the collection or view.
         if (nss.isCollectionlessAggregateNS() && pipelineInvolvedNamespaces.empty()) {
-            statsTracker.emplace(opCtx, nss, Top::LockType::NotLocked, 0);
+            statsTracker.emplace(opCtx,
+                                 nss,
+                                 Top::LockType::NotLocked,
+                                 AutoStatsTracker::LogMode::kUpdateTopAndCurop,
+                                 0);
         } else {
             ctx.emplace(opCtx, nss, AutoGetCollection::ViewMode::kViewsPermitted);
         }
@@ -476,7 +516,7 @@ Status runAggregate(OperationContext* opCtx,
             auto newRequest = resolvedView.asExpandedViewAggregation(request);
             auto newCmd = newRequest.serializeToCommandObj().toBson();
 
-            auto status = runAggregate(opCtx, origNss, newRequest, newCmd, result);
+            auto status = runAggregate(opCtx, origNss, newRequest, newCmd, privileges, result);
 
             {
                 // Set the namespace of the curop back to the view namespace so ctx records
@@ -498,7 +538,7 @@ Status runAggregate(OperationContext* opCtx,
         if (!pipelineInvolvedNamespaces.empty()) {
             invariant(ctx);
             auto pipelineCollationStatus = collatorCompatibleWithPipeline(
-                opCtx, ctx->getDb(), expCtx->getCollator(), pipeline.get());
+                opCtx, ctx->getDb(), expCtx->getCollator(), liteParsedPipeline);
             if (!pipelineCollationStatus.isOK()) {
                 return pipelineCollationStatus;
             }
@@ -540,8 +580,8 @@ Status runAggregate(OperationContext* opCtx,
 
                 // Create a new pipeline for the consumer consisting of a single
                 // DocumentSourceExchange.
-                boost::intrusive_ptr<DocumentSource> consumer =
-                    new DocumentSourceExchange(expCtx, exchange, idx);
+                boost::intrusive_ptr<DocumentSource> consumer = new DocumentSourceExchange(
+                    expCtx, exchange, idx, expCtx->mongoProcessInterface->getResourceYielder());
                 pipelines.emplace_back(uassertStatusOK(Pipeline::create({consumer}, expCtx)));
             }
         } else {
@@ -551,8 +591,9 @@ Status runAggregate(OperationContext* opCtx,
         for (size_t idx = 0; idx < pipelines.size(); ++idx) {
             // Transfer ownership of the Pipeline to the PipelineProxyStage.
             auto ws = make_unique<WorkingSet>();
-            auto proxy =
-                make_unique<PipelineProxyStage>(opCtx, std::move(pipelines[idx]), ws.get());
+            auto proxy = liteParsedPipeline.hasChangeStream()
+                ? make_unique<ChangeStreamProxyStage>(opCtx, std::move(pipelines[idx]), ws.get())
+                : make_unique<PipelineProxyStage>(opCtx, std::move(pipelines[idx]), ws.get());
 
             // This PlanExecutor will simply forward requests to the Pipeline, so does not need to
             // yield or to be registered with any collection's CursorManager to receive
@@ -582,21 +623,20 @@ Status runAggregate(OperationContext* opCtx,
     std::vector<ClientCursorPin> pins;
     std::vector<ClientCursor*> cursors;
 
-    ScopeGuard cursorFreer = MakeGuard(
-        [](std::vector<ClientCursorPin>* pins) {
-            for (auto& p : *pins) {
-                p.deleteUnderlying();
-            }
-        },
-        &pins);
-
+    auto cursorFreer = makeGuard([&] {
+        for (auto& p : pins) {
+            p.deleteUnderlying();
+        }
+    });
     for (size_t idx = 0; idx < execs.size(); ++idx) {
         ClientCursorParams cursorParams(
             std::move(execs[idx]),
             origNss,
             AuthorizationSession::get(opCtx->getClient())->getAuthenticatedUserNames(),
             repl::ReadConcernArgs::get(opCtx),
-            cmdObj);
+            cmdObj,
+            ClientCursorParams::LockPolicy::kLocksInternally,
+            privileges);
         if (expCtx->tailableMode == TailableModeEnum::kTailable) {
             cursorParams.setTailable(true);
         } else if (expCtx->tailableMode == TailableModeEnum::kTailableAndAwaitData) {
@@ -604,8 +644,7 @@ Status runAggregate(OperationContext* opCtx,
             cursorParams.setAwaitData(true);
         }
 
-        auto pin =
-            CursorManager::getGlobalCursorManager()->registerCursor(opCtx, std::move(cursorParams));
+        auto pin = CursorManager::get(opCtx)->registerCursor(opCtx, std::move(cursorParams));
         cursors.emplace_back(pin.getCursor());
         pins.emplace_back(std::move(pin));
     }
@@ -620,7 +659,7 @@ Status runAggregate(OperationContext* opCtx,
         const bool keepCursor =
             handleCursorCommand(opCtx, origNss, std::move(cursors), request, result);
         if (keepCursor) {
-            cursorFreer.Dismiss();
+            cursorFreer.dismiss();
         }
     }
 

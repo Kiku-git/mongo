@@ -165,7 +165,7 @@ class _TestList(object):
             else:
                 if not self._test_file_explorer.isfile(test):
                     raise ValueError("Unrecognized test file: {}".format(test))
-                expanded_tests.append(test)
+                expanded_tests.append(os.path.normpath(test))
         return expanded_tests
 
     def include_files(self, include_files, force=False):
@@ -669,6 +669,22 @@ class _PyTestCaseSelectorConfig(_SelectorConfig):
                                  exclude_files=exclude_files)
 
 
+class _GennylibTestCaseSelectorConfig(_SelectorConfig):
+    """_SelectorConfig subclass for gennylib_test tests."""
+
+    def __init__(self):
+        """Initialize _GennylibTestCaseSelectorConfig."""
+        _SelectorConfig.__init__(self, roots=["dummy-gennylib-test-roots"])
+
+
+class _GennylibTestCaseSelector(_Selector):
+    """_Selector subclass for gennylib_test tests."""
+
+    def __init__(self, test_file_explorer):
+        """Initialize _GennylibTestCaseSelector."""
+        _Selector.__init__(self, test_file_explorer, tests_are_files=False)
+
+
 ##########################################
 # Module entry point for filtering tests #
 ##########################################
@@ -691,6 +707,7 @@ _SELECTOR_REGISTRY = {
     "py_test": (_PyTestCaseSelectorConfig, _Selector),
     "sleep_test": (_SleepTestCaseSelectorConfig, _SleepTestCaseSelector),
     "genny_test": (_FileBasedSelectorConfig, _Selector),
+    "gennylib_test": (_GennylibTestCaseSelectorConfig, _GennylibTestCaseSelector),
 }
 
 

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -215,7 +214,16 @@ TEST(LRUCacheTest, SizeZeroCache) {
 
 // Test a very large cache size
 TEST(LRUCacheTest, StressTest) {
+// If iterator debugging is on the LRU Cache destructor may be O(n^2). Reduce the max iteration size
+// to handle this.
+#if _MSC_VER && _ITERATOR_DEBUG_LEVEL >= 2
+    const int maxSize = 10000;
+    std::array<int, 3> sample{1, 34, 400};
+#else
     const int maxSize = 1000000;
+    std::array<int, 5> sample{1, 34, 400, 12345, 999999};
+#endif
+
     LRUCache<int, int> cache(maxSize);
 
     // Fill up the cache
@@ -227,7 +235,6 @@ TEST(LRUCacheTest, StressTest) {
     assertEquals(cache.size(), size_t(maxSize));
 
     // Perform some basic functions on the cache
-    std::array<int, 5> sample{1, 34, 400, 12345, 999999};
     for (auto s : sample) {
         auto found = cache.find(s);
         assertEquals(found->second, s);
@@ -572,7 +579,7 @@ TEST(LRUCacheTest, CustomHashAndEqualityTypeTest) {
     // this should replace the original value of 20 with 0.
     FunkyKeyType sortaEqual(10, 0);
     assertEquals(cache.size(), size_t(1));
-    auto replaced = cache.add(sortaEqual, sortaEqual._b);
+    cache.add(sortaEqual, sortaEqual._b);
     assertEquals(cache.size(), size_t(1));
     found = cache.find(key);
     assertNotEquals(found, cache.end());

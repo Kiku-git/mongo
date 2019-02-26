@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -49,7 +48,6 @@ class StorageInterfaceMock;
 class MockReplCoordServerFixture : public ServiceContextMongoDTest {
 public:
     void setUp() override;
-    void tearDown() override;
 
     /**
      * Helper method for inserting new entries to the oplog. This completely bypasses

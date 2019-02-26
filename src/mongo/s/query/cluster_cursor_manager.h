@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -194,9 +193,21 @@ public:
         BSONObj getOriginatingCommand() const;
 
         /**
+         * Returns the privleges for the original command object which created this cursor.
+         */
+
+        const PrivilegeVector& getOriginatingPrivileges() const&;
+        void getOriginatingPrivileges() && = delete;
+
+        /**
          * Returns a reference to the vector of remote hosts involved in this operation.
          */
         std::size_t getNumRemotes() const;
+
+        /**
+         * If applicable, returns the current most-recent resume token for this cursor.
+         */
+        BSONObj getPostBatchResumeToken() const;
 
         /**
          * Returns the cursor id for the underlying cursor, or zero if no cursor is owned.
@@ -474,8 +485,7 @@ private:
     class CursorEntry;
     struct CursorEntryContainer;
     using CursorEntryMap = stdx::unordered_map<CursorId, CursorEntry>;
-    using NssToCursorContainerMap =
-        stdx::unordered_map<NamespaceString, CursorEntryContainer, NamespaceString::Hasher>;
+    using NssToCursorContainerMap = stdx::unordered_map<NamespaceString, CursorEntryContainer>;
 
     /**
      * Transfers ownership of the given pinned cursor back to the manager, and moves the cursor to

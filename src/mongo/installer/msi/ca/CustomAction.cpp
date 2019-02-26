@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -103,10 +102,11 @@ std::string do_replace(MSIHANDLE hInstall,
 
     if (pos == std::string::npos) {
         LogMessage(hInstall,
-                   INSTALLMESSAGE_WARNING,
+                   INSTALLMESSAGE_INFO,
                    "Failed to find '%s' in '%s'",
                    original.c_str(),
                    source.c_str());
+        return source;
     }
 
     return source.replace(pos, original.length(), replacement);
@@ -285,7 +285,7 @@ extern "C" UINT __stdcall UpdateMongoYAML(MSIHANDLE hInstall) {
             CHECKGLE_AND_LOG("Failed to open yaml file");
         }
 
-        const auto handleGuard = mongo::MakeGuard([&] { CloseHandle(hFile); });
+        const auto handleGuard = mongo::makeGuard([&] { CloseHandle(hFile); });
 
         LARGE_INTEGER fileSize;
         if (GetFileSizeEx(hFile, &fileSize) == 0) {

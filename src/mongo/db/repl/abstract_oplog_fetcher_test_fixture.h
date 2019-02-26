@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -68,9 +67,8 @@ public:
     /**
      * Static functions for creating noop oplog entries.
      */
-    static BSONObj makeNoopOplogEntry(OpTimeWithHash opTimeWithHash);
-    static BSONObj makeNoopOplogEntry(OpTime opTime, long long hash);
-    static BSONObj makeNoopOplogEntry(Seconds seconds, long long hash);
+    static BSONObj makeNoopOplogEntry(OpTime opTime);
+    static BSONObj makeNoopOplogEntry(Seconds seconds);
 
     /**
      * A static function for creating the response to a cursor. If it's the last batch, the
@@ -94,8 +92,8 @@ protected:
     executor::RemoteCommandRequest processNetworkResponse(
         BSONObj obj, bool expectReadyRequestsAfterProcessing = false);
 
-    // The last OpTime and hash fetched by the oplog fetcher.
-    OpTimeWithHash lastFetched;
+    // The last OpTime fetched by the oplog fetcher.
+    OpTime lastFetched;
 };
 }  // namespace repl
 }  // namespace mango

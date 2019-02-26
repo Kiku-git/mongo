@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -39,8 +38,6 @@ class Tee;
 }  // namespace logger
 
 namespace repl {
-
-void fillRsLog(std::stringstream* s);
 
 // ramlog used for replSet actions
 extern logger::Tee* rsLog;

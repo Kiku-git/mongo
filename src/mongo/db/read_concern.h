@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -41,6 +40,7 @@ template <typename T>
 class StatusWith;
 namespace repl {
 class ReadConcernArgs;
+class SpeculativeMajorityReadInfo;
 }
 
 
@@ -58,7 +58,20 @@ extern MONGO_DECLARE_SHIM((OperationContext * opCtx,
 /*
  * Given a linearizable read command, confirm that
  * current primary is still the true primary of the replica set.
+ *
+ * A readConcernTimeout of 0 indicates that the operation will block indefinitely waiting for read
+ * concern.
  */
-extern MONGO_DECLARE_SHIM((OperationContext * opCtx)->Status) waitForLinearizableReadConcern;
+extern MONGO_DECLARE_SHIM((OperationContext * opCtx, const int readConcernTimeout)->Status)
+    waitForLinearizableReadConcern;
+
+/**
+ * Waits to satisfy a "speculative" majority read.
+ *
+ * This method must only be called if the operation is a speculative majority read.
+ */
+extern MONGO_DECLARE_SHIM((OperationContext * opCtx,
+                           repl::SpeculativeMajorityReadInfo speculativeReadInfo)
+                              ->Status) waitForSpeculativeMajorityReadConcern;
 
 }  // namespace mongo

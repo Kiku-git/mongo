@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -52,8 +51,10 @@
 #include "mongo/db/query/getmore_request.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_summary_stats.h"
+#include "mongo/db/read_concern.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/repl/speculative_majority_read_info.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/stats/top.h"
@@ -70,7 +71,8 @@ namespace {
 
 MONGO_FAIL_POINT_DEFINE(rsStopGetMoreCmd);
 
-MONGO_FAIL_POINT_DEFINE(waitWithPinnedCursorDuringGetMoreBatch);
+// The timeout when waiting for linearizable read concern on a getMore command.
+static constexpr int kLinearizableReadConcernTimeout = 15000;
 
 /**
  * Validates that the lsid of 'opCtx' matches that of 'cursor'. This must be called after
@@ -128,6 +130,30 @@ void validateTxnNumber(OperationContext* opCtx,
                           << *opCtx->getTxnNumber(),
             !opCtx->getTxnNumber() || !cursor->getTxnNumber() ||
                 (*opCtx->getTxnNumber() == *cursor->getTxnNumber()));
+}
+
+/**
+ * Apply the read concern from the cursor to this operation.
+ */
+void applyCursorReadConcern(OperationContext* opCtx, repl::ReadConcernArgs rcArgs) {
+    const auto replicationMode = repl::ReplicationCoordinator::get(opCtx)->getReplicationMode();
+    if (replicationMode == repl::ReplicationCoordinator::modeReplSet &&
+        rcArgs.getLevel() == repl::ReadConcernLevel::kMajorityReadConcern) {
+        switch (rcArgs.getMajorityReadMechanism()) {
+            case repl::ReadConcernArgs::MajorityReadMechanism::kMajoritySnapshot: {
+                // Make sure we read from the majority snapshot.
+                opCtx->recoveryUnit()->setTimestampReadSource(
+                    RecoveryUnit::ReadSource::kMajorityCommitted);
+                uassertStatusOK(opCtx->recoveryUnit()->obtainMajorityCommittedSnapshot());
+                break;
+            }
+            case repl::ReadConcernArgs::MajorityReadMechanism::kSpeculative: {
+                // Mark the operation as speculative.
+                repl::SpeculativeMajorityReadInfo::get(opCtx).setIsSpeculativeRead();
+                break;
+            }
+        }
+    }
 }
 
 /**
@@ -207,8 +233,10 @@ public:
 
                     // As soon as we get a result, this operation no longer waits.
                     awaitDataState(opCtx).shouldWaitForInserts = false;
-                    // Add result to output buffer.
+                    // TODO SERVER-38539: We need to set both the latestOplogTimestamp and the
+                    // postBatchResumeToken until the former is removed in a future release.
                     nextBatch->setLatestOplogTimestamp(exec->getLatestOplogTimestamp());
+                    nextBatch->setPostBatchResumeToken(exec->getPostBatchResumeToken());
                     nextBatch->append(obj);
                     (*numResults)++;
                 }
@@ -219,11 +247,11 @@ public:
             }
 
             switch (*state) {
-                case PlanExecutor::FAILURE:
-                    // Log an error message and then perform the same cleanup as DEAD.
-                    error() << "GetMore command executor error: " << PlanExecutor::statestr(*state)
-                            << ", stats: " << redact(Explain::getWinningPlanStats(exec));
-                case PlanExecutor::DEAD: {
+                case PlanExecutor::FAILURE: {
+                    // Log an error message and then perform the cleanup.
+                    error() << "GetMore command executor error: FAILURE, stats: "
+                            << redact(Explain::getWinningPlanStats(exec));
+
                     nextBatch->abandon();
                     // We should always have a valid status member object at this point.
                     auto status = WorkingSetCommon::getMemberObjectStatus(obj);
@@ -233,7 +261,10 @@ public:
                 case PlanExecutor::IS_EOF:
                     // This causes the reported latest oplog timestamp to advance even when there
                     // are no results for this particular query.
+                    // TODO SERVER-38539: We need to set both the latestOplogTimestamp and the
+                    // postBatchResumeToken until the former is removed in a future release.
                     nextBatch->setLatestOplogTimestamp(exec->getLatestOplogTimestamp());
+                    nextBatch->setPostBatchResumeToken(exec->getPostBatchResumeToken());
                 default:
                     return Status::OK();
             }
@@ -241,73 +272,81 @@ public:
             MONGO_UNREACHABLE;
         }
 
-        void run(OperationContext* opCtx, rpc::ReplyBuilderInterface* reply) override {
-            // Counted as a getMore, not as a command.
-            globalOpCounters.gotGetMore();
-            auto curOp = CurOp::get(opCtx);
-            curOp->debug().cursorid = _request.cursorid;
-
-            // Validate term before acquiring locks, if provided.
-            if (_request.term) {
-                auto replCoord = repl::ReplicationCoordinator::get(opCtx);
-                // Note: updateTerm returns ok if term stayed the same.
-                uassertStatusOK(replCoord->updateTerm(opCtx, *_request.term));
-            }
-
+        void acquireLocksAndIterateCursor(OperationContext* opCtx,
+                                          rpc::ReplyBuilderInterface* reply,
+                                          CursorManager* cursorManager,
+                                          ClientCursorPin& cursorPin,
+                                          CurOp* curOp) {
             // Cursors come in one of two flavors:
-            // - Cursors owned by the collection cursor manager, such as those generated via the
-            // find command. For these cursors, we hold the appropriate collection lock for the
-            // duration of the getMore using AutoGetCollectionForRead.
-            // - Cursors owned by the global cursor manager, e.g. those generated via the aggregate
-            // command. These cursors either hold no collection state or manage their collection
-            // state internally, so we acquire no locks.
             //
-            // While we only need to acquire locks in the case of a cursor which is *not* globally
-            // owned, we need to create an AutoStatsTracker in either case. This is responsible for
-            // updating statistics in CurOp and Top. We avoid using AutoGetCollectionForReadCommand
-            // because we may need to drop and reacquire locks when the cursor is awaitData, but we
-            // don't want to update the stats twice.
+            // - Cursors which read from a single collection, such as those generated via the
+            //   find command. For these cursors, we hold the appropriate collection lock for the
+            //   duration of the getMore using AutoGetCollectionForRead. These cursors have the
+            //   'kLockExternally' lock policy.
             //
-            // Note that we acquire our locks before our ClientCursorPin, in order to ensure that
-            // the pin's destructor is called before the lock's destructor (if there is one) so that
-            // the cursor cleanup can occur under the lock.
+            // - Cursors which may read from many collections, e.g. those generated via the
+            //   aggregate command, or which do not read from a collection at all, e.g. those
+            //   generated by the listIndexes command. We don't need to acquire locks to use these
+            //   cursors, since they either manage locking themselves or don't access data protected
+            //   by collection locks. These cursors have the 'kLocksInternally' lock policy.
+            //
+            // While we only need to acquire locks for 'kLockExternally' cursors, we need to create
+            // an AutoStatsTracker in either case. This is responsible for updating statistics in
+            // CurOp and Top. We avoid using AutoGetCollectionForReadCommand because we may need to
+            // drop and reacquire locks when the cursor is awaitData, but we don't want to update
+            // the stats twice.
             boost::optional<AutoGetCollectionForRead> readLock;
             boost::optional<AutoStatsTracker> statsTracker;
-            CursorManager* cursorManager;
 
-            if (CursorManager::isGloballyManagedCursor(_request.cursorid)) {
-                cursorManager = CursorManager::getGlobalCursorManager();
+            {
+                // We call RecoveryUnit::setTimestampReadSource() before acquiring a lock on the
+                // collection via AutoGetCollectionForRead in order to ensure the comparison to the
+                // collection's minimum visible snapshot is accurate.
+                PlanExecutor* exec = cursorPin->getExecutor();
+                const auto* cq = exec->getCanonicalQuery();
 
-                if (boost::optional<NamespaceString> nssForCurOp =
-                        _request.nss.isGloballyManagedNamespace()
-                        ? _request.nss.getTargetNSForGloballyManagedNamespace()
-                        : _request.nss) {
+                if (auto clusterTime =
+                        (cq ? cq->getQueryRequest().getReadAtClusterTime() : boost::none)) {
+                    // We don't compare 'clusterTime' to the last applied opTime or to the
+                    // all-committed timestamp because the testing infrastructure won't use the
+                    // $_internalReadAtClusterTime option in any test suite where rollback is
+                    // expected to occur.
+
+                    // The $_internalReadAtClusterTime option causes any storage-layer cursors
+                    // created during plan execution to read from a consistent snapshot of data at
+                    // the supplied clusterTime, even across yields.
+                    opCtx->recoveryUnit()->setTimestampReadSource(
+                        RecoveryUnit::ReadSource::kProvided, clusterTime);
+
+                    // The $_internalReadAtClusterTime option also causes any storage-layer cursors
+                    // created during plan execution to block on prepared transactions.
+                    opCtx->recoveryUnit()->setIgnorePrepared(false);
+                }
+            }
+            if (cursorPin->lockPolicy() == ClientCursorParams::LockPolicy::kLocksInternally) {
+                if (!_request.nss.isCollectionlessCursorNamespace()) {
                     const boost::optional<int> dbProfilingLevel = boost::none;
-                    statsTracker.emplace(
-                        opCtx, *nssForCurOp, Top::LockType::NotLocked, dbProfilingLevel);
+                    statsTracker.emplace(opCtx,
+                                         _request.nss,
+                                         Top::LockType::NotLocked,
+                                         AutoStatsTracker::LogMode::kUpdateTopAndCurop,
+                                         dbProfilingLevel);
                 }
             } else {
+                invariant(cursorPin->lockPolicy() ==
+                          ClientCursorParams::LockPolicy::kLockExternally);
                 readLock.emplace(opCtx, _request.nss);
                 const int doNotChangeProfilingLevel = 0;
                 statsTracker.emplace(opCtx,
                                      _request.nss,
                                      Top::LockType::ReadLocked,
+                                     AutoStatsTracker::LogMode::kUpdateTopAndCurop,
                                      readLock->getDb() ? readLock->getDb()->getProfilingLevel()
                                                        : doNotChangeProfilingLevel);
-
-                Collection* collection = readLock->getCollection();
-                if (!collection) {
-                    uasserted(ErrorCodes::OperationFailed,
-                              "collection dropped between getMore calls");
-                }
-                cursorManager = collection->getCursorManager();
             }
 
-            auto ccPin = uassertStatusOK(cursorManager->pinCursor(opCtx, _request.cursorid));
-            ClientCursor* cursor = ccPin.getCursor();
-
             // Only used by the failpoints.
-            const auto dropAndReaquireReadLock = [&readLock, opCtx, this]() {
+            stdx::function<void()> dropAndReacquireReadLock = [&readLock, opCtx, this]() {
                 // Make sure an interrupted operation does not prevent us from reacquiring the lock.
                 UninterruptibleLockGuard noInterrupt(opCtx->lockState());
 
@@ -315,39 +354,33 @@ public:
                 readLock.emplace(opCtx, _request.nss);
             };
 
-            // If the 'waitAfterPinningCursorBeforeGetMoreBatch' fail point is enabled, set the
-            // 'msg' field of this operation's CurOp to signal that we've hit this point and then
-            // repeatedly release and re-acquire the collection readLock at regular intervals until
-            // the failpoint is released. This is done in order to avoid deadlocks caused by the
-            // pinned-cursor failpoints in this file (see SERVER-21997).
-            if (MONGO_FAIL_POINT(waitAfterPinningCursorBeforeGetMoreBatch)) {
-                CurOpFailpointHelpers::waitWhileFailPointEnabled(
-                    &waitAfterPinningCursorBeforeGetMoreBatch,
-                    opCtx,
-                    "waitAfterPinningCursorBeforeGetMoreBatch",
-                    dropAndReaquireReadLock);
-            }
-
             // A user can only call getMore on their own cursor. If there were multiple users
             // authenticated when the cursor was created, then at least one of them must be
             // authenticated in order to run getMore on the cursor.
-            if (!AuthorizationSession::get(opCtx->getClient())
-                     ->isCoauthorizedWith(cursor->getAuthenticatedUsers())) {
+            auto authzSession = AuthorizationSession::get(opCtx->getClient());
+            if (!authzSession->isCoauthorizedWith(cursorPin->getAuthenticatedUsers())) {
                 uasserted(ErrorCodes::Unauthorized,
                           str::stream() << "cursor id " << _request.cursorid
                                         << " was not created by the authenticated user");
             }
 
-            if (_request.nss != cursor->nss()) {
+            // Ensure that the client still has the privileges to run the originating command.
+            if (!authzSession->isAuthorizedForPrivileges(cursorPin->getOriginatingPrivileges())) {
+                uasserted(ErrorCodes::Unauthorized,
+                          str::stream() << "not authorized for getMore with cursor id "
+                                        << _request.cursorid);
+            }
+
+            if (_request.nss != cursorPin->nss()) {
                 uasserted(ErrorCodes::Unauthorized,
                           str::stream() << "Requested getMore on namespace '" << _request.nss.ns()
                                         << "', but cursor belongs to a different namespace "
-                                        << cursor->nss().ns());
+                                        << cursorPin->nss().ns());
             }
 
             // Ensure the lsid and txnNumber of the getMore match that of the originating command.
-            validateLSID(opCtx, _request, cursor);
-            validateTxnNumber(opCtx, _request, cursor);
+            validateLSID(opCtx, _request, cursorPin.getCursor());
+            validateTxnNumber(opCtx, _request, cursorPin.getCursor());
 
             if (_request.nss.isOplog() && MONGO_FAIL_POINT(rsStopGetMoreCmd)) {
                 uasserted(ErrorCodes::CommandFailed,
@@ -356,27 +389,40 @@ public:
             }
 
             // Validation related to awaitData.
-            if (cursor->isAwaitData()) {
-                invariant(cursor->isTailable());
+            if (cursorPin->isAwaitData()) {
+                invariant(cursorPin->isTailable());
             }
 
-            if (_request.awaitDataTimeout && !cursor->isAwaitData()) {
+            if (_request.awaitDataTimeout && !cursorPin->isAwaitData()) {
                 uasserted(ErrorCodes::BadValue,
                           "cannot set maxTimeMS on getMore command for a non-awaitData cursor");
             }
 
             // On early return, get rid of the cursor.
-            ScopeGuard cursorFreer = MakeGuard(&ClientCursorPin::deleteUnderlying, &ccPin);
+            auto cursorFreer = makeGuard([&] { cursorPin.deleteUnderlying(); });
 
-            const auto replicationMode =
-                repl::ReplicationCoordinator::get(opCtx)->getReplicationMode();
-            if (replicationMode == repl::ReplicationCoordinator::modeReplSet &&
-                cursor->getReadConcernArgs().getLevel() ==
-                    repl::ReadConcernLevel::kMajorityReadConcern) {
-                opCtx->recoveryUnit()->setTimestampReadSource(
-                    RecoveryUnit::ReadSource::kMajorityCommitted);
-                uassertStatusOK(opCtx->recoveryUnit()->obtainMajorityCommittedSnapshot());
+            // If the 'waitAfterPinningCursorBeforeGetMoreBatch' fail point is enabled, set the
+            // 'msg' field of this operation's CurOp to signal that we've hit this point and then
+            // repeatedly release and re-acquire the collection readLock at regular intervals until
+            // the failpoint is released. This is done in order to avoid deadlocks caused by the
+            // pinned-cursor failpoints in this file (see SERVER-21997).
+            MONGO_FAIL_POINT_BLOCK(waitAfterPinningCursorBeforeGetMoreBatch, options) {
+                const BSONObj& data = options.getData();
+                if (data["shouldNotdropLock"].booleanSafe()) {
+                    dropAndReacquireReadLock = []() {};
+                }
+
+                CurOpFailpointHelpers::waitWhileFailPointEnabled(
+                    &waitAfterPinningCursorBeforeGetMoreBatch,
+                    opCtx,
+                    "waitAfterPinningCursorBeforeGetMoreBatch",
+                    dropAndReacquireReadLock,
+                    false,
+                    _request.nss);
             }
+
+            // We must respect the read concern from the cursor.
+            applyCursorReadConcern(opCtx, cursorPin->getReadConcernArgs());
 
             const bool disableAwaitDataFailpointActive =
                 MONGO_FAIL_POINT(disableAwaitDataForGetMoreCmd);
@@ -388,20 +434,26 @@ public:
                 // awaitData, then we supply a default time of one second. Otherwise we roll over
                 // any leftover time from the maxTimeMS of the operation that spawned this cursor,
                 // applying it to this getMore.
-                if (cursor->isAwaitData() && !disableAwaitDataFailpointActive) {
+                if (cursorPin->isAwaitData() && !disableAwaitDataFailpointActive) {
                     awaitDataState(opCtx).waitForInsertsDeadline =
                         opCtx->getServiceContext()->getPreciseClockSource()->now() +
                         _request.awaitDataTimeout.value_or(Seconds{1});
-                } else if (cursor->getLeftoverMaxTimeMicros() < Microseconds::max()) {
-                    opCtx->setDeadlineAfterNowBy(cursor->getLeftoverMaxTimeMicros(),
+                } else if (cursorPin->getLeftoverMaxTimeMicros() < Microseconds::max()) {
+                    opCtx->setDeadlineAfterNowBy(cursorPin->getLeftoverMaxTimeMicros(),
                                                  ErrorCodes::MaxTimeMSExpired);
                 }
             }
-            if (!cursor->isAwaitData()) {
+            if (!cursorPin->isAwaitData()) {
                 opCtx->checkForInterrupt();  // May trigger maxTimeAlwaysTimeOut fail point.
             }
 
-            PlanExecutor* exec = cursor->getExecutor();
+            PlanExecutor* exec = cursorPin->getExecutor();
+            const auto* cq = exec->getCanonicalQuery();
+            if (cq && cq->getQueryRequest().isReadOnce()) {
+                // The readOnce option causes any storage-layer cursors created during plan
+                // execution to assume read data will not be needed again and need not be cached.
+                opCtx->recoveryUnit()->setReadOnce(true);
+            }
             exec->reattachToOperationContext(opCtx);
             exec->restoreState();
 
@@ -412,13 +464,13 @@ public:
 
                 // Ensure that the original query or command object is available in the slow query
                 // log, profiler and currentOp.
-                auto originatingCommand = cursor->getOriginatingCommandObj();
+                auto originatingCommand = cursorPin->getOriginatingCommandObj();
                 if (!originatingCommand.isEmpty()) {
                     curOp->setOriginatingCommand_inlock(originatingCommand);
                 }
 
                 // Update the genericCursor stored in curOp with the new cursor stats.
-                curOp->setGenericCursor_inlock(cursor->toGenericCursor());
+                curOp->setGenericCursor_inlock(cursorPin->toGenericCursor());
             }
 
             CursorId respondWithId = 0;
@@ -435,7 +487,7 @@ public:
             Explain::getSummaryStats(*exec, &preExecutionStats);
 
             // Mark this as an AwaitData operation if appropriate.
-            if (cursor->isAwaitData() && !disableAwaitDataFailpointActive) {
+            if (cursorPin->isAwaitData() && !disableAwaitDataFailpointActive) {
                 if (_request.lastKnownCommittedOpTime)
                     clientsLastKnownCommittedOpTime(opCtx) =
                         _request.lastKnownCommittedOpTime.get();
@@ -451,11 +503,11 @@ public:
                     &waitWithPinnedCursorDuringGetMoreBatch,
                     opCtx,
                     "waitWithPinnedCursorDuringGetMoreBatch",
-                    dropAndReaquireReadLock);
+                    dropAndReacquireReadLock);
             }
 
-            uassertStatusOK(
-                generateBatch(opCtx, cursor, _request, &nextBatch, &state, &numResults));
+            uassertStatusOK(generateBatch(
+                opCtx, cursorPin.getCursor(), _request, &nextBatch, &state, &numResults));
 
             PlanSummaryStats postExecutionStats;
             Explain::getSummaryStats(*exec, &postExecutionStats);
@@ -463,26 +515,27 @@ public:
             postExecutionStats.totalDocsExamined -= preExecutionStats.totalDocsExamined;
             curOp->debug().setPlanSummaryMetrics(postExecutionStats);
 
-            // We do not report 'execStats' for aggregation or other globally managed cursors, both
-            // in the original request and subsequent getMore. It would be useful to have this info
-            // for an aggregation, but the source PlanExecutor could be destroyed before we know if
-            // we need execStats and we do not want to generate for all operations due to cost.
-            if (!CursorManager::isGloballyManagedCursor(_request.cursorid) &&
+            // We do not report 'execStats' for aggregation or other cursors with the
+            // 'kLocksInternally' policy, both in the original request and subsequent getMore. It
+            // would be useful to have this info for an aggregation, but the source PlanExecutor
+            // could be destroyed before we know if we need 'execStats' and we do not want to
+            // generate the stats eagerly for all operations due to cost.
+            if (cursorPin->lockPolicy() != ClientCursorParams::LockPolicy::kLocksInternally &&
                 curOp->shouldDBProfile()) {
                 BSONObjBuilder execStatsBob;
                 Explain::getWinningPlanStats(exec, &execStatsBob);
                 curOp->debug().execStats = execStatsBob.obj();
             }
 
-            if (shouldSaveCursorGetMore(state, exec, cursor->isTailable())) {
+            if (shouldSaveCursorGetMore(state, exec, cursorPin->isTailable())) {
                 respondWithId = _request.cursorid;
 
                 exec->saveState();
                 exec->detachFromOperationContext();
 
-                cursor->setLeftoverMaxTimeMicros(opCtx->getRemainingMaxTimeMicros());
-                cursor->incNReturnedSoFar(numResults);
-                cursor->incNBatches();
+                cursorPin->setLeftoverMaxTimeMicros(opCtx->getRemainingMaxTimeMicros());
+                cursorPin->incNReturnedSoFar(numResults);
+                cursorPin->incNBatches();
             } else {
                 curOp->debug().cursorExhausted = true;
             }
@@ -494,7 +547,40 @@ public:
             curOp->debug().nreturned = numResults;
 
             if (respondWithId) {
-                cursorFreer.Dismiss();
+                cursorFreer.dismiss();
+            }
+        }
+
+        void run(OperationContext* opCtx, rpc::ReplyBuilderInterface* reply) override {
+            // Counted as a getMore, not as a command.
+            globalOpCounters.gotGetMore();
+            auto curOp = CurOp::get(opCtx);
+            curOp->debug().cursorid = _request.cursorid;
+
+            // Validate term before acquiring locks, if provided.
+            if (_request.term) {
+                auto replCoord = repl::ReplicationCoordinator::get(opCtx);
+                // Note: updateTerm returns ok if term stayed the same.
+                uassertStatusOK(replCoord->updateTerm(opCtx, *_request.term));
+            }
+
+            auto cursorManager = CursorManager::get(opCtx);
+            auto cursorPin = uassertStatusOK(cursorManager->pinCursor(opCtx, _request.cursorid));
+
+            // Get the read concern level here in case the cursor is exhausted while iterating.
+            const auto isLinearizableReadConcern = cursorPin->getReadConcernArgs().getLevel() ==
+                repl::ReadConcernLevel::kLinearizableReadConcern;
+
+            acquireLocksAndIterateCursor(opCtx, reply, cursorManager, cursorPin, curOp);
+
+            if (isLinearizableReadConcern) {
+                // waitForLinearizableReadConcern performs a NoOp write and waits for that write
+                // to have been majority committed. awaitReplication requires that we release all
+                // locks to prevent blocking for a long time while doing network activity. Since
+                // getMores do not have support for a maxTimeout duration, we hardcode the timeout
+                // to avoid waiting indefinitely.
+                uassertStatusOK(
+                    mongo::waitForLinearizableReadConcern(opCtx, kLinearizableReadConcernTimeout));
             }
 
             // We're about to unpin or delete the cursor as the ClientCursorPin goes out of scope.
@@ -505,8 +591,7 @@ public:
                 CurOpFailpointHelpers::waitWhileFailPointEnabled(
                     &waitBeforeUnpinningOrDeletingCursorAfterGetMoreBatch,
                     opCtx,
-                    "waitBeforeUnpinningOrDeletingCursorAfterGetMoreBatch",
-                    dropAndReaquireReadLock);
+                    "waitBeforeUnpinningOrDeletingCursorAfterGetMoreBatch");
             }
         }
 

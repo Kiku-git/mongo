@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -83,11 +82,11 @@ public:
         MONGO_UNREACHABLE;
     }
 
-    virtual LockResult lockGlobal(OperationContext* opCtx, LockMode mode) {
+    virtual void lockGlobal(OperationContext* opCtx, LockMode mode) {
         MONGO_UNREACHABLE;
     }
 
-    virtual LockResult lockGlobal(LockMode mode) {
+    virtual void lockGlobal(LockMode mode) {
         MONGO_UNREACHABLE;
     }
 
@@ -99,11 +98,11 @@ public:
         MONGO_UNREACHABLE;
     }
 
-    virtual LockResult lockGlobalComplete(OperationContext* opCtx, Date_t deadline) {
+    virtual void lockGlobalComplete(OperationContext* opCtx, Date_t deadline) {
         MONGO_UNREACHABLE;
     }
 
-    virtual LockResult lockGlobalComplete(Date_t deadline) {
+    virtual void lockGlobalComplete(Date_t deadline) {
         MONGO_UNREACHABLE;
     }
 
@@ -111,24 +110,29 @@ public:
         MONGO_UNREACHABLE;
     }
 
-    virtual void beginWriteUnitOfWork() {}
+    virtual void beginWriteUnitOfWork() override {}
 
-    virtual void endWriteUnitOfWork() {}
+    virtual void endWriteUnitOfWork() override {}
 
     virtual bool inAWriteUnitOfWork() const {
+        return false;
+    }
+
+    virtual LockResult lockRSTLBegin(OperationContext* opCtx) {
         MONGO_UNREACHABLE;
     }
 
-    virtual LockResult lock(OperationContext* opCtx,
-                            ResourceId resId,
-                            LockMode mode,
-                            Date_t deadline) {
-        return LockResult::LOCK_OK;
+    virtual void lockRSTLComplete(OperationContext* opCtx, Date_t deadline) {
+        MONGO_UNREACHABLE;
     }
 
-    virtual LockResult lock(ResourceId resId, LockMode mode, Date_t deadline) {
-        return LockResult::LOCK_OK;
+    virtual bool unlockRSTLforPrepare() {
+        MONGO_UNREACHABLE;
     }
+
+    virtual void lock(OperationContext* opCtx, ResourceId resId, LockMode mode, Date_t deadline) {}
+
+    virtual void lock(ResourceId resId, LockMode mode, Date_t deadline) {}
 
     virtual void downgrade(ResourceId resId, LockMode newMode) {
         MONGO_UNREACHABLE;
@@ -179,6 +183,15 @@ public:
         MONGO_UNREACHABLE;
     }
 
+    bool releaseWriteUnitOfWork(LockSnapshot* stateOut) override {
+        MONGO_UNREACHABLE;
+    }
+
+    void restoreWriteUnitOfWork(OperationContext* opCtx,
+                                const LockSnapshot& stateToRestore) override {
+        MONGO_UNREACHABLE;
+    };
+
     virtual void releaseTicket() {
         MONGO_UNREACHABLE;
     }
@@ -210,6 +223,14 @@ public:
     }
 
     virtual bool isReadLocked() const {
+        return true;
+    }
+
+    virtual bool isRSTLExclusive() const {
+        return true;
+    }
+
+    virtual bool isRSTLLocked() const {
         return true;
     }
 

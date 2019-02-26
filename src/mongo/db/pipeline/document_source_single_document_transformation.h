@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -70,6 +69,10 @@ public:
         // database or cluster, mark as independent of any collection if so.
         constraints.isIndependentOfAnyCollection = _isIndependentOfAnyCollection;
         return constraints;
+    }
+
+    boost::optional<MergingLogic> mergingLogic() final {
+        return boost::none;
     }
 
     TransformerInterface::TransformerType getType() const {

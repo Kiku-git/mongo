@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -422,26 +421,26 @@ struct ByteOrderConverter<Decimal128::Value> {
     typedef Decimal128::Value T;
 
     inline static T nativeToBig(T t) {
-        ByteOrderConverter<uint64_t>::nativeToBig(t.low64);
-        ByteOrderConverter<uint64_t>::nativeToBig(t.high64);
+        t.low64 = ByteOrderConverter<uint64_t>::nativeToBig(t.low64);
+        t.high64 = ByteOrderConverter<uint64_t>::nativeToBig(t.high64);
         return t;
     }
 
     inline static T bigToNative(T t) {
-        ByteOrderConverter<uint64_t>::bigToNative(t.low64);
-        ByteOrderConverter<uint64_t>::bigToNative(t.high64);
+        t.low64 = ByteOrderConverter<uint64_t>::bigToNative(t.low64);
+        t.high64 = ByteOrderConverter<uint64_t>::bigToNative(t.high64);
         return t;
     }
 
     inline static T nativeToLittle(T t) {
-        ByteOrderConverter<uint64_t>::nativeToLittle(t.low64);
-        ByteOrderConverter<uint64_t>::nativeToLittle(t.high64);
+        t.low64 = ByteOrderConverter<uint64_t>::nativeToLittle(t.low64);
+        t.high64 = ByteOrderConverter<uint64_t>::nativeToLittle(t.high64);
         return t;
     }
 
     inline static T littleToNative(T t) {
-        ByteOrderConverter<uint64_t>::littleToNative(t.low64);
-        ByteOrderConverter<uint64_t>::littleToNative(t.high64);
+        t.low64 = ByteOrderConverter<uint64_t>::littleToNative(t.low64);
+        t.high64 = ByteOrderConverter<uint64_t>::littleToNative(t.high64);
         return t;
     }
 };

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -302,6 +301,14 @@ void ValueReader::fromDouble(double d) {
     } else {
         _value.setDouble(d);
     }
+}
+
+void ValueReader::fromInt64(int64_t i) {
+    auto scope = getScope(_context);
+    JS::RootedObject num(_context);
+    scope->getProto<NumberLongInfo>().newObject(&num);
+    JS_SetPrivate(num, scope->trackedNew<int64_t>(i));
+    _value.setObjectOrNull(num);
 }
 
 }  // namespace mozjs

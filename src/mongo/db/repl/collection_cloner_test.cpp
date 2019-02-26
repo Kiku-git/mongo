@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -129,14 +128,7 @@ public:
         {
             stdx::unique_lock<stdx::mutex> lk(_mutex);
             _resuming = true;
-            _paused = false;
-            _resumedQueryCount = _queryCount;
-            while (_waiting) {
-                lk.unlock();
-                _net->signalWorkAvailable();
-                mongo::sleepmillis(10);
-                lk.lock();
-            }
+            _resume(&lk);
             _resuming = false;
             _cond.notify_all();
         }
@@ -148,10 +140,15 @@ public:
         _cond.wait(lk, [this] { return _waiting; });
     }
 
-    // Waits for the next query to run after resume() is called to complete.
-    void waitForResumedQuery() {
+    // Resumes, then waits for the next query to run after resume() is called to complete.
+    void resumeAndWaitForResumedQuery() {
         stdx::unique_lock<stdx::mutex> lk(_mutex);
+        _resuming = true;
+        _resume(&lk);
+        _cond.notify_all();  // This is to wake up the paused thread.
         _cond.wait(lk, [this] { return _resumedQueryCount != _queryCount; });
+        _resuming = false;
+        _cond.notify_all();  // This potentially wakes up the destructor.
     }
 
 private:
@@ -165,6 +162,18 @@ private:
     int _resumedQueryCount = 0;
     Status _failureForConnect = Status::OK();
     Status _failureForQuery = Status::OK();
+
+    void _resume(stdx::unique_lock<stdx::mutex>* lk) {
+        invariant(lk->owns_lock());
+        _paused = false;
+        _resumedQueryCount = _queryCount;
+        while (_waiting) {
+            lk->unlock();
+            _net->signalWorkAvailable();
+            mongo::sleepmillis(10);
+            lk->lock();
+        }
+    }
 };
 
 // RAII class to pause the client; since tests are very exception-heavy this prevents them
@@ -182,6 +191,12 @@ public:
     void resume() {
         if (_client)
             _client->resume();
+        _client = nullptr;
+    }
+
+    void resumeAndWaitForResumedQuery() {
+        if (_client)
+            _client->resumeAndWaitForResumedQuery();
         _client = nullptr;
     }
 
@@ -219,8 +234,8 @@ protected:
 
     CollectionOptions options;
     std::unique_ptr<CollectionCloner> collectionCloner;
-    CollectionMockStats collectionStats;  // Used by the _loader.
-    CollectionBulkLoaderMock* _loader;    // Owned by CollectionCloner.
+    std::shared_ptr<CollectionMockStats> collectionStats;  // Used by the _loader.
+    CollectionBulkLoaderMock* _loader;                     // Owned by CollectionCloner.
     bool _clientCreated = false;
     FailableMockDBClientConnection* _client;  // owned by the CollectionCloner once created.
     std::unique_ptr<MockRemoteDBServer> _server;
@@ -230,28 +245,31 @@ void CollectionClonerTest::setUp() {
     BaseClonerTest::setUp();
     options = getCollectionOptions();
     collectionCloner.reset(nullptr);
-    collectionCloner = stdx::make_unique<CollectionCloner>(&getExecutor(),
-                                                           dbWorkThreadPool.get(),
-                                                           target,
-                                                           getStartupNss(),
-                                                           options,
-                                                           setStatusCallback(),
-                                                           storageInterface.get(),
-                                                           defaultBatchSize);
-    collectionStats = CollectionMockStats();
+    collectionCloner = std::make_unique<CollectionCloner>(&getExecutor(),
+                                                          dbWorkThreadPool.get(),
+                                                          target,
+                                                          getStartupNss(),
+                                                          options,
+                                                          setStatusCallback(),
+                                                          storageInterface.get(),
+                                                          defaultBatchSize);
+    collectionStats = std::make_shared<CollectionMockStats>();
     storageInterface->createCollectionForBulkFn =
         [this](const NamespaceString& nss,
                const CollectionOptions& options,
                const BSONObj idIndexSpec,
-               const std::vector<BSONObj>& nonIdIndexSpecs) {
-            (_loader = new CollectionBulkLoaderMock(&collectionStats))
-                ->init(nonIdIndexSpecs)
-                .transitional_ignore();
+               const std::vector<BSONObj>& nonIdIndexSpecs)
+        -> StatusWith<std::unique_ptr<CollectionBulkLoaderMock>> {
+            auto localLoader = std::make_unique<CollectionBulkLoaderMock>(collectionStats);
+            Status result = localLoader->init(nonIdIndexSpecs);
+            if (!result.isOK())
+                return result;
 
-            return StatusWith<std::unique_ptr<CollectionBulkLoader>>(
-                std::unique_ptr<CollectionBulkLoader>(_loader));
+            _loader = localLoader.get();
+
+            return std::move(localLoader);
         };
-    _server = stdx::make_unique<MockRemoteDBServer>(target.toString());
+    _server = std::make_unique<MockRemoteDBServer>(target.toString());
     _server->assignCollectionUuid(nss.ns(), *options.uuid);
     _client = new FailableMockDBClientConnection(_server.get(), getNet());
     collectionCloner->setCreateClientFn_forTest([this]() {
@@ -489,10 +507,9 @@ public:
                                                    ShouldFailRequestFn shouldFailRequest)
         : unittest::TaskExecutorProxy(executor), _shouldFailRequest(shouldFailRequest) {}
 
-    StatusWith<CallbackHandle> scheduleRemoteCommand(
-        const executor::RemoteCommandRequest& request,
-        const RemoteCommandCallbackFn& cb,
-        const transport::BatonHandle& baton = nullptr) override {
+    StatusWith<CallbackHandle> scheduleRemoteCommand(const executor::RemoteCommandRequest& request,
+                                                     const RemoteCommandCallbackFn& cb,
+                                                     const BatonHandle& baton = nullptr) override {
         if (_shouldFailRequest(request)) {
             return Status(ErrorCodes::OperationFailed, "failed to schedule remote command");
         }
@@ -548,12 +565,14 @@ TEST_F(CollectionClonerNoAutoIndexTest, DoNotCreateIDIndexIfAutoIndexIdUsed) {
                                                          const BSONObj idIndexSpec,
                                                          const std::vector<BSONObj>& theIndexSpecs)
         -> StatusWith<std::unique_ptr<CollectionBulkLoader>> {
-            CollectionBulkLoaderMock* loader = new CollectionBulkLoaderMock(&collectionStats);
+            auto loader = std::make_unique<CollectionBulkLoaderMock>(collectionStats);
             collNss = theNss;
             collOptions = theOptions;
             collIndexSpecs = theIndexSpecs;
-            loader->init(theIndexSpecs).transitional_ignore();
-            return std::unique_ptr<CollectionBulkLoader>(loader);
+            const auto status = loader->init(theIndexSpecs);
+            if (!status.isOK())
+                return status;
+            return std::move(loader);
         };
 
     const BSONObj doc = BSON("_id" << 1);
@@ -571,12 +590,12 @@ TEST_F(CollectionClonerNoAutoIndexTest, DoNotCreateIDIndexIfAutoIndexIdUsed) {
 
     _client->waitForPausedQuery();
     ASSERT_TRUE(collectionCloner->isActive());
-    ASSERT_TRUE(collectionStats.initCalled);
+    ASSERT_TRUE(collectionStats->initCalled);
 
     pauser.resume();
     collectionCloner->join();
-    ASSERT_EQUALS(1, collectionStats.insertCount);
-    ASSERT_TRUE(collectionStats.commitCalled);
+    ASSERT_EQUALS(1, collectionStats->insertCount);
+    ASSERT_TRUE(collectionStats->commitCalled);
 
     ASSERT_OK(getStatus());
     ASSERT_FALSE(collectionCloner->isActive());
@@ -773,21 +792,21 @@ TEST_F(CollectionClonerTest, BeginCollection) {
     MockClientPauser pauser(_client);
     ASSERT_OK(collectionCloner->startup());
 
-    CollectionMockStats stats;
-    CollectionBulkLoaderMock* loader = new CollectionBulkLoaderMock(&stats);
+    auto stats = std::make_shared<CollectionMockStats>();
+    auto loader = std::make_unique<CollectionBulkLoaderMock>(stats);
     NamespaceString collNss;
     CollectionOptions collOptions;
     std::vector<BSONObj> collIndexSpecs;
-    storageInterface->createCollectionForBulkFn = [&](const NamespaceString& theNss,
-                                                      const CollectionOptions& theOptions,
-                                                      const BSONObj idIndexSpec,
-                                                      const std::vector<BSONObj>& theIndexSpecs)
-        -> StatusWith<std::unique_ptr<CollectionBulkLoader>> {
-            collNss = theNss;
-            collOptions = theOptions;
-            collIndexSpecs = theIndexSpecs;
-            return std::unique_ptr<CollectionBulkLoader>(loader);
-        };
+    storageInterface->createCollectionForBulkFn =
+        [&](const NamespaceString& theNss,
+            const CollectionOptions& theOptions,
+            const BSONObj idIndexSpec,
+            const std::vector<BSONObj>& theIndexSpecs) -> std::unique_ptr<CollectionBulkLoader> {
+        collNss = theNss;
+        collOptions = theOptions;
+        collIndexSpecs = theIndexSpecs;
+        return std::move(loader);
+    };
 
     // Split listIndexes response into 2 batches: first batch contains idIndexSpec and
     // second batch contains specs
@@ -832,18 +851,18 @@ TEST_F(CollectionClonerTest, FindFetcherScheduleFailed) {
 
     // Shut down executor while in beginCollection callback.
     // This will cause the fetcher to fail to schedule the find command.
-    CollectionMockStats stats;
-    CollectionBulkLoaderMock* loader = new CollectionBulkLoaderMock(&stats);
+    auto stats = std::make_shared<CollectionMockStats>();
+    auto loader = std::make_unique<CollectionBulkLoaderMock>(stats);
     bool collectionCreated = false;
-    storageInterface->createCollectionForBulkFn = [&](const NamespaceString& theNss,
-                                                      const CollectionOptions& theOptions,
-                                                      const BSONObj idIndexSpec,
-                                                      const std::vector<BSONObj>& theIndexSpecs)
-        -> StatusWith<std::unique_ptr<CollectionBulkLoader>> {
-            collectionCreated = true;
-            getExecutor().shutdown();
-            return std::unique_ptr<CollectionBulkLoader>(loader);
-        };
+    storageInterface->createCollectionForBulkFn =
+        [&](const NamespaceString& theNss,
+            const CollectionOptions& theOptions,
+            const BSONObj idIndexSpec,
+            const std::vector<BSONObj>& theIndexSpecs) -> std::unique_ptr<CollectionBulkLoader> {
+        collectionCreated = true;
+        getExecutor().shutdown();
+        return std::move(loader);
+    };
 
     {
         executor::NetworkInterfaceMock::InNetworkGuard guard(getNet());
@@ -864,17 +883,17 @@ TEST_F(CollectionClonerTest, QueryAfterCreateCollection) {
     MockClientPauser pauser(_client);
     ASSERT_OK(collectionCloner->startup());
 
-    CollectionMockStats stats;
-    CollectionBulkLoaderMock* loader = new CollectionBulkLoaderMock(&stats);
+    auto stats = std::make_shared<CollectionMockStats>();
+    auto loader = std::make_unique<CollectionBulkLoaderMock>(stats);
     bool collectionCreated = false;
-    storageInterface->createCollectionForBulkFn = [&](const NamespaceString& theNss,
-                                                      const CollectionOptions& theOptions,
-                                                      const BSONObj idIndexSpec,
-                                                      const std::vector<BSONObj>& theIndexSpecs)
-        -> StatusWith<std::unique_ptr<CollectionBulkLoader>> {
-            collectionCreated = true;
-            return std::unique_ptr<CollectionBulkLoader>(loader);
-        };
+    storageInterface->createCollectionForBulkFn =
+        [&](const NamespaceString& theNss,
+            const CollectionOptions& theOptions,
+            const BSONObj idIndexSpec,
+            const std::vector<BSONObj>& theIndexSpecs) -> std::unique_ptr<CollectionBulkLoader> {
+        collectionCreated = true;
+        return std::move(loader);
+    };
 
     {
         executor::NetworkInterfaceMock::InNetworkGuard guard(getNet());
@@ -989,7 +1008,7 @@ TEST_F(CollectionClonerTest, InsertDocumentsFailed) {
 
     _client->waitForPausedQuery();
     ASSERT_TRUE(collectionCloner->isActive());
-    ASSERT_TRUE(collectionStats.initCalled);
+    ASSERT_TRUE(collectionStats->initCalled);
 
     ASSERT(_loader != nullptr);
     _loader->insertDocsFn = [](const std::vector<BSONObj>::const_iterator begin,
@@ -1001,7 +1020,7 @@ TEST_F(CollectionClonerTest, InsertDocumentsFailed) {
 
     collectionCloner->join();
     ASSERT_FALSE(collectionCloner->isActive());
-    ASSERT_EQUALS(0, collectionStats.insertCount);
+    ASSERT_EQUALS(0, collectionStats->insertCount);
 
     ASSERT_EQUALS(ErrorCodes::OperationFailed, getStatus().code());
 }
@@ -1022,10 +1041,10 @@ TEST_F(CollectionClonerTest, InsertDocumentsSingleBatch) {
     collectionCloner->join();
     // TODO: record the documents during insert and compare them
     //       -- maybe better done using a real storage engine, like ephemeral for test.
-    ASSERT_EQUALS(2, collectionStats.insertCount);
+    ASSERT_EQUALS(2, collectionStats->insertCount);
     auto stats = collectionCloner->getStats();
     ASSERT_EQUALS(1u, stats.receivedBatches);
-    ASSERT_TRUE(collectionStats.commitCalled);
+    ASSERT_TRUE(collectionStats->commitCalled);
 
     ASSERT_OK(getStatus());
     ASSERT_FALSE(collectionCloner->isActive());
@@ -1049,8 +1068,8 @@ TEST_F(CollectionClonerTest, InsertDocumentsMultipleBatches) {
     collectionCloner->join();
     // TODO: record the documents during insert and compare them
     //       -- maybe better done using a real storage engine, like ephemeral for test.
-    ASSERT_EQUALS(3, collectionStats.insertCount);
-    ASSERT_TRUE(collectionStats.commitCalled);
+    ASSERT_EQUALS(3, collectionStats->insertCount);
+    ASSERT_TRUE(collectionStats->commitCalled);
     auto stats = collectionCloner->getStats();
     ASSERT_EQUALS(2u, stats.receivedBatches);
 
@@ -1091,7 +1110,7 @@ TEST_F(CollectionClonerTest, CollectionClonerCannotBeRestartedAfterPreviousFailu
 
     // Second cloning attempt - run to completion.
     unittest::log() << "Starting second collection cloning attempt - startup() should fail";
-    collectionStats = CollectionMockStats();
+    *collectionStats = CollectionMockStats();
     setStatus(getDetectableErrorStatus());
 
     ASSERT_EQUALS(ErrorCodes::ShutdownInProgress, collectionCloner->startup());
@@ -1169,7 +1188,7 @@ TEST_F(CollectionClonerTest,
 
     _client->waitForPausedQuery();
     ASSERT_TRUE(collectionCloner->isActive());
-    ASSERT_TRUE(collectionStats.initCalled);
+    ASSERT_TRUE(collectionStats->initCalled);
 
     // At this point, the CollectionCloner is waiting for the query to complete.
     // We want to return the first batch of documents for the collection from the network so that
@@ -1230,15 +1249,15 @@ protected:
 
     /**
      * Sets up a test for the CollectionCloner that simulates the collection being dropped while
-     * copying the documents.
-     * The DBClientConnection returns a CursorNotFound error to indicate a collection drop.
+     * copying the documents by making a query return the given error code.
+     *
+     * The DBClientConnection returns 'code' to indicate a collection drop.
      */
-    void setUpVerifyCollectionWasDroppedTest() {
+    void setUpVerifyCollectionWasDroppedTest(ErrorCodes::Error code) {
         // Pause the query so we can reliably wait for it to complete.
         MockClientPauser pauser(_client);
         // Return error response from the query.
-        _client->setFailureForQuery(
-            {ErrorCodes::CursorNotFound, "collection dropped while copying documents"});
+        _client->setFailureForQuery({code, "collection dropped while copying documents"});
         ASSERT_OK(collectionCloner->startup());
         {
             executor::NetworkInterfaceMock::InNetworkGuard guard(getNet());
@@ -1248,9 +1267,8 @@ protected:
         ASSERT_TRUE(collectionCloner->isActive());
 
         _client->waitForPausedQuery();
-        ASSERT_TRUE(collectionStats.initCalled);
-        pauser.resume();
-        _client->waitForResumedQuery();
+        ASSERT_TRUE(collectionStats->initCalled);
+        pauser.resumeAndWaitForResumedQuery();
     }
 
     /**
@@ -1268,6 +1286,39 @@ protected:
         ASSERT_EQUALS("find"_sd, firstElement.fieldNameStringData());
         ASSERT_EQUALS(*options.uuid, unittest::assertGet(UUID::parse(firstElement)));
         return noi;
+    }
+
+    /**
+     * Start cloning. While copying collection, simulate a collection drop by having the
+     * DBClientConnection return code 'collectionDropErrCode'.
+     *
+     * The CollectionCloner should run a find command on the collection by UUID. Simulate successful
+     * find command with a drop-pending namespace in the response.  The CollectionCloner should
+     * complete with a successful final status.
+     */
+    void runCloningSuccessfulWithCollectionDropTest(ErrorCodes::Error collectionDropErrCode) {
+        setUpVerifyCollectionWasDroppedTest(collectionDropErrCode);
+
+        // CollectionCloner should send a find command with the collection's UUID.
+        {
+            executor::NetworkInterfaceMock::InNetworkGuard guard(getNet());
+            auto noi = getVerifyCollectionDroppedRequest(getNet());
+
+            // Return a drop-pending namespace in the find response instead of the original
+            // collection name passed to CollectionCloner at construction.
+            repl::OpTime dropOpTime(Timestamp(Seconds(100), 0), 1LL);
+            auto dpns = nss.makeDropPendingNamespace(dropOpTime);
+            scheduleNetworkResponse(noi,
+                                    createCursorResponse(0, dpns.ns(), BSONArray(), "firstBatch"));
+            finishProcessingNetworkResponse();
+        }
+
+        // CollectionCloner treats a in collection state to drop-pending during cloning as a
+        // successful
+        // clone operation.
+        collectionCloner->join();
+        ASSERT_OK(getStatus());
+        ASSERT_FALSE(collectionCloner->isActive());
     }
 };
 
@@ -1289,23 +1340,23 @@ TEST_F(CollectionClonerRenamedBeforeStartTest, FirstRemoteCommandWithRenamedColl
 }
 
 TEST_F(CollectionClonerRenamedBeforeStartTest, BeginCollectionWithUUID) {
-    CollectionMockStats stats;
-    CollectionBulkLoaderMock* loader = new CollectionBulkLoaderMock(&stats);
+    auto stats = std::make_shared<CollectionMockStats>();
+    auto loader = std::make_unique<CollectionBulkLoaderMock>(stats);
     NamespaceString collNss;
     CollectionOptions collOptions;
     BSONObj collIdIndexSpec;
     std::vector<BSONObj> collSecondaryIndexSpecs;
-    storageInterface->createCollectionForBulkFn = [&](const NamespaceString& theNss,
-                                                      const CollectionOptions& theOptions,
-                                                      const BSONObj idIndexSpec,
-                                                      const std::vector<BSONObj>& nonIdIndexSpecs)
-        -> StatusWith<std::unique_ptr<CollectionBulkLoader>> {
-            collNss = theNss;
-            collOptions = theOptions;
-            collIdIndexSpec = idIndexSpec;
-            collSecondaryIndexSpecs = nonIdIndexSpecs;
-            return std::unique_ptr<CollectionBulkLoader>(loader);
-        };
+    storageInterface->createCollectionForBulkFn =
+        [&](const NamespaceString& theNss,
+            const CollectionOptions& theOptions,
+            const BSONObj idIndexSpec,
+            const std::vector<BSONObj>& nonIdIndexSpecs) -> std::unique_ptr<CollectionBulkLoader> {
+        collNss = theNss;
+        collOptions = theOptions;
+        collIdIndexSpec = idIndexSpec;
+        collSecondaryIndexSpecs = nonIdIndexSpecs;
+        return std::move(loader);
+    };
 
     // Pause the client so the cloner stops in the fetcher.
     MockClientPauser pauser(_client);
@@ -1364,49 +1415,32 @@ TEST_F(CollectionClonerRenamedBeforeStartTest, BeginCollectionWithUUID) {
     ASSERT_TRUE(collectionCloner->isActive());
 }
 
-/**
- * Start cloning.
- * While copying collection, simulate a collection drop by having the DBClientConnection return a
- * CursorNotFound error.
- * The CollectionCloner should run a find command on the collection by UUID.
- * Simulate successful find command with a drop-pending namespace in the response.
- * The CollectionCloner should complete with a successful final status.
- */
 TEST_F(CollectionClonerRenamedBeforeStartTest,
-       CloningIsSuccessfulIfCollectionWasDroppedWhileCopyingDocuments) {
-    setUpVerifyCollectionWasDroppedTest();
+       CloningIsSuccessfulIfCollectionWasDroppedWithCursorNotFoundWhileCopyingDocuments) {
+    runCloningSuccessfulWithCollectionDropTest(ErrorCodes::CursorNotFound);
+}
 
-    // CollectionCloner should send a find command with the collection's UUID.
-    {
-        executor::NetworkInterfaceMock::InNetworkGuard guard(getNet());
-        auto noi = getVerifyCollectionDroppedRequest(getNet());
+TEST_F(CollectionClonerRenamedBeforeStartTest,
+       CloningIsSuccessfulIfCollectionWasDroppedWithOperationFailedWhileCopyingDocuments) {
+    runCloningSuccessfulWithCollectionDropTest(ErrorCodes::OperationFailed);
+}
 
-        // Return a drop-pending namespace in the find response instead of the original collection
-        // name passed to CollectionCloner at construction.
-        repl::OpTime dropOpTime(Timestamp(Seconds(100), 0), 1LL);
-        auto dpns = nss.makeDropPendingNamespace(dropOpTime);
-        scheduleNetworkResponse(noi, createCursorResponse(0, dpns.ns(), BSONArray(), "firstBatch"));
-        finishProcessingNetworkResponse();
-    }
-
-    // CollectionCloner treats a in collection state to drop-pending during cloning as a successful
-    // clone operation.
-    collectionCloner->join();
-    ASSERT_OK(getStatus());
-    ASSERT_FALSE(collectionCloner->isActive());
+TEST_F(CollectionClonerRenamedBeforeStartTest,
+       CloningIsSuccessfulIfCollectionWasDroppedWithQueryPlanKilledWhileCopyingDocuments) {
+    runCloningSuccessfulWithCollectionDropTest(ErrorCodes::QueryPlanKilled);
 }
 
 /**
- * Start cloning.
- * While copying collection, simulate a collection drop by having the DBClientConnection return a
- * CursorNotFound error.
- * The CollectionCloner should run a find command on the collection by UUID.
- * Shut the CollectionCloner down.
- * The CollectionCloner should return a CursorNotFound final status.
+ * Start cloning.  While copying collection, simulate a collection drop by having the
+ * DBClientConnection return a CursorNotFound error.
+ *
+ * The CollectionCloner should run a find command on the collection by UUID.  Shut the
+ * CollectionCloner down.  The CollectionCloner should return final status corresponding to the
+ * error code from the DBClientConnection.
  */
 TEST_F(CollectionClonerRenamedBeforeStartTest,
        ShuttingDownCollectionClonerDuringCollectionDropVerificationReturnsCallbackCanceled) {
-    setUpVerifyCollectionWasDroppedTest();
+    setUpVerifyCollectionWasDroppedTest(ErrorCodes::CursorNotFound);
 
     // CollectionCloner should send a find command with the collection's UUID.
     {

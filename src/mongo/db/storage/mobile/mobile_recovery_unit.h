@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -99,7 +98,7 @@ private:
     bool _inUnitOfWork;
     bool _active;
 
-    static AtomicInt64 _nextID;
+    static AtomicWord<long long> _nextID;
     uint64_t _id;
     bool _isReadOnly;
 

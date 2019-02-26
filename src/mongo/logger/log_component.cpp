@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -77,6 +76,7 @@ LogComponent LogComponent::parent() const {
             return kNumLogComponents;
             DECLARE_LOG_COMPONENT_PARENT(kJournal, kStorage);
             DECLARE_LOG_COMPONENT_PARENT(kASIO, kNetwork);
+            DECLARE_LOG_COMPONENT_PARENT(kConnectionPool, kNetwork);
             DECLARE_LOG_COMPONENT_PARENT(kBridge, kNetwork);
             DECLARE_LOG_COMPONENT_PARENT(kReplicationElection, kReplication);
             DECLARE_LOG_COMPONENT_PARENT(kReplicationHeartbeats, kReplication);
@@ -144,6 +144,8 @@ StringData LogComponent::toStringData() const {
             return "tracking"_sd;
         case kTransaction:
             return "transaction"_sd;
+        case kConnectionPool:
+            return "connectionPool"_sd;
         case kNumLogComponents:
             return "total"_sd;
             // No default. Compiler should complain if there's a log component that's not handled.
@@ -230,6 +232,8 @@ StringData LogComponent::getNameForLog() const {
             return "TRACKING"_sd;
         case kTransaction:
             return "TXN     "_sd;
+        case kConnectionPool:
+            return "CONNPOOL"_sd;
         case kNumLogComponents:
             return "TOTAL   "_sd;
             // No default. Compiler should complain if there's a log component that's not handled.

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -35,6 +34,7 @@
 #include "mongo/embedded/service_entry_point_embedded.h"
 
 #include "mongo/db/read_concern.h"
+#include "mongo/db/repl/speculative_majority_read_info.h"
 #include "mongo/db/service_entry_point_common.h"
 #include "mongo/embedded/not_implemented.h"
 #include "mongo/embedded/periodic_runner_embedded.h"
@@ -55,6 +55,12 @@ public:
         uassertStatusOK(rcStatus);
     }
 
+    void waitForSpeculativeMajorityReadConcern(OperationContext* opCtx) const override {
+        auto rcStatus = mongo::waitForSpeculativeMajorityReadConcern(
+            opCtx, repl::SpeculativeMajorityReadInfo::get(opCtx));
+        uassertStatusOK(rcStatus);
+    }
+
     void waitForWriteConcern(OperationContext* opCtx,
                              const CommandInvocation* invocation,
                              const repl::OpTime& lastOpBeforeRun,
@@ -69,7 +75,7 @@ public:
     void waitForLinearizableReadConcern(OperationContext* opCtx) const override {
         if (repl::ReadConcernArgs::get(opCtx).getLevel() ==
             repl::ReadConcernLevel::kLinearizableReadConcern) {
-            uassertStatusOK(mongo::waitForLinearizableReadConcern(opCtx));
+            uassertStatusOK(mongo::waitForLinearizableReadConcern(opCtx, 0));
         }
     }
 

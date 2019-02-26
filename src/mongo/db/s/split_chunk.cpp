@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -136,13 +135,12 @@ StatusWith<boost::optional<ChunkRange>> splitChunk(OperationContext* opCtx,
                                                    const std::string& shardName,
                                                    const OID& expectedCollectionEpoch) {
     //
-    // Lock the collection's metadata and get highest version for the current shard
     // TODO(SERVER-25086): Remove distLock acquisition from split chunk
     //
     const std::string whyMessage(
         str::stream() << "splitting chunk " << chunkRange.toString() << " in " << nss.toString());
     auto scopedDistLock = Grid::get(opCtx)->catalogClient()->getDistLockManager()->lock(
-        opCtx, nss.ns(), whyMessage, DistLockManager::kSingleLockAttemptTimeout);
+        opCtx, nss.ns(), whyMessage, DistLockManager::kDefaultLockTimeout);
     if (!scopedDistLock.isOK()) {
         return scopedDistLock.getStatus().withContext(
             str::stream() << "could not acquire collection lock for " << nss.toString()
@@ -230,7 +228,7 @@ StatusWith<boost::optional<ChunkRange>> splitChunk(OperationContext* opCtx,
 
     // Allow multiKey based on the invariant that shard keys must be single-valued. Therefore,
     // any multi-key index prefixed by shard key cannot be multikey over the shard key fields.
-    IndexDescriptor* idx =
+    const IndexDescriptor* idx =
         collection->getIndexCatalog()->findShardKeyPrefixedIndex(opCtx, keyPatternObj, false);
     if (!idx) {
         return boost::optional<ChunkRange>(boost::none);

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -425,14 +424,6 @@ public:
     */
     static std::string getLastErrorString(const BSONObj& res);
 
-    /** Return the last error which has occurred, even if not the very last operation.
-
-       @return { err : <error message>, nPrev : <how_many_ops_back_occurred>, ok : 1 }
-
-       result.err will be null if no error has occurred.
-    */
-    BSONObj getPrevError();
-
     /** Delete the specified collection.
      *  @param info An optional output parameter that receives the result object the database
      *  returns from the drop command.  May be null if the caller doesn't need that info.
@@ -710,7 +701,7 @@ protected:
     /** controls how chatty the client is about network errors & such.  See log.h */
     const logger::LogSeverity _logLevel;
 
-    static AtomicInt64 ConnectionIdSequence;
+    static AtomicWord<long long> ConnectionIdSequence;
     long long _connectionId;  // unique connection id for this connection
 
 private:

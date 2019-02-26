@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -43,6 +42,7 @@
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/database_version_helpers.h"
 #include "mongo/s/grid.h"
+#include "mongo/s/stale_exception.h"
 #include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/log.h"
 #include "mongo/util/scopeguard.h"
@@ -367,6 +367,37 @@ void CatalogCache::onStaleShardVersion(CachedCollectionRoutingInfo&& ccriToInval
     }
 }
 
+void CatalogCache::checkEpochOrThrow(const NamespaceString& nss,
+                                     ChunkVersion targetCollectionVersion) const {
+    stdx::lock_guard<stdx::mutex> lg(_mutex);
+    const auto itDb = _collectionsByDb.find(nss.db());
+    uassert(StaleConfigInfo(nss, targetCollectionVersion, boost::none),
+            str::stream() << "could not act as router for " << nss.ns()
+                          << ", no entry for database "
+                          << nss.db(),
+            itDb != _collectionsByDb.end());
+
+    auto itColl = itDb->second.find(nss.ns());
+    uassert(StaleConfigInfo(nss, targetCollectionVersion, boost::none),
+            str::stream() << "could not act as router for " << nss.ns()
+                          << ", no entry for collection.",
+            itColl != itDb->second.end());
+
+    uassert(StaleConfigInfo(nss, targetCollectionVersion, boost::none),
+            str::stream() << "could not act as router for " << nss.ns() << ", wanted "
+                          << targetCollectionVersion.toString()
+                          << ", but found the collection was unsharded",
+            itColl->second->routingInfo);
+
+    auto foundVersion = itColl->second->routingInfo->getVersion();
+    uassert(StaleConfigInfo(nss, targetCollectionVersion, foundVersion),
+            str::stream() << "could not act as router for " << nss.ns() << ", wanted "
+                          << targetCollectionVersion.toString()
+                          << ", but found "
+                          << foundVersion.toString(),
+            foundVersion.epoch() == targetCollectionVersion.epoch());
+}
+
 void CatalogCache::invalidateDatabaseEntry(const StringData dbName) {
     stdx::lock_guard<stdx::mutex> lg(_mutex);
     auto itDbEntry = _databases.find(dbName);
@@ -389,6 +420,17 @@ void CatalogCache::invalidateShardedCollection(const NamespaceString& nss) {
         itDb->second[nss.ns()] = std::make_shared<CollectionRoutingInfoEntry>();
     }
     itDb->second[nss.ns()]->needsRefresh = true;
+}
+
+void CatalogCache::purgeCollection(const NamespaceString& nss) {
+    stdx::lock_guard<stdx::mutex> lg(_mutex);
+
+    auto itDb = _collectionsByDb.find(nss.db());
+    if (itDb == _collectionsByDb.end()) {
+        return;
+    }
+
+    itDb->second.erase(nss.ns());
 }
 
 void CatalogCache::purgeDatabase(StringData dbName) {
@@ -500,7 +542,7 @@ void CatalogCache::_scheduleCollectionRefresh(WithLock lk,
                                               std::shared_ptr<CollectionRoutingInfoEntry> collEntry,
                                               NamespaceString const& nss,
                                               int refreshAttempt) {
-    const auto existingRoutingInfo = std::move(collEntry->routingInfo);
+    const auto existingRoutingInfo = collEntry->routingInfo;
 
     // If we have an existing chunk manager, the refresh is considered "incremental", regardless of
     // how many chunks are in the differential
@@ -619,6 +661,10 @@ void CatalogCache::_scheduleCollectionRefresh(WithLock lk,
         stdx::lock_guard<stdx::mutex> lg(_mutex);
         onRefreshFailed(lg, status);
     }
+
+    // The routing info for this collection shouldn't change, as other threads may try to use the
+    // CatalogCache while we are waiting for the refresh to complete.
+    invariant(collEntry->routingInfo.get() == existingRoutingInfo.get());
 }
 
 void CatalogCache::Stats::report(BSONObjBuilder* builder) const {

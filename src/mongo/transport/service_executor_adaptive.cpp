@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -39,8 +38,8 @@
 
 #include "mongo/db/server_parameters.h"
 #include "mongo/transport/service_entry_point_utils.h"
+#include "mongo/transport/service_executor_gen.h"
 #include "mongo/transport/service_executor_task_names.h"
-#include "mongo/transport/thread_idle_callback.h"
 #include "mongo/util/concurrency/thread_name.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/log.h"
@@ -52,35 +51,8 @@
 
 namespace mongo {
 namespace transport {
+
 namespace {
-// The executor will always keep this many number of threads around. If the value is -1,
-// (the default) then it will be set to number of cores / 2.
-MONGO_EXPORT_SERVER_PARAMETER(adaptiveServiceExecutorReservedThreads, int, -1);
-
-// Each worker thread will allow ASIO to run for this many milliseconds before checking
-// whether it should exit
-MONGO_EXPORT_SERVER_PARAMETER(adaptiveServiceExecutorRunTimeMillis, int, 5000);
-
-// The above parameter will be offset of some random value between -runTimeJitters/
-// +runTimeJitters so that not all threads are starting/stopping execution at the same time
-MONGO_EXPORT_SERVER_PARAMETER(adaptiveServiceExecutorRunTimeJitterMillis, int, 500);
-
-// This is the maximum amount of time the controller thread will sleep before doing any
-// stuck detection
-MONGO_EXPORT_SERVER_PARAMETER(adaptiveServiceExecutorStuckThreadTimeoutMillis, int, 250);
-
-// The maximum allowed latency between when a task is scheduled and a thread is started to
-// service it.
-MONGO_EXPORT_SERVER_PARAMETER(adaptiveServiceExecutorMaxQueueLatencyMicros, int, 500);
-
-// Threads will exit themselves if they spent less than this percentage of the time they ran
-// doing actual work.
-MONGO_EXPORT_SERVER_PARAMETER(adaptiveServiceExecutorIdlePctThreshold, int, 60);
-
-// Tasks scheduled with MayRecurse may be called recursively if the recursion depth is below this
-// value.
-MONGO_EXPORT_SERVER_PARAMETER(adaptiveServiceExecutorRecursionLimit, int, 8);
-
 constexpr auto kTotalQueued = "totalQueued"_sd;
 constexpr auto kTotalExecuted = "totalExecuted"_sd;
 constexpr auto kTotalTimeExecutingUs = "totalTimeExecutingMicros"_sd;
@@ -224,7 +196,7 @@ Status ServiceExecutorAdaptive::schedule(ServiceExecutorAdaptive::Task task,
             _localThreadState->executing.markRunning();
             _threadsInUse.addAndFetch(1);
         }
-        const auto guard = MakeGuard([this, taskName] {
+        const auto guard = makeGuard([this, taskName] {
             if (--_localThreadState->recursionDepth == 0) {
                 _localThreadState->executingCurRun += _localThreadState->executing.markStopped();
                 _threadsInUse.subtractAndFetch(1);
@@ -238,11 +210,6 @@ Status ServiceExecutorAdaptive::schedule(ServiceExecutorAdaptive::Task task,
         task();
         _localThreadState->threadMetrics[static_cast<size_t>(taskName)]
             ._totalSpentExecuting.addAndFetch(_localTimer.sinceStartTicks());
-
-        if ((flags & ServiceExecutor::kMayYieldBeforeSchedule) &&
-            (_localThreadState->markIdleCounter++ & 0xf)) {
-            markThreadIdle();
-        }
     };
 
     // Dispatching a task on the io_context will run the task immediately, and may run it
@@ -254,9 +221,9 @@ Status ServiceExecutorAdaptive::schedule(ServiceExecutorAdaptive::Task task,
     // can be called immediately and recursively.
     if ((flags & kMayRecurse) &&
         (_localThreadState->recursionDepth + 1 < _config->recursionLimit())) {
-        _reactorHandle->schedule(Reactor::kDispatch, std::move(wrappedTask));
+        _reactorHandle->dispatch(std::move(wrappedTask));
     } else {
-        _reactorHandle->schedule(Reactor::kPost, std::move(wrappedTask));
+        _reactorHandle->schedule(std::move(wrappedTask));
     }
 
     _lastScheduleTimer.reset();
@@ -563,7 +530,7 @@ void ServiceExecutorAdaptive::_workerThreadRoutine(
     log() << "Started new database worker thread " << threadId;
 
     bool guardThreadsRunning = true;
-    const auto guard = MakeGuard([this, &guardThreadsRunning, state] {
+    const auto guard = makeGuard([this, &guardThreadsRunning, state] {
         if (guardThreadsRunning)
             _threadsRunning.subtractAndFetch(1);
         _pastThreadsSpentRunning.addAndFetch(state->running.totalTime());

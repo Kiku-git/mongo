@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -84,6 +83,8 @@ public:
              const std::string& dbname_unused,
              const BSONObj& cmdObj,
              BSONObjBuilder& result) override {
+        CommandHelpers::handleMarkKillOnClientDisconnect(opCtx);
+
         IDLParserErrorContext ctx("listDatabases");
         auto cmd = ListDatabasesCommand::parse(ctx, cmdObj);
         auto* as = AuthorizationSession::get(opCtx->getClient());
@@ -185,9 +186,7 @@ public:
                 if (name == NamespaceString::kLocalDb)
                     continue;
 
-                if (authorizedDatabases &&
-                    !as->isAuthorizedForActionsOnResource(ResourcePattern::forDatabaseName(name),
-                                                          ActionType::find)) {
+                if (authorizedDatabases && !as->isAuthorizedForAnyActionOnAnyResourceInDB(name)) {
                     // We don't have listDatabases on the cluser or find on this database.
                     continue;
                 }

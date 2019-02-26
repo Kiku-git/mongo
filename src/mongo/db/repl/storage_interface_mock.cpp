@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -93,6 +92,10 @@ Timestamp StorageInterfaceMock::getInitialDataTimestamp() const {
 
 Timestamp StorageInterfaceMock::getAllCommittedTimestamp(ServiceContext* serviceCtx) const {
     return allCommittedTimestamp;
+}
+
+Timestamp StorageInterfaceMock::getOldestOpenReadTimestamp(ServiceContext* serviceCtx) const {
+    return oldestOpenReadTimestamp;
 }
 
 bool StorageInterfaceMock::supportsDocLocking(ServiceContext* serviceCtx) const {

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -239,6 +238,11 @@ Status ReplicationCoordinatorEmbedded::waitUntilOpTimeForReadUntil(OperationCont
     UASSERT_NOT_IMPLEMENTED;
 }
 
+Status ReplicationCoordinatorEmbedded::awaitOpTimeCommitted(OperationContext* opCtx,
+                                                            OpTime opTime) {
+    UASSERT_NOT_IMPLEMENTED;
+}
+
 ReplicationCoordinator::StatusAndDuration ReplicationCoordinatorEmbedded::awaitReplication(
     OperationContext*, const OpTime&, const WriteConcernOptions&) {
     UASSERT_NOT_IMPLEMENTED;
@@ -348,6 +352,17 @@ Status ReplicationCoordinatorEmbedded::checkIfWriteConcernCanBeSatisfied(
     UASSERT_NOT_IMPLEMENTED;
 }
 
+Status ReplicationCoordinatorEmbedded::checkIfCommitQuorumCanBeSatisfied(
+    const CommitQuorumOptions& commitQuorum) const {
+    UASSERT_NOT_IMPLEMENTED;
+}
+
+StatusWith<bool> ReplicationCoordinatorEmbedded::checkIfCommitQuorumIsSatisfied(
+    const CommitQuorumOptions& commitQuorum,
+    const std::vector<HostAndPort>& commitReadyMembers) const {
+    UASSERT_NOT_IMPLEMENTED;
+}
+
 Status ReplicationCoordinatorEmbedded::checkReplEnabledForCommand(BSONObjBuilder*) {
     return Status(ErrorCodes::NoReplicationEnabled, "no replication on embedded");
 }
@@ -398,10 +413,6 @@ Status ReplicationCoordinatorEmbedded::processHeartbeatV1(const ReplSetHeartbeat
     UASSERT_NOT_IMPLEMENTED;
 }
 
-void ReplicationCoordinatorEmbedded::summarizeAsHtml(ReplSetHtmlSummary*) {
-    UASSERT_NOT_IMPLEMENTED;
-}
-
 long long ReplicationCoordinatorEmbedded::getTerm() {
     UASSERT_NOT_IMPLEMENTED;
 }
@@ -427,15 +438,6 @@ Status ReplicationCoordinatorEmbedded::stepUpIfEligible(bool skipDryRun) {
     UASSERT_NOT_IMPLEMENTED;
 }
 
-ReplSettings::IndexPrefetchConfig ReplicationCoordinatorEmbedded::getIndexPrefetchConfig() const {
-    UASSERT_NOT_IMPLEMENTED;
-}
-
-void ReplicationCoordinatorEmbedded::setIndexPrefetchConfig(
-    const ReplSettings::IndexPrefetchConfig) {
-    UASSERT_NOT_IMPLEMENTED;
-}
-
 void ReplicationCoordinatorEmbedded::signalDropPendingCollectionsRemovedFromStorage() {
     UASSERT_NOT_IMPLEMENTED;
 }
@@ -445,6 +447,10 @@ boost::optional<Timestamp> ReplicationCoordinatorEmbedded::getRecoveryTimestamp(
 }
 
 bool ReplicationCoordinatorEmbedded::setContainsArbiter() const {
+    UASSERT_NOT_IMPLEMENTED;
+}
+
+void ReplicationCoordinatorEmbedded::attemptToAdvanceStableTimestamp() {
     UASSERT_NOT_IMPLEMENTED;
 }
 

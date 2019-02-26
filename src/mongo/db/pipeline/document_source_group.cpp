@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -59,7 +58,7 @@ namespace {
  * places, rather than compiled in one place and linked, and so cannot provide a globally unique ID.
  */
 std::string nextFileName() {
-    static AtomicUInt32 documentSourceGroupFileCounter;
+    static AtomicWord<unsigned> documentSourceGroupFileCounter;
     return "extsort-doc-group." + std::to_string(documentSourceGroupFileCounter.fetchAndAdd(1));
 }
 
@@ -950,11 +949,7 @@ Document DocumentSourceGroup::makeDocument(const Value& id,
     return out.freeze();
 }
 
-intrusive_ptr<DocumentSource> DocumentSourceGroup::getShardSource() {
-    return this;  // No modifications necessary when on shard
-}
-
-NeedsMergerDocumentSource::MergingLogic DocumentSourceGroup::mergingLogic() {
+boost::optional<DocumentSource::MergingLogic> DocumentSourceGroup::mergingLogic() {
     intrusive_ptr<DocumentSourceGroup> mergingGroup(new DocumentSourceGroup(pExpCtx));
     mergingGroup->setDoingMerge(true);
 
@@ -973,7 +968,8 @@ NeedsMergerDocumentSource::MergingLogic DocumentSourceGroup::mergingLogic() {
         mergingGroup->addAccumulator(copiedAccumuledField);
     }
 
-    return {mergingGroup};
+    // {shardsStage, mergingStage, sortPattern}
+    return MergingLogic{this, mergingGroup, boost::none};
 }
 
 bool DocumentSourceGroup::pathIncludedInGroupKeys(const std::string& dottedPath) const {

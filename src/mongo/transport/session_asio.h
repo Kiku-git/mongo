@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -133,7 +132,7 @@ public:
         return sourceMessageImpl().getNoThrow();
     }
 
-    Future<Message> asyncSourceMessage(const transport::BatonHandle& baton = nullptr) override {
+    Future<Message> asyncSourceMessage(const BatonHandle& baton = nullptr) override {
         ensureAsync();
         return sourceMessageImpl(baton);
     }
@@ -150,8 +149,7 @@ public:
             .getNoThrow();
     }
 
-    Future<void> asyncSinkMessage(Message message,
-                                  const transport::BatonHandle& baton = nullptr) override {
+    Future<void> asyncSinkMessage(Message message, const BatonHandle& baton = nullptr) override {
         ensureAsync();
         return write(asio::buffer(message.buf(), message.size()), baton)
             .then([this, message /*keep the buffer alive*/]() {
@@ -161,10 +159,10 @@ public:
             });
     }
 
-    void cancelAsyncOperations(const transport::BatonHandle& baton = nullptr) override {
+    void cancelAsyncOperations(const BatonHandle& baton = nullptr) override {
         LOG(3) << "Cancelling outstanding I/O operations on connection to " << _remote;
-        if (baton) {
-            baton->cancelSession(*this);
+        if (baton && baton->networking()) {
+            baton->networking()->cancelSession(*this);
         } else {
             getSocket().cancel();
         }
@@ -237,8 +235,7 @@ protected:
         return doHandshake().then([this, target] {
             _ranHandshake = true;
 
-            auto sslManager = getSSLManager();
-            auto swPeerInfo = uassertStatusOK(sslManager->parseAndValidatePeerCertificate(
+            auto swPeerInfo = uassertStatusOK(getSSLManager()->parseAndValidatePeerCertificate(
                 _sslSocket->native_handle(), target.host(), target));
 
             if (swPeerInfo) {
@@ -343,7 +340,7 @@ private:
         return _socket;
     }
 
-    Future<Message> sourceMessageImpl(const transport::BatonHandle& baton = nullptr) {
+    Future<Message> sourceMessageImpl(const BatonHandle& baton = nullptr) {
         static constexpr auto kHeaderSize = sizeof(MSGHEADER::Value);
 
         auto headerBuffer = SharedBuffer::allocate(kHeaderSize);
@@ -388,8 +385,7 @@ private:
     }
 
     template <typename MutableBufferSequence>
-    Future<void> read(const MutableBufferSequence& buffers,
-                      const transport::BatonHandle& baton = nullptr) {
+    Future<void> read(const MutableBufferSequence& buffers, const BatonHandle& baton = nullptr) {
 #ifdef MONGO_CONFIG_SSL
         if (_sslSocket) {
             return opportunisticRead(*_sslSocket, buffers, baton);
@@ -414,8 +410,7 @@ private:
     }
 
     template <typename ConstBufferSequence>
-    Future<void> write(const ConstBufferSequence& buffers,
-                       const transport::BatonHandle& baton = nullptr) {
+    Future<void> write(const ConstBufferSequence& buffers, const BatonHandle& baton = nullptr) {
 #ifdef MONGO_CONFIG_SSL
         _ranHandshake = true;
         if (_sslSocket) {
@@ -440,7 +435,7 @@ private:
     template <typename Stream, typename MutableBufferSequence>
     Future<void> opportunisticRead(Stream& stream,
                                    const MutableBufferSequence& buffers,
-                                   const transport::BatonHandle& baton = nullptr) {
+                                   const BatonHandle& baton = nullptr) {
         std::error_code ec;
         size_t size;
 
@@ -470,8 +465,9 @@ private:
                 asyncBuffers += size;
             }
 
-            if (baton) {
-                return baton->addSession(*this, Baton::Type::In)
+            if (baton && baton->networking()) {
+                return baton->networking()
+                    ->addSession(*this, NetworkingBaton::Type::In)
                     .then([&stream, asyncBuffers, baton, this] {
                         return opportunisticRead(stream, asyncBuffers, baton);
                     });
@@ -495,7 +491,7 @@ private:
     template <typename ConstBufferSequence>
     boost::optional<Future<void>> moreToSend(GenericSocket& socket,
                                              const ConstBufferSequence& buffers,
-                                             const transport::BatonHandle& baton) {
+                                             const BatonHandle& baton) {
         return boost::none;
     }
 
@@ -518,7 +514,7 @@ private:
     template <typename Stream, typename ConstBufferSequence>
     Future<void> opportunisticWrite(Stream& stream,
                                     const ConstBufferSequence& buffers,
-                                    const transport::BatonHandle& baton = nullptr) {
+                                    const BatonHandle& baton = nullptr) {
         std::error_code ec;
         std::size_t size;
 
@@ -553,8 +549,9 @@ private:
                 return std::move(*more);
             }
 
-            if (baton) {
-                return baton->addSession(*this, Baton::Type::Out)
+            if (baton && baton->networking()) {
+                return baton->networking()
+                    ->addSession(*this, NetworkingBaton::Type::Out)
                     .then([&stream, asyncBuffers, baton, this] {
                         return opportunisticWrite(stream, asyncBuffers, baton);
                     });
@@ -616,8 +613,7 @@ private:
                 auto& sslPeerInfo = SSLPeerInfo::forSession(shared_from_this());
 
                 if (sslPeerInfo.subjectName.empty()) {
-                    auto sslManager = getSSLManager();
-                    auto swPeerInfo = sslManager->parseAndValidatePeerCertificate(
+                    auto swPeerInfo = getSSLManager()->parseAndValidatePeerCertificate(
                         _sslSocket->native_handle(), "", _remote);
 
                     // The value of swPeerInfo is a bit complicated:

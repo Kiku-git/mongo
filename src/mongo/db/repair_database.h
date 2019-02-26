@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -59,21 +58,27 @@ StatusWith<IndexNameObjs> getIndexNameObjs(OperationContext* opCtx,
                                                [](const std::string& indexName) { return true; });
 
 /**
- * Selectively rebuild some indexes on a collection. Indexes will be built in parallel with a
- * `MultiIndexBlock`. One example usage is when a `dropIndex` command is rolled back. The dropped
- * index must be remade.
- *
- * @param indexNameObjs is expected to be the result of a call to `getIndexNameObjs`.
+ * Rebuilds the indexes provided by the 'indexSpecs' on the given collection.
+ * One example usage is when a 'dropIndex' command is rolled back. The dropped index must be remade.
  */
 Status rebuildIndexesOnCollection(OperationContext* opCtx,
                                   DatabaseCatalogEntry* dbce,
                                   CollectionCatalogEntry* cce,
-                                  const IndexNameObjs& indexNameObjs);
+                                  const std::vector<BSONObj>& indexSpecs);
 
 /**
  * Repairs a database using a storage engine-specific, best-effort process.
  * Some data may be lost or modified in the process but the output will
  * be structurally valid on successful return.
+ *
+ * Calls 'onRecordStoreRepair' after repairing all the collection record stores for each database
+ * before rebuilding the appropriate indexes.
+ *
+ * It is expected that the local database will be repaired first when running in repair mode.
  */
-Status repairDatabase(OperationContext* opCtx, StorageEngine* engine, const std::string& dbName);
-}
+Status repairDatabase(OperationContext* opCtx,
+                      StorageEngine* engine,
+                      const std::string& dbName,
+                      stdx::function<void(const std::string& dbName)> onRecordStoreRepair);
+
+}  // namespace mongo

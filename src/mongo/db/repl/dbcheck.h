@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -220,6 +219,7 @@ Status dbCheckOplogCommand(OperationContext* opCtx,
                            BSONObj& cmd,
                            const repl::OpTime& optime,
                            const repl::OplogEntry& entry,
-                           OplogApplication::Mode mode);
+                           OplogApplication::Mode mode,
+                           boost::optional<Timestamp> stableTimestampForRecovery);
 }
 }

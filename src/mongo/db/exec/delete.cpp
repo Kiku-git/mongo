@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -60,12 +59,12 @@ namespace {
  * Returns true if we should throw a WriteConflictException in order to retry the operation in
  * the case of a conflict. Returns false if we should skip the document and keep going.
  */
-bool shouldRestartDeleteIfNoLongerMatches(const DeleteStageParams& params) {
+bool shouldRestartDeleteIfNoLongerMatches(const DeleteStageParams* params) {
     // When we're doing a findAndModify with a sort, the sort will have a limit of 1, so it will not
     // produce any more results even if there is another matching document. Throw a WCE here so that
     // these operations get another chance to find a matching document. The findAndModify command
     // should automatically retry if it gets a WCE.
-    return params.returnDeleted && !params.sort.isEmpty();
+    return params->returnDeleted && !params->sort.isEmpty();
 };
 
 }  // namespace
@@ -74,12 +73,12 @@ bool shouldRestartDeleteIfNoLongerMatches(const DeleteStageParams& params) {
 const char* DeleteStage::kStageType = "DELETE";
 
 DeleteStage::DeleteStage(OperationContext* opCtx,
-                         const DeleteStageParams& params,
+                         std::unique_ptr<DeleteStageParams> params,
                          WorkingSet* ws,
                          Collection* collection,
                          PlanStage* child)
     : RequiresMutableCollectionStage(kStageType, opCtx, collection),
-      _params(params),
+      _params(std::move(params)),
       _ws(ws),
       _idRetrying(WorkingSet::INVALID_ID),
       _idReturning(WorkingSet::INVALID_ID) {
@@ -87,7 +86,7 @@ DeleteStage::DeleteStage(OperationContext* opCtx,
 }
 
 bool DeleteStage::isEOF() {
-    if (!_params.isMulti && _specificStats.docsDeleted > 0) {
+    if (!_params->isMulti && _specificStats.docsDeleted > 0) {
         return true;
     }
     return _idRetrying == WorkingSet::INVALID_ID && _idReturning == WorkingSet::INVALID_ID &&
@@ -103,7 +102,7 @@ PlanStage::StageState DeleteStage::doWork(WorkingSetID* out) {
     // and prevented us from returning ADVANCED with the old version of the document.
     if (_idReturning != WorkingSet::INVALID_ID) {
         // We should only get here if we were trying to return something before.
-        invariant(_params.returnDeleted);
+        invariant(_params->returnDeleted);
 
         WorkingSetMember* member = _ws->get(_idReturning);
         invariant(member->getState() == WorkingSetMember::OWNED_OBJ);
@@ -126,7 +125,6 @@ PlanStage::StageState DeleteStage::doWork(WorkingSetID* out) {
                 break;
 
             case PlanStage::FAILURE:
-            case PlanStage::DEAD:
                 // The stage which produces a failure is responsible for allocating a working set
                 // member with error details.
                 invariant(WorkingSet::INVALID_ID != id);
@@ -152,7 +150,7 @@ PlanStage::StageState DeleteStage::doWork(WorkingSetID* out) {
     WorkingSetMember* member = _ws->get(id);
 
     // We want to free this member when we return, unless we need to retry deleting or returning it.
-    ScopeGuard memberFreer = MakeGuard(&WorkingSet::free, _ws, id);
+    auto memberFreer = makeGuard([&] { _ws->free(id); });
 
     invariant(member->hasRecordId());
     RecordId recordId = member->recordId;
@@ -164,17 +162,17 @@ PlanStage::StageState DeleteStage::doWork(WorkingSetID* out) {
     bool docStillMatches;
     try {
         docStillMatches = write_stage_common::ensureStillMatches(
-            collection(), getOpCtx(), _ws, id, _params.canonicalQuery);
+            collection(), getOpCtx(), _ws, id, _params->canonicalQuery);
     } catch (const WriteConflictException&) {
         // There was a problem trying to detect if the document still exists, so retry.
-        memberFreer.Dismiss();
+        memberFreer.dismiss();
         return prepareToRetryWSM(id, out);
     }
 
     if (!docStillMatches) {
         // Either the document has already been deleted, or it has been updated such that it no
         // longer matches the predicate.
-        if (shouldRestartDeleteIfNoLongerMatches(_params)) {
+        if (shouldRestartDeleteIfNoLongerMatches(_params.get())) {
             throw WriteConflictException();
         }
         return PlanStage::NEED_TIME;
@@ -182,11 +180,15 @@ PlanStage::StageState DeleteStage::doWork(WorkingSetID* out) {
 
     // Ensure that the BSONObj underlying the WorkingSetMember is owned because saveState() is
     // allowed to free the memory.
-    if (_params.returnDeleted) {
+    if (_params->returnDeleted) {
         // Save a copy of the document that is about to get deleted, but keep it in the RID_AND_OBJ
         // state in case we need to retry deleting it.
         BSONObj deletedDoc = member->obj.value();
         member->obj.setValue(deletedDoc.getOwned());
+    }
+
+    if (_params->removeSaver) {
+        uassertStatusOK(_params->removeSaver->goingToDelete(member->obj.value()));
     }
 
     // TODO: Do we want to buffer docs and delete them in a group rather than saving/restoring state
@@ -200,26 +202,26 @@ PlanStage::StageState DeleteStage::doWork(WorkingSetID* out) {
     }
 
     // Do the write, unless this is an explain.
-    if (!_params.isExplain) {
+    if (!_params->isExplain) {
         try {
             WriteUnitOfWork wunit(getOpCtx());
             collection()->deleteDocument(getOpCtx(),
-                                         _params.stmtId,
+                                         _params->stmtId,
                                          recordId,
-                                         _params.opDebug,
-                                         _params.fromMigrate,
+                                         _params->opDebug,
+                                         _params->fromMigrate,
                                          false,
-                                         _params.returnDeleted ? Collection::StoreDeletedDoc::On
-                                                               : Collection::StoreDeletedDoc::Off);
+                                         _params->returnDeleted ? Collection::StoreDeletedDoc::On
+                                                                : Collection::StoreDeletedDoc::Off);
             wunit.commit();
         } catch (const WriteConflictException&) {
-            memberFreer.Dismiss();  // Keep this member around so we can retry deleting it.
+            memberFreer.dismiss();  // Keep this member around so we can retry deleting it.
             return prepareToRetryWSM(id, out);
         }
     }
     ++_specificStats.docsDeleted;
 
-    if (_params.returnDeleted) {
+    if (_params->returnDeleted) {
         // After deleting the document, the RecordId associated with this member is invalid.
         // Remove the 'recordId' from the WorkingSetMember before returning it.
         member->recordId = RecordId();
@@ -234,23 +236,23 @@ PlanStage::StageState DeleteStage::doWork(WorkingSetID* out) {
     } catch (const WriteConflictException&) {
         // Note we don't need to retry anything in this case since the delete already was committed.
         // However, we still need to return the deleted document (if it was requested).
-        if (_params.returnDeleted) {
+        if (_params->returnDeleted) {
             // member->obj should refer to the deleted document.
             invariant(member->getState() == WorkingSetMember::OWNED_OBJ);
 
             _idReturning = id;
             // Keep this member around so that we can return it on the next work() call.
-            memberFreer.Dismiss();
+            memberFreer.dismiss();
         }
         *out = WorkingSet::INVALID_ID;
         return NEED_YIELD;
     }
 
-    if (_params.returnDeleted) {
+    if (_params->returnDeleted) {
         // member->obj should refer to the deleted document.
         invariant(member->getState() == WorkingSetMember::OWNED_OBJ);
 
-        memberFreer.Dismiss();  // Keep this member around so we can return it.
+        memberFreer.dismiss();  // Keep this member around so we can return it.
         *out = id;
         return PlanStage::ADVANCED;
     }
@@ -258,7 +260,7 @@ PlanStage::StageState DeleteStage::doWork(WorkingSetID* out) {
     return PlanStage::NEED_TIME;
 }
 
-void DeleteStage::restoreState(RequiresCollTag) {
+void DeleteStage::doRestoreStateRequiresCollection() {
     const NamespaceString& ns = collection()->ns();
     uassert(ErrorCodes::PrimarySteppedDown,
             str::stream() << "Demoted from primary while removing from " << ns.ns(),
@@ -290,16 +292,21 @@ long long DeleteStage::getNumDeleted(const PlanExecutor& exec) {
 
     // If the collection exists, the delete plan may either have a delete stage at the root, or (for
     // findAndModify) a projection stage wrapping a delete stage.
-    if (StageType::STAGE_PROJECTION == exec.getRootStage()->stageType()) {
-        invariant(exec.getRootStage()->getChildren().size() == 1U);
-        invariant(StageType::STAGE_DELETE == exec.getRootStage()->child()->stageType());
-        const SpecificStats* stats = exec.getRootStage()->child()->getSpecificStats();
-        return static_cast<const DeleteStats*>(stats)->docsDeleted;
-    } else {
-        invariant(StageType::STAGE_DELETE == exec.getRootStage()->stageType());
-        const auto* deleteStats =
-            static_cast<const DeleteStats*>(exec.getRootStage()->getSpecificStats());
-        return deleteStats->docsDeleted;
+    switch (exec.getRootStage()->stageType()) {
+        case StageType::STAGE_PROJECTION_DEFAULT:
+        case StageType::STAGE_PROJECTION_COVERED:
+        case StageType::STAGE_PROJECTION_SIMPLE: {
+            invariant(exec.getRootStage()->getChildren().size() == 1U);
+            invariant(StageType::STAGE_DELETE == exec.getRootStage()->child()->stageType());
+            const SpecificStats* stats = exec.getRootStage()->child()->getSpecificStats();
+            return static_cast<const DeleteStats*>(stats)->docsDeleted;
+        }
+        default: {
+            invariant(StageType::STAGE_DELETE == exec.getRootStage()->stageType());
+            const auto* deleteStats =
+                static_cast<const DeleteStats*>(exec.getRootStage()->getSpecificStats());
+            return deleteStats->docsDeleted;
+        }
     }
 }
 

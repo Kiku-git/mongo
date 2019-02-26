@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -44,30 +43,36 @@ NetworkTestEnv::NetworkTestEnv(TaskExecutor* executor, NetworkInterfaceMock* net
     : _executor(executor), _mockNetwork(network) {}
 
 void NetworkTestEnv::onCommand(OnCommandFunction func) {
-    _mockNetwork->enterNetwork();
+    onCommands({std::move(func)});
+}
 
-    const NetworkInterfaceMock::NetworkOperationIterator noi = _mockNetwork->getNextReadyRequest();
-    const RemoteCommandRequest& request = noi->getRequest();
+void NetworkTestEnv::onCommands(std::vector<OnCommandFunction> funcs) {
+    executor::NetworkInterfaceMock::InNetworkGuard guard(_mockNetwork);
 
-    auto resultStatus = func(request);
+    for (auto&& func : funcs) {
+        const NetworkInterfaceMock::NetworkOperationIterator noi =
+            _mockNetwork->getNextReadyRequest();
+        const RemoteCommandRequest& request = noi->getRequest();
 
-    if (resultStatus.isOK()) {
-        BSONObjBuilder result(std::move(resultStatus.getValue()));
-        CommandHelpers::appendCommandStatusNoThrow(result, resultStatus.getStatus());
-        const RemoteCommandResponse response(result.obj(), Milliseconds(1));
+        auto resultStatus = func(request);
 
-        _mockNetwork->scheduleResponse(noi, _mockNetwork->now(), response);
-    } else {
-        _mockNetwork->scheduleResponse(
-            noi, _mockNetwork->now(), {resultStatus.getStatus(), Milliseconds(0)});
+        if (resultStatus.isOK()) {
+            BSONObjBuilder result(std::move(resultStatus.getValue()));
+            CommandHelpers::appendCommandStatusNoThrow(result, resultStatus.getStatus());
+            const RemoteCommandResponse response(result.obj(), Milliseconds(1));
+
+            _mockNetwork->scheduleResponse(noi, _mockNetwork->now(), response);
+        } else {
+            _mockNetwork->scheduleResponse(
+                noi, _mockNetwork->now(), {resultStatus.getStatus(), Milliseconds(0)});
+        }
     }
 
     _mockNetwork->runReadyNetworkOperations();
-    _mockNetwork->exitNetwork();
 }
 
 void NetworkTestEnv::onCommandWithMetadata(OnCommandWithMetadataFunction func) {
-    _mockNetwork->enterNetwork();
+    executor::NetworkInterfaceMock::InNetworkGuard guard(_mockNetwork);
 
     const NetworkInterfaceMock::NetworkOperationIterator noi = _mockNetwork->getNextReadyRequest();
     const RemoteCommandRequest& request = noi->getRequest();
@@ -85,7 +90,6 @@ void NetworkTestEnv::onCommandWithMetadata(OnCommandWithMetadataFunction func) {
     }
 
     _mockNetwork->runReadyNetworkOperations();
-    _mockNetwork->exitNetwork();
 }
 
 void NetworkTestEnv::onFindCommand(OnFindCommandFunction func) {

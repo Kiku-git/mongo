@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2018 MongoDB, Inc.
+ * Public Domain 2014-2019 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -45,6 +45,8 @@ testutil_parse_opts(int argc, char * const *argv, TEST_OPTS *opts)
 	opts->verbose = false;
 
 	opts->progname = testutil_set_progname(argv);
+
+	testutil_print_command_line(argc, argv);
 
 	while ((ch = __wt_getopt(opts->progname,
 		argc, argv, "A:dh:n:o:pR:T:t:vW:")) != EOF)

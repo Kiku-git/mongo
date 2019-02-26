@@ -38,7 +38,7 @@ post:
           # these default values in the distro config in evergreen.
 
           if [ -d "${scons_cache_path}" ]; then
-              ${python|/opt/mongodbtoolchain/v2/bin/python2} buildscripts/scons_cache_prune.py --cache-dir ${scons_cache_path} --cache-size ${scons_cache_size|200} --prune-ratio ${scons_prune_ratio|0.8}
+              /opt/mongodbtoolchain/v3/bin/python2 buildscripts/scons_cache_prune.py --cache-dir ${scons_cache_path} --cache-size ${scons_cache_size|200} --prune-ratio ${scons_prune_ratio|0.8}
           fi
 
 
@@ -103,7 +103,7 @@ functions:
           set -o verbose
           mkdir -p ./dbdata
           ${mongod_exec_wrapper} ./mongod --dbpath ./dbdata ${mongod_flags}
-    - command : shell.exec
+    - command: shell.exec
       params:
         working_dir: src
         script: |
@@ -189,7 +189,7 @@ functions:
         file: "src/tags.json"
         name: "perf"
     - command: shell.exec
-      type : test
+      type: test
       params:
         working_dir: src
         script: |
@@ -216,7 +216,7 @@ functions:
           source ./venv/bin/activate
           pip install argparse
     - command: shell.exec
-      type : test
+      type: test
       params:
         working_dir: src
         script: |
@@ -241,6 +241,19 @@ tasks:
       params:
         directory: src
     - command: manifest.load
+    # We create a virtual environment with the Python dependencies for compiling the server
+    # installed.
+    - command: shell.exec
+      params:
+        working_dir: src
+        script: |
+          set -o errexit
+          set -o verbose
+
+          /opt/mongodbtoolchain/v3/bin/virtualenv --python /opt/mongodbtoolchain/v3/bin/python2 "${workdir}/venv"
+          source "${workdir}/venv/bin/activate"
+
+          python2 -m pip install -r etc/pip/compile-requirements.txt
     - command: shell.exec
       params:
         working_dir: src
@@ -258,7 +271,8 @@ tasks:
 
           # This script converts the generated version string into a sanitized version string for
           # use by scons and uploading artifacts as well as information about for the scons cache.
-          MONGO_VERSION=$MONGO_VERSION USE_SCONS_CACHE=${use_scons_cache|false} ${python|/opt/mongodbtoolchain/v2/bin/python2} buildscripts/generate_compile_expansions.py --out compile_expansions.yml
+          source "${workdir}/venv/bin/activate"
+          MONGO_VERSION=$MONGO_VERSION USE_SCONS_CACHE=${use_scons_cache|false} python2 buildscripts/generate_compile_expansions.py --out compile_expansions.yml
     # Then we load the generated version data into the agent so we can use it in task definitions
     - command: expansions.update
       params:
@@ -270,7 +284,8 @@ tasks:
           set -o errexit
           set -o verbose
 
-          ${python|/opt/mongodbtoolchain/v2/bin/python2} ./buildscripts/scons.py ${compile_flags|} ${scons_cache_args|} mongo mongod
+          source "${workdir}/venv/bin/activate"
+          python2 ./buildscripts/scons.py ${compile_flags|} ${scons_cache_args|} mongo mongod
     - command: s3.put
       params:
         aws_key: ${aws_key}
@@ -300,9 +315,9 @@ tasks:
     - func: "run perf tests"
       vars:
         includeFilter1: "query"
-        includeFilter2 : "core regression"
-        excludeFilter : "single_threaded"
-        threads : "1 2 4 8"
+        includeFilter2: "core regression"
+        excludeFilter: "single_threaded"
+        threads: "1 2 4 8"
         readCmd: false
     - func: "download analysis scripts"
     - func: "analyze"
@@ -317,9 +332,9 @@ tasks:
     - func: "run perf tests"
       vars:
         includeFilter1: "query_identityview"
-        includeFilter2 : "core regression"
-        excludeFilter : "single_threaded"
-        threads : "1 2 4 8"
+        includeFilter2: "core regression"
+        excludeFilter: "single_threaded"
+        threads: "1 2 4 8"
         readCmd: true
     - func: "download analysis scripts"
     - func: "analyze"
@@ -334,9 +349,9 @@ tasks:
     - func: "run perf tests"
       vars:
         includeFilter1: "aggregation_identityview"
-        includeFilter2 : "regression"
+        includeFilter2: "regression"
         excludeFilter: "none"
-        threads : "1"
+        threads: "1"
         readCmd: true
     - func: "download analysis scripts"
     - func: "analyze"
@@ -351,9 +366,9 @@ tasks:
     - func: "run perf tests"
       vars:
         includeFilter1: "where"
-        includeFilter2 : "core regression"
-        excludeFilter : "single_threaded"
-        threads : "1 2 4 8"
+        includeFilter2: "core regression"
+        excludeFilter: "single_threaded"
+        threads: "1 2 4 8"
         readCmd: false
     - func: "download analysis scripts"
     - func: "analyze"
@@ -368,9 +383,9 @@ tasks:
     - func: "run perf tests"
       vars:
         includeFilter1: "update"
-        includeFilter2 : "core regression"
-        excludeFilter : "single_threaded"
-        threads : "1 2 4 8"
+        includeFilter2: "core regression"
+        excludeFilter: "single_threaded"
+        threads: "1 2 4 8"
         readCmd: false
     - func: "download analysis scripts"
     - func: "analyze"
@@ -385,9 +400,9 @@ tasks:
     - func: "run perf tests"
       vars:
         includeFilter1: "insert"
-        includeFilter2 : "core regression"
-        excludeFilter : "single_threaded"
-        threads : "1 2 4 8"
+        includeFilter2: "core regression"
+        excludeFilter: "single_threaded"
+        threads: "1 2 4 8"
         readCmd: false
     - func: "download analysis scripts"
     - func: "analyze"
@@ -402,9 +417,9 @@ tasks:
     - func: "run perf tests"
       vars:
         includeFilter1: "wildcard_read"
-        includeFilter2 : "core regression"
-        excludeFilter : "single_threaded"
-        threads : "1 2 4 8"
+        includeFilter2: "core regression"
+        excludeFilter: "single_threaded"
+        threads: "1 2 4 8"
         readCmd: false
     - func: "download analysis scripts"
     - func: "analyze"
@@ -419,9 +434,9 @@ tasks:
     - func: "run perf tests"
       vars:
         includeFilter1: "wildcard_write"
-        includeFilter2 : "core regression"
-        excludeFilter : "single_threaded"
-        threads : "1 2 4 8"
+        includeFilter2: "core regression"
+        excludeFilter: "single_threaded"
+        threads: "1 2 4 8"
         readCmd: false
     - func: "download analysis scripts"
     - func: "analyze"
@@ -436,9 +451,9 @@ tasks:
     - func: "run perf tests"
       vars:
         includeFilter1: "geo"
-        includeFilter2 : "core regression"
-        excludeFilter : "single_threaded"
-        threads : "1 2 4 8"
+        includeFilter2: "core regression"
+        excludeFilter: "single_threaded"
+        threads: "1 2 4 8"
         readCmd: false
     - func: "download analysis scripts"
     - func: "analyze"
@@ -453,9 +468,9 @@ tasks:
     - func: "run perf tests"
       vars:
         includeFilter1: "command multi remove mixed"
-        includeFilter2 : "core regression"
-        excludeFilter : "single_threaded"
-        threads : "1 2 4 8"
+        includeFilter2: "core regression"
+        excludeFilter: "single_threaded"
+        threads: "1 2 4 8"
         readCmd: false
     - func: "download analysis scripts"
     - func: "analyze"
@@ -470,9 +485,9 @@ tasks:
     - func: "run perf tests"
       vars:
         includeFilter1: "single_threaded"
-        includeFilter2 : "core regression"
-        excludeFilter : "none"
-        threads : "1"
+        includeFilter2: "core regression"
+        excludeFilter: "none"
+        threads: "1"
         readCmd: false
     - func: "download analysis scripts"
     - func: "analyze"
@@ -489,7 +504,7 @@ tasks:
         includeFilter1: "aggregation"
         includeFilter2: "regression"
         excludeFilter: "none"
-        threads : "1"
+        threads: "1"
         readCmd: false
     - func: "download analysis scripts"
     - func: "analyze"
@@ -504,9 +519,9 @@ tasks:
     - func: "run perf tests"
       vars:
         includeFilter1: "agg_query_comparison"
-        includeFilter2 : "core regression"
-        excludeFilter : "single_threaded"
-        threads : "1 2 4 8"
+        includeFilter2: "core regression"
+        excludeFilter: "single_threaded"
+        threads: "1 2 4 8"
         readCmd: false
     - func: "download analysis scripts"
     - func: "analyze"
@@ -516,14 +531,14 @@ tasks:
 buildvariants:
 - name: linux-wt-standalone
   display_name: Standalone Linux inMemory
-  batchtime: 90 # 1.5 hours
+  batchtime: 90  # 1.5 hours
   modules:
     - enterprise
   expansions:
     # We are explicitly tracking the rhel62 variant compile options from evergreen.yml for
     # microbenchmarks, since they run on the centos6 boxes.  If we can get proper artifacts directly
     # from that project, we should do that and remove the compile tasks.
-    compile_flags: --ssl MONGO_DISTMOD=rhel62 -j$(grep -c ^processor /proc/cpuinfo) --release --variables-files=etc/scons/mongodbtoolchain_gcc.vars
+    compile_flags: --ssl MONGO_DISTMOD=rhel62 -j$(grep -c ^processor /proc/cpuinfo) --release --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
     mongod_exec_wrapper: &exec_wrapper "numactl --physcpubind=4,5,6,7 -i 1"
     perf_exec_wrapper: &perf_wrapper "numactl --physcpubind=1,2,3 -i 0"
     mongod_flags: >-
@@ -562,7 +577,7 @@ buildvariants:
 
 - name: linux-wt-repl
   display_name: 1-Node ReplSet Linux inMemory
-  batchtime: 90 # 1.5 hours
+  batchtime: 90  # 1.5 hours
   expansions:
     mongod_exec_wrapper: *exec_wrapper
     perf_exec_wrapper: *perf_wrapper

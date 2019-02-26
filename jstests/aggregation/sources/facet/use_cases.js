@@ -4,6 +4,10 @@
  */
 (function() {
     "use strict";
+
+    load("jstests/noPassthrough/libs/server_parameter_helpers.js");  // For setParameterOnAllHosts.
+    load("jstests/libs/discover_topology.js");                       // For findDataBearingNodes.
+
     const dbName = "test";
     const collName = jsTest.name();
     const testNs = dbName + "." + collName;
@@ -115,8 +119,6 @@
     populateData(st.s0, nDocs);
     doExecutionTest(st.s0);
 
-    // Test that $facet stage propagates information about involved collections, preventing users
-    // from doing things like $lookup from a sharded collection.
     const shardedDBName = "sharded";
     const shardedCollName = "collection";
     const shardedColl = st.getDB(shardedDBName).getCollection(shardedCollName);
@@ -126,21 +128,11 @@
     assert.commandWorked(
         st.admin.runCommand({shardCollection: shardedColl.getFullName(), key: {_id: 1}}));
 
-    // Test that trying to perform a $lookup on a sharded collection returns an error.
-    let res = assert.commandFailed(unshardedColl.runCommand({
-        aggregate: unshardedColl.getName(),
-        pipeline: [{
-            $lookup:
-                {from: shardedCollName, localField: "_id", foreignField: "_id", as: "results"}
-        }],
-        cursor: {}
-    }));
-    assert.eq(
-        28769, res.code, "Expected aggregation to fail due to $lookup on a sharded collection");
-
-    // Test that trying to perform a $lookup on a sharded collection inside a $facet stage still
-    // returns an error.
-    res = assert.commandFailed(unshardedColl.runCommand({
+    // Test $lookup inside a $facet stage on a sharded collection.
+    // Enable sharded $lookup.
+    setParameterOnAllHosts(
+        DiscoverTopology.findNonConfigNodes(st.s), "internalQueryAllowShardedLookup", true);
+    assert.commandWorked(unshardedColl.runCommand({
         aggregate: unshardedColl.getName(),
         pipeline: [{
             $facet: {
@@ -156,8 +148,9 @@
         }],
         cursor: {}
     }));
-    assert.eq(
-        28769, res.code, "Expected aggregation to fail due to $lookup on a sharded collection");
+    // Disable sharded $lookup.
+    setParameterOnAllHosts(
+        DiscoverTopology.findNonConfigNodes(st.s), "internalQueryAllowShardedLookup", false);
 
     // Then run the assertions against a sharded collection.
     assert.commandWorked(st.admin.runCommand({enableSharding: dbName}));

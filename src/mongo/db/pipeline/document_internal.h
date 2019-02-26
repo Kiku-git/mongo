@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -380,7 +379,7 @@ private:
 
     /// Initialize empty hash table
     void hashTabInit() {
-        memset(_hashTab, -1, hashTabBytes());
+        memset(static_cast<void*>(_hashTab), -1, hashTabBytes());
     }
 
     static unsigned hashKey(StringData name) {

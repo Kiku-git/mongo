@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -81,6 +80,13 @@ public:
         }
 
         return Status::OK();
+    }
+
+    /**
+     * Should ignore the lsid attached to this command in order to prevent it from killing itself.
+     */
+    bool attachLogicalSessionsToOpCtx() const override {
+        return false;
     }
 
     virtual bool run(OperationContext* opCtx,

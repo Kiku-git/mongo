@@ -141,5 +141,20 @@
     });
     assert.commandFailed(explain, tojson(explain));
 
+    // Explain a changeStream, ensure an error is thrown under snapshot read concern.
+    const session = db.getMongo().startSession();
+    const sessionDB = session.getDatabase(db.getName());
+    explain = sessionDB.runCommand({
+        aggregate: "coll",
+        pipeline: [{$changeStream: {}}],
+        explain: true,
+        readConcern: {level: "snapshot"},
+        txnNumber: NumberLong(0),
+        startTransaction: true,
+        autocommit: false
+    });
+    assert.commandFailedWithCode(
+        explain, ErrorCodes.OperationNotSupportedInTransaction, tojson(explain));
+
     st.stop();
 })();

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -143,6 +142,11 @@ public:
      * Appends the runtime state of the balancer instance to the specified builder.
      */
     void report(OperationContext* opCtx, BSONObjBuilder* builder);
+
+    /**
+     * Informs the balancer that a setting that affects it changed.
+     */
+    void notifyPersistedBalancerSettingsChanged();
 
 private:
     /**

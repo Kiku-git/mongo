@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -87,13 +86,6 @@ LogstreamBuilder::LogstreamBuilder(MessageLogDomain* domain,
       _component(std::move(component)),
       _tee(nullptr),
       _shouldCache(shouldCache) {}
-
-LogstreamBuilder::LogstreamBuilder(logger::MessageLogDomain* domain,
-                                   StringData contextName,
-                                   LabeledLevel labeledLevel)
-    : LogstreamBuilder(domain, contextName, static_cast<LogSeverity>(labeledLevel)) {
-    setBaseMessage(labeledLevel.getLabel());
-}
 
 LogstreamBuilder::~LogstreamBuilder() {
     if (_os) {

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -125,7 +124,7 @@ std::vector<std::string> getAddrsForHost(const std::string& iporhost,
         return out;
     }
 
-    ON_BLOCK_EXIT(freeaddrinfo, addrs);
+    ON_BLOCK_EXIT([&] { freeaddrinfo(addrs); });
 
     for (addrinfo* addr = addrs; addr != NULL; addr = addr->ai_next) {
         int family = addr->ai_family;
@@ -233,7 +232,7 @@ std::vector<std::string> getBoundAddrs(const bool ipv6enabled) {
         warning() << "getifaddrs failure: " << errnoWithDescription(err) << std::endl;
         return out;
     }
-    ON_BLOCK_EXIT(freeifaddrs, addrs);
+    ON_BLOCK_EXIT([&] { freeifaddrs(addrs); });
 
     // based on example code from linux getifaddrs manpage
     for (ifaddrs* addr = addrs; addr != NULL; addr = addr->ifa_next) {

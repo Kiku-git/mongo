@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2018 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -1957,7 +1957,7 @@ __evict_walk_tree(WT_SESSION_IMPL *session,
 		    !WT_PAGE_IS_INTERNAL(page) &&
 		    !modified && page->modify != NULL &&
 		    !__wt_txn_visible_all(session, page->modify->rec_max_txn,
-		    WT_TIMESTAMP_NULL(&page->modify->rec_max_timestamp))) {
+		    page->modify->rec_max_timestamp)) {
 			__wt_page_modify_set(session, page);
 			goto fast;
 		}
@@ -2444,6 +2444,7 @@ err:	if (timer) {
 		time_stop = __wt_clock(session);
 		elapsed = WT_CLOCKDIFF_US(time_stop, time_start);
 		WT_STAT_CONN_INCRV(session, application_cache_time, elapsed);
+		WT_STAT_SESSION_INCRV(session, cache_time, elapsed);
 		session->cache_wait_us += elapsed;
 		if (cache->cache_max_wait_us != 0 &&
 		    session->cache_wait_us > cache->cache_max_wait_us) {

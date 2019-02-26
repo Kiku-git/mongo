@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -55,7 +54,6 @@
 #include "mongo/db/auth/user.h"
 #include "mongo/db/auth/user_document_parser.h"
 #include "mongo/db/auth/user_name.h"
-#include "mongo/db/auth/user_name_hash.h"
 #include "mongo/db/global_settings.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/platform/compiler.h"
@@ -70,6 +68,7 @@ mongo::AuthInfo mongo::internalSecurity;
 
 namespace mongo {
 
+constexpr StringData AuthorizationManager::USERID_FIELD_NAME;
 constexpr StringData AuthorizationManager::USER_NAME_FIELD_NAME;
 constexpr StringData AuthorizationManager::USER_DB_FIELD_NAME;
 constexpr StringData AuthorizationManager::ROLE_NAME_FIELD_NAME;

@@ -1,6 +1,3 @@
-// engine.h
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -191,20 +188,6 @@ public:
         return _lastRetIsNativeCode;
     }
 
-    class NoDBAccess {
-        Scope* _s;
-
-    public:
-        NoDBAccess(Scope* s) : _s(s) {}
-        ~NoDBAccess() {
-            _s->rename("____db____", "db");
-        }
-    };
-    NoDBAccess disableDBAccess(const char* why) {
-        rename("db", "____db____");
-        return NoDBAccess(this);
-    }
-
 protected:
     friend class PooledScope;
 
@@ -219,7 +202,7 @@ protected:
     std::string _localDBName;
     int64_t _loadedVersion;
     std::set<std::string> _storedNames;
-    static AtomicInt64 _lastVersion;
+    static AtomicWord<long long> _lastVersion;
     FunctionCacheMap _cachedFunctions;
     int _numTimesUsed;
     bool _lastRetIsNativeCode;  // v8 only: set to true if eval'd script returns a native func

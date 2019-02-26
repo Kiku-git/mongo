@@ -1,6 +1,3 @@
-// distinct.cpp
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -117,11 +114,11 @@ public:
                    rpc::ReplyBuilderInterface* result) const override {
         std::string dbname = request.getDatabase().toString();
         const BSONObj& cmdObj = request.body;
-        // Acquire locks and resolve possible UUID. The RAII object is optional, because in the case
-        // of a view, the locks need to be released.
+        // Acquire locks. The RAII object is optional, because in the case of a view, the locks
+        // need to be released.
         boost::optional<AutoGetCollectionForReadCommand> ctx;
         ctx.emplace(opCtx,
-                    CommandHelpers::parseNsOrUUID(dbname, cmdObj),
+                    CommandHelpers::parseNsCollectionRequired(dbname, cmdObj),
                     AutoGetCollection::ViewMode::kViewsPermitted);
         const auto nss = ctx->getNss();
 
@@ -144,8 +141,14 @@ public:
                 return viewAggRequest.getStatus();
             }
 
-            return runAggregate(
-                opCtx, nss, viewAggRequest.getValue(), viewAggregation.getValue(), result);
+            // An empty PrivilegeVector is acceptable because these privileges are only checked on
+            // getMore and explain will not open a cursor.
+            return runAggregate(opCtx,
+                                nss,
+                                viewAggRequest.getValue(),
+                                viewAggregation.getValue(),
+                                PrivilegeVector(),
+                                result);
         }
 
         Collection* const collection = ctx->getCollection();
@@ -162,6 +165,7 @@ public:
              const std::string& dbname,
              const BSONObj& cmdObj,
              BSONObjBuilder& result) override {
+        CommandHelpers::handleMarkKillOnClientDisconnect(opCtx);
         // Acquire locks and resolve possible UUID. The RAII object is optional, because in the case
         // of a view, the locks need to be released.
         boost::optional<AutoGetCollectionForReadCommand> ctx;
@@ -242,7 +246,7 @@ public:
         }
 
         // Return an error if execution fails for any reason.
-        if (PlanExecutor::FAILURE == state || PlanExecutor::DEAD == state) {
+        if (PlanExecutor::FAILURE == state) {
             log() << "Plan executor error during distinct command: "
                   << redact(PlanExecutor::statestr(state))
                   << ", stats: " << redact(Explain::getWinningPlanStats(executor.getValue().get()));

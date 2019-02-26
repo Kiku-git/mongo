@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -42,7 +41,7 @@
 #include "mongo/db/exec/plan_stage.h"
 #include "mongo/db/exec/working_set.h"
 #include "mongo/db/query/explain.h"
-#include "mongo/db/query/query_knobs.h"
+#include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_solution.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/server_parameters.h"
@@ -214,7 +213,9 @@ double PlanRanker::scoreTree(const PlanStageStats* stats) {
     // We only do this when we have a projection stage because we have so many jstests that
     // check bounds even when a collscan plan is just as good as the ixscan'd plan :(
     double noFetchBonus = epsilon;
-    if (hasStage(STAGE_PROJECTION, stats) && hasStage(STAGE_FETCH, stats)) {
+    if ((hasStage(STAGE_PROJECTION_DEFAULT, stats) || hasStage(STAGE_PROJECTION_COVERED, stats) ||
+         hasStage(STAGE_PROJECTION_SIMPLE, stats)) &&
+        hasStage(STAGE_FETCH, stats)) {
         noFetchBonus = 0;
     }
 

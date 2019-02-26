@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -74,8 +73,8 @@ void InternalSchemaAllElemMatchFromIndexMatchExpression::debugString(StringBuild
     _expression->getFilter()->debugString(debug, level + 1);
 }
 
-void InternalSchemaAllElemMatchFromIndexMatchExpression::serialize(BSONObjBuilder* out) const {
-    BSONObjBuilder allElemMatchBob(out->subobjStart(path()));
+BSONObj InternalSchemaAllElemMatchFromIndexMatchExpression::getSerializedRightHandSide() const {
+    BSONObjBuilder allElemMatchBob;
     BSONArrayBuilder subArray(allElemMatchBob.subarrayStart(kName));
     subArray.append(_index);
     {
@@ -84,7 +83,7 @@ void InternalSchemaAllElemMatchFromIndexMatchExpression::serialize(BSONObjBuilde
         eBuilder.doneFast();
     }
     subArray.doneFast();
-    allElemMatchBob.doneFast();
+    return allElemMatchBob.obj();
 }
 
 MatchExpression::ExpressionOptimizerFunc

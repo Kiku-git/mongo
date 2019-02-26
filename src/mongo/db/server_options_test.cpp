@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -48,8 +47,10 @@
 
 #include <boost/filesystem.hpp>
 
+#include "mongo/base/init.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/server_options_base.h"
 #include "mongo/db/server_options_server_helpers.h"
 #include "mongo/logger/logger.h"
 #include "mongo/unittest/unittest.h"
@@ -65,6 +66,12 @@ namespace {
 using mongo::ErrorCodes;
 using mongo::Status;
 namespace moe = mongo::optionenvironment;
+
+MONGO_INITIALIZER(ServerLogRedirection)(mongo::InitializerContext*) {
+    // ssl_options_server.cpp has an initializer which depends on logging.
+    // We can stub that dependency out for unit testing purposes.
+    return Status::OK();
+}
 
 class OptionsParserTester : public moe::OptionsParser {
 public:
@@ -799,7 +806,7 @@ TEST(SetupOptions, DeepCwd) {
     sb << "/tmp/deepcwd-" << getpid();
     boost::filesystem::path deepBaseDir = sb.str();
 
-    auto cleanup = ::mongo::MakeGuard([&] {
+    auto cleanup = ::mongo::makeGuard([&] {
         boost::filesystem::current_path(cwd, ec);
         boost::filesystem::remove_all(deepBaseDir, ec);
     });
@@ -856,7 +863,7 @@ TEST(SetupOptions, UnlinkedCwd) {
 
     std::string unlinkDir;
 
-    auto cleanup = ::mongo::MakeGuard([&] {
+    auto cleanup = ::mongo::makeGuard([&] {
         boost::filesystem::current_path(cwd, ec);
         if (!unlinkDir.empty()) {
             boost::filesystem::remove(cwd / unlinkDir, ec);

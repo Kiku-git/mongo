@@ -228,12 +228,12 @@ DBCollection.prototype.find = function(query, fields, limit, skip, batchSize, op
     {
         const session = this.getDB().getSession();
 
-        const readPreference = session._serverSession.client.getReadPreference(session);
+        const readPreference = session._getSessionAwareClient().getReadPreference(session);
         if (readPreference !== null) {
             cursor.readPref(readPreference.mode, readPreference.tags);
         }
 
-        const readConcern = session._serverSession.client.getReadConcern(session);
+        const readConcern = session._getSessionAwareClient().getReadConcern(session);
         if (readConcern !== null) {
             cursor.readConcern(readConcern.level);
         }
@@ -664,7 +664,7 @@ DBCollection.prototype.reIndex = function() {
 
 DBCollection.prototype.dropIndexes = function(indexNames) {
     indexNames = indexNames || '*';
-    var res = this._db.runCommand({deleteIndexes: this.getName(), index: indexNames});
+    var res = this._db.runCommand({dropIndexes: this.getName(), index: indexNames});
     assert(res, "no result from dropIndex result");
     if (res.ok)
         return res;
@@ -845,7 +845,7 @@ DBCollection.prototype.hashAllDocs = function() {
  */
 DBCollection.prototype.dropIndex = function(index) {
     assert(index, "need to specify index to dropIndex");
-    var res = this._dbCommand("deleteIndexes", {index: index});
+    var res = this._dbCommand("dropIndexes", {index: index});
     return res;
 };
 

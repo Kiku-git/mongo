@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2018 MongoDB, Inc.
+ * Public Domain 2014-2019 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -67,13 +67,15 @@ struct WorkgenException {
 
 struct Throttle {
     ThreadRunner &_runner;
-    double _throttle;
+    double _throttle;                          // operations per second
     double _burst;
     timespec _next_div;
     int64_t _ops_delta;
-    uint64_t _ops_prev;         // previously returned value
-    uint64_t _ops_per_div;      // statically calculated.
-    uint64_t _ms_per_div;       // statically calculated.
+    uint64_t _ops_prev;                        // previously returned value
+    uint64_t _ops_per_div;                     // statically calculated.
+    uint64_t _ms_per_div;                      // statically calculated.
+    double _ops_left_this_second;              // ops left to go this second
+    uint_t _div_pos;                           // count within THROTTLE_PER_SEC
     bool _started;
 
     Throttle(ThreadRunner &runner, double throttle, double burst);

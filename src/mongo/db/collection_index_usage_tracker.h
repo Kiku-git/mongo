@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -70,7 +69,7 @@ public:
         }
 
         // Number of operations that have used this index.
-        AtomicInt64 accesses;
+        AtomicWord<long long> accesses;
 
         // Date/Time that we started tracking index usage.
         Date_t trackerStartTime;

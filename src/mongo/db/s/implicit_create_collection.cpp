@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -95,7 +94,8 @@ public:
             // Take the DBLock and CollectionLock directly rather than using AutoGetCollection
             // (which calls AutoGetDb) to avoid doing database and shard version checks.
             Lock::DBLock dbLock(opCtx, _ns.db(), MODE_IS);
-            const auto db = DatabaseHolder::getDatabaseHolder().get(opCtx, _ns.db());
+            auto databaseHolder = DatabaseHolder::get(opCtx);
+            auto db = databaseHolder->getDb(opCtx, _ns.db());
             if (db) {
                 Lock::CollectionLock collLock(opCtx->lockState(), _ns.ns(), MODE_IS);
                 if (db->getCollection(opCtx, _ns.ns())) {

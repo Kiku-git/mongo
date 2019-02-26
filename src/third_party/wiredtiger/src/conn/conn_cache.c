@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2018 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -314,6 +314,8 @@ __wt_cache_stats_update(WT_SESSION_IMPL *session)
 
 	WT_STAT_SET(session, stats,
 	    cache_bytes_dirty, __wt_cache_dirty_inuse(cache));
+	WT_STAT_SET(session, stats, cache_bytes_dirty_total,
+	    __wt_cache_bytes_plus_overhead(cache, cache->bytes_dirty_total));
 	WT_STAT_SET(session, stats,
 	    cache_bytes_image, __wt_cache_bytes_image(cache));
 	WT_STAT_SET(session, stats,

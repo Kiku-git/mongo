@@ -1,4 +1,4 @@
-// Verifies basic sharded transaction behavior with read concern level majority and snapshot.
+// Verifies basic sharded transaction behavior with the supported read concern levels.
 //
 // @tags: [
 //   requires_find_command,
@@ -38,7 +38,11 @@
         const session = st.s.startSession(sessionOptions);
         const sessionDB = session.getDatabase(dbName);
 
-        session.startTransaction({readConcern: readConcern});
+        if (readConcern) {
+            session.startTransaction({readConcern: readConcern});
+        } else {
+            session.startTransaction();
+        }
 
         // Target only the first shard.
         assert.commandWorked(sessionDB.runCommand({find: collName, filter: {_id: -1}}));
@@ -52,7 +56,7 @@
 
         // Depending on the transaction's read concern, the new document will or will not be visible
         // to the next statement.
-        const numExpectedDocs = readConcern.level === "snapshot" ? 0 : 1;
+        const numExpectedDocs = readConcern && readConcern.level === "snapshot" ? 0 : 1;
         assert.eq(numExpectedDocs,
                   sessionDB[collName].find({_id: 5}).itcount(),
                   "sharded transaction with read concern " + tojson(readConcern) +
@@ -65,7 +69,11 @@
         assert.writeOK(sessionDB[collName].remove({_id: 5}));
     }
 
-    const kAllowedReadConcernLevels = ["majority", "snapshot"];
+    // Specifying no read concern level is allowed and should not compute a global snapshot.
+    runTest(st, undefined, {causalConsistency: false});
+    runTest(st, undefined, {causalConsistency: true});
+
+    const kAllowedReadConcernLevels = ["local", "majority", "snapshot"];
     for (let readConcernLevel of kAllowedReadConcernLevels) {
         runTest(st, {level: readConcernLevel}, {causalConsistency: false});
         runTest(st, {level: readConcernLevel}, {causalConsistency: true});

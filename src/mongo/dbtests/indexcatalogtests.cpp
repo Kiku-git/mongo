@@ -1,6 +1,3 @@
-// indexcatalogtests.cpp : index_catalog.{h,cpp} unit tests.
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -36,7 +33,6 @@
 #include "mongo/db/catalog/collection_catalog_entry.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/client.h"
-#include "mongo/db/db.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/dbtests/dbtests.h"
@@ -90,7 +86,7 @@ public:
         int indexesIterated = 0;
         bool foundIndex = false;
         while (ii->more()) {
-            IndexDescriptor* indexDesc = ii->next()->descriptor();
+            auto indexDesc = ii->next()->descriptor();
             indexesIterated++;
             BSONObjIterator boit(indexDesc->infoObj());
             while (boit.more() && !foundIndex) {

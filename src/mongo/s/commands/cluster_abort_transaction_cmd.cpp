@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -50,7 +49,7 @@ public:
         return AllowedOnSecondary::kAlways;
     }
 
-    virtual bool adminOnly() const {
+    bool adminOnly() const override {
         return true;
     }
 
@@ -71,10 +70,10 @@ public:
     bool run(OperationContext* opCtx,
              const std::string& dbName,
              const BSONObj& cmdObj,
-             BSONObjBuilder& result) final {
+             BSONObjBuilder& result) override {
         auto txnRouter = TransactionRouter::get(opCtx);
         uassert(ErrorCodes::InvalidOptions,
-                "abortTransaction can only be run within a context of a session",
+                "abortTransaction can only be run within a session",
                 txnRouter);
 
         auto response = txnRouter->abortTransaction(opCtx);
@@ -82,6 +81,7 @@ public:
         std::string errMsg;
         return appendRawResponses(opCtx, &errMsg, &result, response);
     }
+
 } clusterAbortTransactionCmd;
 
 }  // namespace

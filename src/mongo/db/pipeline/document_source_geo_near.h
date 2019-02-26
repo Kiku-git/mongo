@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -35,7 +34,7 @@
 
 namespace mongo {
 
-class DocumentSourceGeoNear : public DocumentSource, public NeedsMergerDocumentSource {
+class DocumentSourceGeoNear : public DocumentSource {
 public:
     static constexpr StringData kKeyFieldName = "key"_sd;
     static constexpr auto kStageName = "$geoNear";
@@ -64,7 +63,8 @@ public:
      * executing a pipeline, so this method should never be called.
      */
     GetNextResult getNext() final {
-        MONGO_UNREACHABLE;
+        // TODO: Replace with a MONGO_UNREACHABLE as part of SERVER-38995.
+        uasserted(51048, "DocumentSourceGeoNear's getNext should never be called");
     }
 
     Value serialize(boost::optional<ExplainOptions::Verbosity> explain = boost::none) const final;
@@ -121,16 +121,9 @@ public:
     BSONObj asNearQuery(StringData nearFieldName) const;
 
     /**
-     * This document source is sent as-is to the shards.
-     */
-    boost::intrusive_ptr<DocumentSource> getShardSource() final {
-        return this;
-    }
-
-    /**
      * In a sharded cluster, this becomes a merge sort by distance, from nearest to furthest.
      */
-    MergingLogic mergingLogic() final;
+    boost::optional<MergingLogic> mergingLogic() final;
 
 
 private:

@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2018 MongoDB, Inc.
+ * Public Domain 2014-2019 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -260,7 +260,6 @@ snappy_extension_init(WT_CONNECTION *connection, WT_CONFIG_ARG *config)
 		return (errno);
 
 	snappy_compressor->compressor.compress = snappy_compression;
-	snappy_compressor->compressor.compress_raw = NULL;
 	snappy_compressor->compressor.decompress = snappy_decompression;
 	snappy_compressor->compressor.pre_size = snappy_pre_size;
 	snappy_compressor->compressor.terminate = snappy_terminate;

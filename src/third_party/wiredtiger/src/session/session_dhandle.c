@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2018 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -601,7 +601,7 @@ __wt_session_lock_checkpoint(WT_SESSION_IMPL *session, const char *checkpoint)
 	 * the underlying file are visible to the in-memory pages.
 	 */
 	WT_ERR(__wt_evict_file_exclusive_on(session));
-	ret = __wt_cache_op(session, WT_SYNC_DISCARD);
+	ret = __wt_evict_file(session, WT_SYNC_DISCARD);
 	__wt_evict_file_exclusive_off(session);
 	WT_ERR(ret);
 

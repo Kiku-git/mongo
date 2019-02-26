@@ -6,7 +6,7 @@ Import('get_option')
 env = env.Clone()
 
 yamlEnv = env.Clone()
-yamlEnv.InjectThirdPartyIncludePaths(libraries=['yaml'])
+yamlEnv.InjectThirdParty(libraries=['yaml'])
 
 mongobridge = env.Program(
     target="mongobridge",
@@ -14,12 +14,14 @@ mongobridge = env.Program(
         "bridge.cpp",
         "bridge_commands.cpp",
         "mongobridge_options.cpp",
+        env.Idlc("mongobridge_options.idl")[0],
         "mongobridge_options_init.cpp"
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/dbmessage',
         '$BUILD_DIR/mongo/rpc/rpc',
         '$BUILD_DIR/mongo/transport/message_compressor',
+        '$BUILD_DIR/mongo/transport/message_compressor_options_server',
         '$BUILD_DIR/mongo/transport/service_entry_point',
         '$BUILD_DIR/mongo/transport/service_executor',
         '$BUILD_DIR/mongo/transport/transport_layer',
@@ -38,9 +40,11 @@ mongoebench = yamlEnv.Program(
         'mongoebench_main.cpp',
         'mongoebench_options.cpp',
         'mongoebench_options_init.cpp',
+        env.Idlc('mongoebench_options.idl')[0],
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/dbdirectclient',
+        '$BUILD_DIR/mongo/db/storage/storage_options',
         '$BUILD_DIR/mongo/embedded/embedded',
         '$BUILD_DIR/mongo/embedded/embedded_integration_helpers',
         '$BUILD_DIR/mongo/shell/benchrun',

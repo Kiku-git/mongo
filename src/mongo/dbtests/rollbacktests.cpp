@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -36,10 +35,10 @@
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/drop_collection.h"
 #include "mongo/db/catalog/head_manager.h"
-#include "mongo/db/catalog/multi_index_block.h"
 #include "mongo/db/catalog/rename_collection.h"
 #include "mongo/db/client.h"
 #include "mongo/db/db_raii.h"
+#include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/record_id.h"
 #include "mongo/dbtests/dbtests.h"
@@ -56,10 +55,11 @@ const auto kIndexVersion = IndexDescriptor::IndexVersion::kV2;
 
 void dropDatabase(OperationContext* opCtx, const NamespaceString& nss) {
     Lock::GlobalWrite globalWriteLock(opCtx);
-    Database* db = DatabaseHolder::getDatabaseHolder().get(opCtx, nss.db());
+    auto databaseHolder = DatabaseHolder::get(opCtx);
+    auto db = databaseHolder->getDb(opCtx, nss.db());
 
     if (db) {
-        Database::dropDatabase(opCtx, db);
+        databaseHolder->dropDb(opCtx, db);
     }
 }
 bool collectionExists(OldClientContext* ctx, const string& ns) {
@@ -76,7 +76,7 @@ void createCollection(OperationContext* opCtx, const NamespaceString& nss) {
         ASSERT(!collectionExists(&ctx, nss.ns()));
         CollectionOptions collectionOptions;
         ASSERT_OK(collectionOptions.parse(BSONObj(), CollectionOptions::parseForCommand));
-        ASSERT_OK(Database::userCreateNS(opCtx, ctx.db(), nss.ns(), collectionOptions, false));
+        ASSERT_OK(ctx.db()->userCreateNS(opCtx, nss, collectionOptions, false));
         ASSERT(collectionExists(&ctx, nss.ns()));
         uow.commit();
     }
@@ -88,20 +88,20 @@ Status renameCollection(OperationContext* opCtx,
     return renameCollection(opCtx, source, target, {});
 }
 Status truncateCollection(OperationContext* opCtx, const NamespaceString& nss) {
-    Collection* coll =
-        DatabaseHolder::getDatabaseHolder().get(opCtx, nss.db())->getCollection(opCtx, nss);
+    auto databaseHolder = DatabaseHolder::get(opCtx);
+    auto coll = databaseHolder->getDb(opCtx, nss.db())->getCollection(opCtx, nss);
     return coll->truncate(opCtx);
 }
 
 void insertRecord(OperationContext* opCtx, const NamespaceString& nss, const BSONObj& data) {
-    Collection* coll =
-        DatabaseHolder::getDatabaseHolder().get(opCtx, nss.db())->getCollection(opCtx, nss);
+    auto databaseHolder = DatabaseHolder::get(opCtx);
+    auto coll = databaseHolder->getDb(opCtx, nss.db())->getCollection(opCtx, nss);
     OpDebug* const nullOpDebug = nullptr;
     ASSERT_OK(coll->insertDocument(opCtx, InsertStatement(data), nullOpDebug, false));
 }
 void assertOnlyRecord(OperationContext* opCtx, const NamespaceString& nss, const BSONObj& data) {
-    Collection* coll =
-        DatabaseHolder::getDatabaseHolder().get(opCtx, nss.db())->getCollection(opCtx, nss);
+    auto databaseHolder = DatabaseHolder::get(opCtx);
+    auto coll = databaseHolder->getDb(opCtx, nss.db())->getCollection(opCtx, nss);
     auto cursor = coll->getCursor(opCtx);
 
     auto record = cursor->next();
@@ -111,18 +111,18 @@ void assertOnlyRecord(OperationContext* opCtx, const NamespaceString& nss, const
     ASSERT(!cursor->next());
 }
 void assertEmpty(OperationContext* opCtx, const NamespaceString& nss) {
-    Collection* coll =
-        DatabaseHolder::getDatabaseHolder().get(opCtx, nss.db())->getCollection(opCtx, nss);
+    auto databaseHolder = DatabaseHolder::get(opCtx);
+    auto coll = databaseHolder->getDb(opCtx, nss.db())->getCollection(opCtx, nss);
     ASSERT(!coll->getCursor(opCtx)->next());
 }
 bool indexExists(OperationContext* opCtx, const NamespaceString& nss, const string& idxName) {
-    Collection* coll =
-        DatabaseHolder::getDatabaseHolder().get(opCtx, nss.db())->getCollection(opCtx, nss);
+    auto databaseHolder = DatabaseHolder::get(opCtx);
+    auto coll = databaseHolder->getDb(opCtx, nss.db())->getCollection(opCtx, nss);
     return coll->getIndexCatalog()->findIndexByName(opCtx, idxName, true) != NULL;
 }
 bool indexReady(OperationContext* opCtx, const NamespaceString& nss, const string& idxName) {
-    Collection* coll =
-        DatabaseHolder::getDatabaseHolder().get(opCtx, nss.db())->getCollection(opCtx, nss);
+    auto databaseHolder = DatabaseHolder::get(opCtx);
+    auto coll = databaseHolder->getDb(opCtx, nss.db())->getCollection(opCtx, nss);
     return coll->getIndexCatalog()->findIndexByName(opCtx, idxName, false) != NULL;
 }
 size_t getNumIndexEntries(OperationContext* opCtx,
@@ -130,13 +130,13 @@ size_t getNumIndexEntries(OperationContext* opCtx,
                           const string& idxName) {
     size_t numEntries = 0;
 
-    Collection* coll =
-        DatabaseHolder::getDatabaseHolder().get(opCtx, nss.db())->getCollection(opCtx, nss);
+    auto databaseHolder = DatabaseHolder::get(opCtx);
+    auto coll = databaseHolder->getDb(opCtx, nss.db())->getCollection(opCtx, nss);
     IndexCatalog* catalog = coll->getIndexCatalog();
-    IndexDescriptor* desc = catalog->findIndexByName(opCtx, idxName, false);
+    auto desc = catalog->findIndexByName(opCtx, idxName, false);
 
     if (desc) {
-        auto cursor = catalog->getIndex(desc)->newCursor(opCtx);
+        auto cursor = catalog->getEntry(desc)->accessMethod()->newCursor(opCtx);
 
         for (auto kv = cursor->seek(kMinBSONKey, true); kv; kv = cursor->next()) {
             numEntries++;
@@ -147,9 +147,9 @@ size_t getNumIndexEntries(OperationContext* opCtx,
 }
 
 void dropIndex(OperationContext* opCtx, const NamespaceString& nss, const string& idxName) {
-    Collection* coll =
-        DatabaseHolder::getDatabaseHolder().get(opCtx, nss.db())->getCollection(opCtx, nss);
-    IndexDescriptor* desc = coll->getIndexCatalog()->findIndexByName(opCtx, idxName);
+    auto databaseHolder = DatabaseHolder::get(opCtx);
+    auto coll = databaseHolder->getDb(opCtx, nss.db())->getCollection(opCtx, nss);
+    auto desc = coll->getIndexCatalog()->findIndexByName(opCtx, idxName);
     ASSERT(desc);
     ASSERT_OK(coll->getIndexCatalog()->dropIndex(opCtx, desc));
 }
@@ -178,8 +178,7 @@ public:
             auto options = capped ? BSON("capped" << true << "size" << 1000) : BSONObj();
             CollectionOptions collectionOptions;
             ASSERT_OK(collectionOptions.parse(options, CollectionOptions::parseForCommand));
-            ASSERT_OK(
-                Database::userCreateNS(&opCtx, ctx.db(), ns, collectionOptions, defaultIndexes));
+            ASSERT_OK(ctx.db()->userCreateNS(&opCtx, nss, collectionOptions, defaultIndexes));
             ASSERT(collectionExists(&ctx, ns));
             if (!rollback) {
                 uow.commit();
@@ -216,8 +215,7 @@ public:
             auto options = capped ? BSON("capped" << true << "size" << 1000) : BSONObj();
             CollectionOptions collectionOptions;
             ASSERT_OK(collectionOptions.parse(options, CollectionOptions::parseForCommand));
-            ASSERT_OK(
-                Database::userCreateNS(&opCtx, ctx.db(), ns, collectionOptions, defaultIndexes));
+            ASSERT_OK(ctx.db()->userCreateNS(&opCtx, nss, collectionOptions, defaultIndexes));
             uow.commit();
         }
         ASSERT(collectionExists(&ctx, ns));
@@ -268,8 +266,7 @@ public:
             auto options = capped ? BSON("capped" << true << "size" << 1000) : BSONObj();
             CollectionOptions collectionOptions;
             ASSERT_OK(collectionOptions.parse(options, CollectionOptions::parseForCommand));
-            ASSERT_OK(Database::userCreateNS(
-                &opCtx, ctx.db(), source.ns(), collectionOptions, defaultIndexes));
+            ASSERT_OK(ctx.db()->userCreateNS(&opCtx, source, collectionOptions, defaultIndexes));
             uow.commit();
         }
         ASSERT(collectionExists(&ctx, source.ns()));
@@ -328,10 +325,9 @@ public:
             auto options = capped ? BSON("capped" << true << "size" << 1000) : BSONObj();
             CollectionOptions collectionOptions;
             ASSERT_OK(collectionOptions.parse(options, CollectionOptions::parseForCommand));
-            ASSERT_OK(Database::userCreateNS(
-                &opCtx, ctx.db(), source.ns(), collectionOptions, defaultIndexes));
-            ASSERT_OK(Database::userCreateNS(
-                &opCtx, ctx.db(), target.ns(), collectionOptions, defaultIndexes));
+            auto db = ctx.db();
+            ASSERT_OK(db->userCreateNS(&opCtx, source, collectionOptions, defaultIndexes));
+            ASSERT_OK(db->userCreateNS(&opCtx, target, collectionOptions, defaultIndexes));
 
             insertRecord(&opCtx, source, sourceDoc);
             insertRecord(&opCtx, target, targetDoc);
@@ -397,8 +393,7 @@ public:
             ASSERT(!collectionExists(&ctx, nss.ns()));
             CollectionOptions collectionOptions;
             ASSERT_OK(collectionOptions.parse(BSONObj(), CollectionOptions::parseForCommand));
-            ASSERT_OK(Database::userCreateNS(
-                &opCtx, ctx.db(), nss.ns(), collectionOptions, defaultIndexes));
+            ASSERT_OK(ctx.db()->userCreateNS(&opCtx, nss, collectionOptions, defaultIndexes));
             insertRecord(&opCtx, nss, oldDoc);
             uow.commit();
         }
@@ -419,8 +414,7 @@ public:
             ASSERT(!collectionExists(&ctx, nss.ns()));
             CollectionOptions collectionOptions;
             ASSERT_OK(collectionOptions.parse(BSONObj(), CollectionOptions::parseForCommand));
-            ASSERT_OK(Database::userCreateNS(
-                &opCtx, ctx.db(), nss.ns(), collectionOptions, defaultIndexes));
+            ASSERT_OK(ctx.db()->userCreateNS(&opCtx, nss, collectionOptions, defaultIndexes));
             ASSERT(collectionExists(&ctx, nss.ns()));
             insertRecord(&opCtx, nss, newDoc);
             assertOnlyRecord(&opCtx, nss, newDoc);
@@ -458,8 +452,7 @@ public:
 
             CollectionOptions collectionOptions;
             ASSERT_OK(collectionOptions.parse(BSONObj(), CollectionOptions::parseForCommand));
-            ASSERT_OK(Database::userCreateNS(
-                &opCtx, ctx.db(), nss.ns(), collectionOptions, defaultIndexes));
+            ASSERT_OK(ctx.db()->userCreateNS(&opCtx, nss, collectionOptions, defaultIndexes));
             ASSERT(collectionExists(&ctx, nss.ns()));
             insertRecord(&opCtx, nss, doc);
             assertOnlyRecord(&opCtx, nss, doc);
@@ -502,8 +495,7 @@ public:
 
             CollectionOptions collectionOptions;
             ASSERT_OK(collectionOptions.parse(BSONObj(), CollectionOptions::parseForCommand));
-            ASSERT_OK(Database::userCreateNS(
-                &opCtx, ctx.db(), nss.ns(), collectionOptions, defaultIndexes));
+            ASSERT_OK(ctx.db()->userCreateNS(&opCtx, nss, collectionOptions, defaultIndexes));
             ASSERT(collectionExists(&ctx, nss.ns()));
             insertRecord(&opCtx, nss, doc);
             assertOnlyRecord(&opCtx, nss, doc);
@@ -697,7 +689,7 @@ public:
             uow.commit();
         }
 
-        IndexDescriptor* indexDesc = catalog->findIndexByName(&opCtx, idxName);
+        auto indexDesc = catalog->findIndexByName(&opCtx, idxName);
         invariant(indexDesc);
         const IndexCatalogEntry* ice = catalog->getEntry(indexDesc);
         invariant(ice);
@@ -764,7 +756,7 @@ public:
             ASSERT(!collectionExists(&ctx, nss.ns()));
             CollectionOptions collectionOptions;
             ASSERT_OK(collectionOptions.parse(BSONObj(), CollectionOptions::parseForCommand));
-            ASSERT_OK(Database::userCreateNS(&opCtx, ctx.db(), nss.ns(), collectionOptions, false));
+            ASSERT_OK(ctx.db()->userCreateNS(&opCtx, nss, collectionOptions, false));
             ASSERT(collectionExists(&ctx, nss.ns()));
             Collection* coll = ctx.db()->getCollection(&opCtx, nss);
             IndexCatalog* catalog = coll->getIndexCatalog();

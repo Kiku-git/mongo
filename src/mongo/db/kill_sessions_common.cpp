@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -60,7 +59,7 @@ SessionKiller::Result killSessionsLocalKillOps(OperationContext* opCtx,
                     log() << "killing op: " << opCtxToKill->getOpID()
                           << " as part of killing session: " << lsid->toBSON();
 
-                    opCtx->getServiceContext()->killOperation(opCtxToKill);
+                    opCtx->getServiceContext()->killOperation(lk, opCtxToKill);
                 }
             }
         }

@@ -1,6 +1,3 @@
-// ephemeral_for_test_engine.cpp
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -75,6 +72,13 @@ std::unique_ptr<RecordStore> EphemeralForTestEngine::getRecordStore(
     } else {
         return stdx::make_unique<EphemeralForTestRecordStore>(ns, &_dataMap[ident]);
     }
+}
+
+std::unique_ptr<RecordStore> EphemeralForTestEngine::makeTemporaryRecordStore(
+    OperationContext* opCtx, StringData ident) {
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
+    _dataMap[ident] = {};
+    return stdx::make_unique<EphemeralForTestRecordStore>(ident, &_dataMap[ident]);
 }
 
 Status EphemeralForTestEngine::createSortedDataInterface(OperationContext* opCtx,

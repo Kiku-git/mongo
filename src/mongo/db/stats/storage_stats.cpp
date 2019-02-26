@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -93,9 +92,9 @@ Status appendCollectionStorageStats(OperationContext* opCtx,
 
     std::unique_ptr<IndexCatalog::IndexIterator> it = indexCatalog->getIndexIterator(opCtx, false);
     while (it->more()) {
-        IndexCatalogEntry* entry = it->next();
-        IndexDescriptor* descriptor = entry->descriptor();
-        IndexAccessMethod* iam = entry->accessMethod();
+        const IndexCatalogEntry* entry = it->next();
+        const IndexDescriptor* descriptor = entry->descriptor();
+        const IndexAccessMethod* iam = entry->accessMethod();
         invariant(iam);
 
         BSONObjBuilder bob;

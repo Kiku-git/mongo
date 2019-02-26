@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Public Domain 2014-2018 MongoDB, Inc.
+# Public Domain 2014-2019 MongoDB, Inc.
 # Public Domain 2008-2014 WiredTiger, Inc.
 #
 # This is free and unencumbered software released into the public domain.
@@ -34,7 +34,7 @@
 # See also the usage() function.
 #
 from __future__ import print_function
-import os, shutil, sys, tempfile
+import os, shutil, sys, subprocess, tempfile
 
 def eprint(*args, **kwargs):
     print(*args, file=sys.stderr, **kwargs)
@@ -155,8 +155,6 @@ class Translator:
     # "(abc=123,def=234,ghi=(hi=1,bye=2))" would return 3 items.
     def split_config_parens(self, s):
         if s[0:1] != '(':
-            import pdb
-            pdb.set_trace()
             self.fatal_error('missing left paren', 'config parse error')
         if s[-1:] != ')':
             self.fatal_error('missing right paren', 'config parse error')
@@ -201,36 +199,41 @@ class Translator:
             result += '      '
         return result
 
+    def copy_file(self, srcname, destdir, destname):
+        dest_fullname = os.path.join(destdir, destname)
+        suffix = 0
+        while os.path.exists(dest_fullname):
+            suffix += 1
+            dest_fullname = os.path.join(destdir, destname + str(suffix))
+        shutil.copyfile(srcname, dest_fullname)
+
     def copy_config(self):
         # Note: If we add the capability of setting options on the command
         # line, we won't be able to do a simple copy.
-        config_save = os.path.join(self.homedir, 'CONFIG.wtperf')
-        suffix = 0
-        while os.path.exists(config_save):
-            suffix += 1
-            config_save = os.path.join(self.homedir, \
-                                       'CONFIG.wtperf.' + str(suffix))
-        shutil.copyfile(self.filename, config_save)
+        self.copy_file(self.filename, self.homedir, 'CONFIG.wtperf')
+
+    def copy_python_source(self, srcname):
+        self.copy_file(srcname, self.homedir, 'RUN.py')
 
     # Wtperf's throttle is based on the number of regular operations,
     # not including log_like operations.  Workgen counts all operations,
-    # it doesn't treat log operations any differently.  Adjust the throttle
-    # number to account for the difference.
+    # it doesn't treat log operations any differently.
     def calc_throttle(self, thread_opts, log_like_table):
         throttle = thread_opts.throttle
-        if not log_like_table:
-            return (throttle, '')
-        modify = thread_opts.inserts + thread_opts.updates
-        regular = modify + thread_opts.reads
-        total = regular + modify
-        factor = (total + 0.0) / regular
-        new_throttle = int(throttle * factor)
-        if new_throttle == throttle:
-            comment = ''
-        else:
-            comment = '# wtperf throttle=' + str(throttle) + ' adjusted by ' + \
-                      str(factor) + ' to compensate for log_like operations.\n'
-        return (new_throttle, comment)
+        comment = ''
+        factor = 1.0
+        if log_like_table:
+            modify = thread_opts.inserts + thread_opts.updates
+            regular = modify + thread_opts.reads
+            total = regular + modify
+            factor = (total + 0.0) / regular
+        if factor != 1.0:
+            comment = \
+                '# These operations include log_like operations, which ' + \
+                'will increase the number\n# of insert/update operations ' + \
+                'by a factor of ' + str(factor) + '. This may cause the\n' + \
+                '# actual operations performed to be above the throttle.\n'
+        return (throttle, comment)
 
     def parse_threads(self, threads_config, checkpoint_threads):
         opts = self.options
@@ -271,6 +274,9 @@ class Translator:
             topts.read = 0
             topts.reads = 0
             topts.throttle = 0
+            # Workgen's throttle_burst variable has a default of 1.0 .  Since we
+            # are always explicitly setting it, set our own value to the same.
+            topts.throttle_burst = 1.0
             topts.update = 0
             topts.updates = 0
             topts.random_range = 0
@@ -333,8 +339,11 @@ class Translator:
             if topts.throttle > 0:
                 (throttle, comment) = self.calc_throttle(topts, log_like_table)
                 tdecls += comment
-                tdecls += self.assign_str(thread_name + '.options.throttle',
-                                          throttle)
+                tdecls += self.assign_str(
+                    thread_name + '.options.throttle', throttle)
+                tdecls += self.assign_str(
+                    thread_name + '.options.throttle_burst',
+                    topts.throttle_burst)
             tdecls += '\n'
             if topts.count > 1:
                 tnames += str(topts.count) + ' * '
@@ -504,9 +513,11 @@ class Translator:
 
     def translate_inner(self):
         workloadopts = ''
+        input_as_string = ''
         with open(self.filename) as fin:
             for line in fin:
                 self.linenum += 1
+                input_as_string += line
                 commentpos = line.find('#')
                 if commentpos >= 0:
                     line = line[0:commentpos]
@@ -563,6 +574,11 @@ class Translator:
         s += 'from wiredtiger import *\n'
         s += 'from workgen import *\n'
         s += '\n'
+        s += '\'\'\' The original wtperf input file follows:\n'
+        s += input_as_string
+        if not input_as_string.endswith('\n'):
+            s += '\n'
+        s += '\'\'\'\n\n'
         async_config = ''
         if opts.compact and opts.async_threads == 0:
             opts.async_threads = 2;
@@ -585,6 +601,7 @@ class Translator:
             s += '        return op_ret\n'
             s += '\n'
         s += 'context = Context()\n'
+        s += 'homedir = "' + self.homedir + '"\n'
         extra_config = ''
         s += 'conn_config = ""\n'
 
@@ -599,8 +616,7 @@ class Translator:
                 s += 'conn_config += extensions_config(["compressors/' + \
                     compression + '"])\n'
             compression = 'block_compressor=' + compression + ','
-        s += 'conn = wiredtiger_open("' + self.homedir + \
-             '", "create," + conn_config)\n'
+        s += 'conn = wiredtiger_open(homedir, "create," + conn_config)\n'
         s += 's = conn.open_session("' + sess_config + '")\n'
         s += '\n'
         s += self.translate_table_create()
@@ -618,8 +634,8 @@ class Translator:
                 s += 'conn.close()\n'
                 if readonly:
                     'conn_config += ",readonly=true"\n'
-                s += 'conn = wiredtiger_open(' + \
-                     '"' + self.homedir + '", "create," + conn_config)\n'
+                s += 'conn = wiredtiger_open(homedir, ' + \
+                    '"create," + conn_config)\n'
                 s += '\n'
             s += 'workload = Workload(context, ' + t_var + ')\n'
             s += workloadopts
@@ -627,7 +643,7 @@ class Translator:
             if self.verbose > 0:
                 s += 'print("workload:")\n'
             s += 'workload.run(conn)\n\n'
-            s += 'latency_filename = "' + self.homedir + '/latency.out"\n'
+            s += 'latency_filename = homedir + "/latency.out"\n'
             s += 'latency.workload_latency(workload, latency_filename)\n'
 
         if close_conn:
@@ -684,16 +700,22 @@ for arg in sys.argv[1:]:
             # directory after the run, because the wiredtiger_open
             # in the generated code will clean out the directory first.
             raised = None
+            ret = 0
             try:
-                execfile(tmpfile)
-            except Exception, exception:
+                # Run python on the generated script
+                ret = subprocess.call([sys.executable, tmpfile])
+            except (KeyboardInterrupt, Exception), exception:
                 raised = exception
             if not os.path.isdir(homedir):
                 os.makedirs(homedir)
             translator.copy_config()
+            translator.copy_python_source(tmpfile)
             os.remove(tmpfile)
             if raised != None:
                 raise raised
+            if ret != 0:
+                raise Exception('Running generated program returned ' +
+                                str(ret))
     else:
         usage()
         sys.exit(1)

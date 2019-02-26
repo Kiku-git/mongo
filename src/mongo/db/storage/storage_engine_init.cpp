@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -176,7 +175,7 @@ void initializeStorageEngine(ServiceContext* service, const StorageEngineInitFla
         uassertStatusOK(factory->validateMetadata(*metadata, storageGlobalParams));
     }
 
-    ScopeGuard guard = MakeGuard([&] {
+    auto guard = makeGuard([&] {
         auto& lockFile = StorageEngineLockFile::get(service);
         if (lockFile) {
             lockFile->close();
@@ -201,7 +200,7 @@ void initializeStorageEngine(ServiceContext* service, const StorageEngineInitFla
         uassertStatusOK(metadata->write());
     }
 
-    guard.Dismiss();
+    guard.dismiss();
 
     _supportsDocLocking = service->getStorageEngine()->supportsDocLocking();
 }

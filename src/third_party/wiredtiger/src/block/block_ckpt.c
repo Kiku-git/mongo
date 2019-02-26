@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2018 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -660,7 +660,7 @@ live_update:
 			 * cookie into its components, and that's a fair amount
 			 * of work.
 			 */
-			ckpt->ckpt_size = ckpt_size;
+			ckpt->size = ckpt_size;
 
 			/*
 			 * Set the rolling checkpoint size for the live system.

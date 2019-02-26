@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -190,7 +189,7 @@ DbCheckHasher::DbCheckHasher(OperationContext* opCtx,
     md5_init(&_state);
 
     // Get the _id index.
-    IndexDescriptor* desc = collection->getIndexCatalog()->findIdIndex(opCtx);
+    const IndexDescriptor* desc = collection->getIndexCatalog()->findIdIndex(opCtx);
 
     uassert(ErrorCodes::IndexNotFound, "dbCheck needs _id index", desc);
 
@@ -507,7 +506,8 @@ Status dbCheckOplogCommand(OperationContext* opCtx,
                            BSONObj& cmd,
                            const repl::OpTime& optime,
                            const repl::OplogEntry& entry,
-                           OplogApplication::Mode mode) {
+                           OplogApplication::Mode mode,
+                           boost::optional<Timestamp> stableTimestampForRecovery) {
     auto type = OplogEntries_parse(IDLParserErrorContext("type"), cmd.getStringField("type"));
     IDLParserErrorContext ctx("o");
 

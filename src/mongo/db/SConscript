@@ -2,13 +2,12 @@
 
 Import("env")
 Import("has_option")
-Import("wiredtiger")
 
 env = env.Clone()
 
 # Ideally 's2' would be scoped narrowly but it is spammed in all over the place by
 # db/geo unfortunately.
-env.InjectThirdPartyIncludePaths(libraries=[
+env.InjectThirdParty(libraries=[
     's2',
 ])
 
@@ -223,6 +222,7 @@ env.CppUnitTest(
     ],
     LIBDEPS=[
         'curop',
+        '$BUILD_DIR/mongo/db/query/query_test_service_context',
     ],
 )
 
@@ -247,7 +247,6 @@ env.CppUnitTest(
         'logical_session_id_helpers',
         'service_context',
         '$BUILD_DIR/mongo/db/auth/authmocks',
-        '$BUILD_DIR/mongo/unittest/concurrency',
         '$BUILD_DIR/mongo/util/clock_source_mock',
     ],
 )
@@ -409,6 +408,33 @@ env.Library(
     ],
 )
 
+if env.TargetOSIs('windows'):
+    env.Library(
+        target='windows_options',
+        source=[
+            env.Idlc('windows_options.idl')[0],
+        ],
+        LIBDEPS_PRIVATE=[
+            '$BUILD_DIR/mongo/util/options_parser/options_parser',
+        ],
+    )
+
+env.Library(
+    target='server_options_base',
+    source=[
+        'server_options_base.cpp',
+        env.Idlc('server_options_base.idl')[0],
+        env.Idlc('server_options_general.idl')[0],
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/util/options_parser/options_parser',
+        'server_options_core',
+    ],
+)
+
 env.Clone().InjectModule("enterprise").Library(
     target="server_options_servers",
     source=[
@@ -421,6 +447,7 @@ env.Clone().InjectModule("enterprise").Library(
         # networking library has separate options
         '$BUILD_DIR/mongo/util/net/ssl_manager',
         'server_options',
+        'server_options_base',
     ],
 )
 
@@ -439,20 +466,33 @@ env.CppUnitTest(
 env.Library(
     target="mongodandmongos",
     source=[
-        "initialize_server_global_state.cpp",
-        "server_options_init.cpp",
+        "initialize_server_security_state.cpp",
     ],
     LIBDEPS=[
-        "$BUILD_DIR/mongo/client/clientdriver_network",
-        "$BUILD_DIR/mongo/db/auth/auth",
-        "$BUILD_DIR/mongo/rpc/rpc",
-        "$BUILD_DIR/mongo/rpc/metadata",
-        "$BUILD_DIR/mongo/util/processinfo",
-        "$BUILD_DIR/mongo/util/signal_handlers",
-        "auth/authorization_manager_global",
+        "serverinit",
     ],
     LIBDEPS_PRIVATE=[
+        "$BUILD_DIR/mongo/client/authentication",
+        "$BUILD_DIR/mongo/db/auth/auth",
         "$BUILD_DIR/mongo/db/auth/security_key",
+        "$BUILD_DIR/mongo/rpc/metadata",
+        "$BUILD_DIR/mongo/rpc/rpc",
+        "$BUILD_DIR/mongo/util/net/ssl_manager",
+        "auth/authorization_manager_global",
+        "serverinit",
+    ],
+)
+
+env.Library(
+    target="serverinit",
+    source=[
+        "initialize_server_global_state.cpp",
+        env.Idlc("initialize_server_global_state.idl")[0],
+        "server_options_init.cpp",
+    ],
+    LIBDEPS_PRIVATE=[
+        "$BUILD_DIR/mongo/util/processinfo",
+        "$BUILD_DIR/mongo/util/signal_handlers",
     ],
 )
 
@@ -471,6 +511,11 @@ env.Library(
     target="mongod_options",
     source=[
         "mongod_options.cpp",
+        env.Idlc('mongod_options_general.idl')[0],
+        env.Idlc('mongod_options_legacy.idl')[0],
+        env.Idlc('mongod_options_replication.idl')[0],
+        env.Idlc('mongod_options_sharding.idl')[0],
+        env.Idlc('mongod_options_storage.idl')[0],
     ],
     LIBDEPS=[
         'repl/repl_settings',
@@ -480,6 +525,8 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         'global_settings',
+        'server_options_base',
+        '$BUILD_DIR/mongo/util/options_parser/options_parser',
     ]
 )
 
@@ -510,17 +557,32 @@ env.Library(
         'service_context.cpp',
         'server_recovery.cpp',
         'unclean_shutdown.cpp',
+        'repl_set_member_in_standalone_mode.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/logical_session_id',
         '$BUILD_DIR/mongo/db/multi_key_path_tracker',
         '$BUILD_DIR/mongo/db/storage/write_unit_of_work',
-        '$BUILD_DIR/mongo/transport/transport_layer_common',
         '$BUILD_DIR/mongo/util/clock_sources',
         '$BUILD_DIR/mongo/util/concurrency/spin_lock',
         '$BUILD_DIR/mongo/util/fail_point',
         '$BUILD_DIR/mongo/util/net/network',
         '$BUILD_DIR/mongo/util/periodic_runner',
+    ],
+    LIBDEPS_PRIVATE=[
+        'default_baton',
+    ],
+)
+
+env.Library(
+    target='default_baton',
+    source=[
+        'default_baton.cpp',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/util/clock_sources',
+        '$BUILD_DIR/mongo/util/concurrency/spin_lock',
     ],
 )
 
@@ -632,6 +694,7 @@ env.Library(
     target='db_raii',
     source=[
         'db_raii.cpp',
+        env.Idlc('db_raii.idl')[0]
     ],
     LIBDEPS=[
         'catalog_raii',
@@ -639,33 +702,15 @@ env.Library(
         's/sharding_api_d',
         'stats/top',
     ],
-)
-
-env.Library(
-    target='transaction_coordinator',
-    source=[
-        'transaction_coordinator.cpp',
-        'transaction_coordinator_catalog.cpp',
-        'transaction_coordinator_factory_mongod.cpp',
-        'transaction_coordinator_service.cpp',
-        'transaction_coordinator_util.cpp',
-    ],
-    LIBDEPS=[
-        '$BUILD_DIR/mongo/base',
-        'catalog_raii',
-    ],
     LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/db/commands/txn_cmd_request',
-        '$BUILD_DIR/mongo/s/async_requests_sender',
-        '$BUILD_DIR/mongo/s/grid',
-    ]
+        "$BUILD_DIR/mongo/idl/server_parameter",
+    ],
 )
 
 env.Library(
     target='session_catalog',
     source=[
         'session_catalog.cpp',
-        'session.cpp',
     ],
     LIBDEPS=[
         'kill_sessions',
@@ -684,19 +729,16 @@ env.Library(
         'server_transactions_metrics.cpp',
         'session_catalog_mongod.cpp',
         'single_transaction_stats.cpp',
-        'transaction_coordinator_factory.cpp',
         'transaction_history_iterator.cpp',
         'transaction_metrics_observer.cpp',
         'transaction_participant.cpp',
         env.Idlc('session_txn_record.idl')[0],
-        env.Idlc('transaction_commit_decision.idl')[0],
         env.Idlc('transactions_stats.idl')[0],
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/idl/idl_parser',
         'catalog/collection',
         'catalog/database_holder',
-        'catalog/database',
         'catalog/uuid_catalog',
         'commands/test_commands_enabled',
         'commands/txn_cmd_request',
@@ -722,30 +764,12 @@ env.Library(
 )
 
 env.CppUnitTest(
-    target='transaction_two_phase_commit_test',
-    source=[
-        'transaction_coordinator_catalog_test.cpp',
-        'transaction_coordinator_participant_list_test.cpp',
-        'transaction_coordinator_service_test.cpp',
-        'transaction_coordinator_state_machine_test.cpp',
-        'transaction_coordinator_test.cpp',
-    ],
-    LIBDEPS=[
-        '$BUILD_DIR/mongo/s/catalog/sharding_catalog_client_mock',
-        '$BUILD_DIR/mongo/s/shard_server_test_fixture',
-        'auth/authmocks',
-        'transaction_coordinator',
-    ],
-)
-
-env.CppUnitTest(
     target='catalog_raii_test',
     source=[
         'catalog_raii_test.cpp',
     ],
     LIBDEPS=[
         'auth/authmocks',
-        'catalog/database_holder_mock',
         'catalog_raii',
         'service_context_test_fixture',
         'stats/fill_locker_info',
@@ -793,6 +817,7 @@ env.Library(
         'catalog/index_key_validate',
         'catalog/multi_index_block',
         'concurrency/write_conflict_exception',
+        'index_builds_coordinator_interface',
     ],
 )
 
@@ -836,6 +861,21 @@ env.Library(
 )
 
 env.Library(
+    target="op_observer_util",
+    source=[
+        "op_observer_util.cpp",
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+    ],
+    LIBDEPS_PRIVATE=[
+        'catalog/collection_options',
+        'index/index_descriptor',
+    ],
+)
+
+
+env.Library(
     target="op_observer_impl",
     source=[
         "op_observer_impl.cpp",
@@ -843,11 +883,14 @@ env.Library(
     LIBDEPS=[
         'catalog/collection_options',
         'op_observer',
+        'op_observer_util',
         'repl/oplog',
         's/sharding_api_d',
         'views/views_mongod',
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/catalog/uuid_catalog',
+        '$BUILD_DIR/mongo/s/coreshard',
+        "$BUILD_DIR/mongo/s/grid",
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/commands/mongod_fcv',
@@ -876,9 +919,11 @@ env.Library(
         '$BUILD_DIR/mongo/db/rw_concern_d',
         '$BUILD_DIR/mongo/db/s/sharding_api_d',
         '$BUILD_DIR/mongo/db/stats/counters',
+        '$BUILD_DIR/mongo/db/stats/server_read_concern_write_concern_metrics',
         '$BUILD_DIR/mongo/db/stats/top',
         '$BUILD_DIR/mongo/db/storage/storage_engine_lock_file',
         '$BUILD_DIR/mongo/db/storage/storage_engine_metadata',
+        'commands/server_status_core',
     ],
 )
 
@@ -893,9 +938,101 @@ env.Library(
 )
 
 env.Library(
+    target="index_builds_coordinator_mongod",
+    source=[
+        "index_builds_coordinator_mongod.cpp",
+    ],
+    LIBDEPS=[
+        "index_builds_coordinator_interface",
+        "$BUILD_DIR/mongo/util/concurrency/thread_pool",
+    ],
+    LIBDEPS_PRIVATE=[
+        'curop',
+        'db_raii',
+        'index_build_entry_helpers',
+        '$BUILD_DIR/mongo/db/catalog/uuid_catalog',
+    ],
+)
+
+env.Library(
+    target="index_builds_coordinator_interface",
+    source=[
+        "collection_index_builds_tracker.cpp",
+        "database_index_builds_tracker.cpp",
+        "index_builds_coordinator.cpp",
+    ],
+    LIBDEPS=[
+        "$BUILD_DIR/mongo/base",
+        '$BUILD_DIR/mongo/db/catalog_raii',
+        "$BUILD_DIR/mongo/db/catalog/commit_quorum_options",
+        "$BUILD_DIR/mongo/db/catalog/index_builds_manager",
+    ],
+    LIBDEPS_PRIVATE=[
+        'db_raii',
+        'index_build_entry_helpers',
+        '$BUILD_DIR/mongo/db/catalog/index_build_entry_idl',
+        '$BUILD_DIR/mongo/db/catalog/uuid_catalog',
+        '$BUILD_DIR/mongo/db/concurrency/lock_manager',
+        '$BUILD_DIR/mongo/db/repl/repl_coordinator_interface',
+        '$BUILD_DIR/mongo/db/s/sharding_api_d',
+        '$BUILD_DIR/mongo/util/fail_point',
+    ],
+)
+
+env.CppUnitTest(
+    target="index_builds_coordinator_mongod_test",
+    source=[
+        "index_builds_coordinator_mongod_test.cpp",
+    ],
+    LIBDEPS=[
+        "index_builds_coordinator_mongod",
+        "$BUILD_DIR/mongo/db/catalog/catalog_test_fixture",
+    ]
+)
+
+
+env.Library(
+    target='index_build_entry_helpers',
+    source=[
+        "index_build_entry_helpers.cpp",
+    ],
+    LIBDEPS_PRIVATE=[
+        "catalog_raii",
+        "dbhelpers",
+        "db_raii",
+        "namespace_string",
+        "query_exec",
+        "service_context",
+        "$BUILD_DIR/mongo/base",
+        "$BUILD_DIR/mongo/db/catalog/catalog_helpers",
+        "$BUILD_DIR/mongo/db/catalog/commit_quorum_options",
+        "$BUILD_DIR/mongo/db/catalog/index_build_entry_idl",
+        "$BUILD_DIR/mongo/db/matcher/expressions_mongod_only",
+        "$BUILD_DIR/mongo/db/storage/write_unit_of_work",
+        "$BUILD_DIR/mongo/db/query/query_request",
+        "$BUILD_DIR/mongo/db/query/query_planner",
+        "$BUILD_DIR/mongo/util/net/network",
+    ],
+)
+
+env.CppUnitTest(
+    target='index_build_entry_helpers_test',
+    source=[
+        'index_build_entry_helpers_test.cpp',
+    ],
+    LIBDEPS=[
+        'index_build_entry_helpers',
+        '$BUILD_DIR/mongo/db/catalog/catalog_test_fixture',
+        '$BUILD_DIR/mongo/db/catalog/index_build_entry_idl',
+        '$BUILD_DIR/mongo/util/net/network',
+    ],
+)
+
+env.Library(
     target="cloner",
     source=[
         "cloner.cpp",
+        env.Idlc("cloner.idl")[0],
     ],
     LIBDEPS=[
         'dbdirectclient',
@@ -927,16 +1064,17 @@ env.Library(
     source=[
         "index_builder.cpp",
         "index_legacy.cpp",
-        "index_rebuilder.cpp",
     ],
     LIBDEPS=[
         'db_raii',
         'index/index_access_methods',
+        '$BUILD_DIR/mongo/db/index_builds_coordinator_interface',
         '$BUILD_DIR/mongo/db/catalog/index_catalog',
         '$BUILD_DIR/mongo/db/catalog/multi_index_block',
     ],
     LIBDEPS_PRIVATE=[
         "logical_clock",
+        "server_options_core",
     ],
 )
 
@@ -962,6 +1100,7 @@ env.Library(
         "curop",
         "repl/read_concern_args",
         "repl/repl_coordinator_interface",
+        "repl/speculative_majority_read_info",
         "stats/timer_stats",
         "storage/storage_options",
     ],
@@ -975,12 +1114,15 @@ env.Library(
     target="read_concern_d_impl",
     source=[
         "read_concern_mongod.cpp",
+        env.Idlc('read_concern_mongod.idl')[0],
     ],
     LIBDEPS_PRIVATE=[
+        "$BUILD_DIR/mongo/idl/server_parameter",
         "$BUILD_DIR/mongo/s/grid",
         "catalog_raii",
         "curop",
         "repl/repl_coordinator_interface",
+        "repl/speculative_majority_read_info",
         "s/sharding_api_d",
     ],
 )
@@ -992,12 +1134,12 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/catalog/collection',
-        '$BUILD_DIR/mongo/db/catalog/database',
         'rw_concern_d',
         'background',
         'logical_clock',
     ],
     LIBDEPS_PRIVATE=[
+        'index_builds_coordinator_interface',
         '$BUILD_DIR/mongo/db/catalog/document_validation',
         '$BUILD_DIR/mongo/db/catalog/index_key_validate',
         '$BUILD_DIR/mongo/db/catalog/multi_index_block',
@@ -1010,6 +1152,7 @@ env.Library(
     target="ttl_d",
     source=[
         "ttl.cpp",
+        env.Idlc("ttl.idl")[0],
     ],
     LIBDEPS=[
         'db_raii',
@@ -1018,6 +1161,7 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/commands/fsync_locked',
+        '$BUILD_DIR/mongo/idl/server_parameter',
         'commands/server_status_core',
         'write_ops',
     ]
@@ -1041,6 +1185,7 @@ env.Library(
         'exec/and_hash.cpp',
         'exec/and_sorted.cpp',
         'exec/cached_plan.cpp',
+        'exec/change_stream_proxy.cpp',
         'exec/collection_scan.cpp',
         'exec/count.cpp',
         'exec/count_scan.cpp',
@@ -1064,7 +1209,9 @@ env.Library(
         'exec/projection_exec.cpp',
         'exec/queued_data_stage.cpp',
         'exec/record_store_fast_count.cpp',
+        'exec/requires_all_indices_stage.cpp',
         'exec/requires_collection_stage.cpp',
+        'exec/requires_index_stage.cpp',
         'exec/shard_filter.cpp',
         'exec/skip.cpp',
         'exec/sort.cpp',
@@ -1073,11 +1220,11 @@ env.Library(
         'exec/text.cpp',
         'exec/text_match.cpp',
         'exec/text_or.cpp',
-        'exec/update.cpp',
+        'exec/trial_stage.cpp',
+        'exec/update_stage.cpp',
         'exec/working_set_common.cpp',
         'exec/write_stage_common.cpp',
         'ops/parsed_delete.cpp',
-        'ops/parsed_update.cpp',
         'ops/update_result.cpp',
         'pipeline/document_source_cursor.cpp',
         'pipeline/document_source_geo_near_cursor.cpp',
@@ -1091,6 +1238,7 @@ env.Library(
         'query/plan_yield_policy.cpp',
         'query/query_yield.cpp',
         'query/stage_builder.cpp',
+        'run_op_kill_cursors.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
@@ -1103,7 +1251,6 @@ env.Library(
         'background',
         'bson/dotted_path_support',
         'catalog/collection',
-        'catalog/database',
         'catalog/document_validation',
         'catalog/index_catalog_entry',
         'catalog/index_catalog',
@@ -1121,6 +1268,7 @@ env.Library(
         'index/key_generator',
         'logical_session_cache',
         'matcher/expressions_mongod_only',
+        'ops/parsed_update',
         'pipeline/pipeline',
         'query/query_common',
         'query/query_planner',
@@ -1129,93 +1277,12 @@ env.Library(
         'stats/serveronly_stats',
         'storage/oplog_hack',
         'storage/storage_options',
+        'storage/remove_saver',
         'update/update_driver',
     ],
     LIBDEPS_PRIVATE=[
-        "commands/server_status_core",
-    ],
-)
-
-env.Library(
-    target="serveronly",
-    source=[
-        # DO NOT ADD ADDITIONAL FILES TO THIS LIST.
-        # See the additional comments in instance.cpp for details.
-        'instance.cpp'
-    ],
-    LIBDEPS_PRIVATE=[
-        # DO NOT ADD ADDITIONAL FILES TO THIS LIST.
-        # This list should be gradually becoming empty.
-        "$BUILD_DIR/mongo/db/bson/dotted_path_support",
-        "$BUILD_DIR/mongo/db/logical_time_metadata_hook",
-        "$BUILD_DIR/mongo/db/ttl_collection_cache",
-        "$BUILD_DIR/mongo/executor/network_interface_factory",
-        "$BUILD_DIR/mongo/s/catalog/sharding_catalog_client_impl",
-        "$BUILD_DIR/mongo/scripting/scripting_server",
-        "$BUILD_DIR/mongo/util/clock_sources",
-        "$BUILD_DIR/mongo/util/elapsed_tracker",
-        "$BUILD_DIR/mongo/util/net/network",
-        "$BUILD_DIR/third_party/shim_snappy",
-        "background",
-        "catalog/catalog_impl",
-        "catalog/collection_options",
-        "catalog/document_validation",
-        "catalog/index_key_validate",
-        "cloner",
-        "collection_index_usage_tracker",
-        "common",
-        "concurrency/lock_manager",
-        "concurrency/write_conflict_exception",
-        "curop",
-        "curop_metrics",
-        "db_raii",
-        "dbdirectclient",
-        "dbhelpers",
-        "exec/working_set",
-        "ftdc/ftdc_mongod",
-        "fts/ftsmongod",
-        "index/index_access_method",
-        "index/index_descriptor",
-        "index_d",
-        "introspect",
-        "matcher/expressions_mongod_only",
-        "ops/write_ops_parsers",
-        "pipeline/aggregation",
-        "query_exec",
-        "repl/bgsync",
-        "repl/oplog_buffer_blocking_queue",
-        "repl/oplog_buffer_collection",
-        "repl/oplog_buffer_proxy",
-        "repl/repl_coordinator_interface",
-        "repl/repl_coordinator_impl",
-        "repl/repl_settings",
-        "repl/rs_rollback",
-        "repl/rslog",
-        "repl/serveronly_repl",
-        "repl/storage_interface",
-        "repl/oplog_application",
-        "repl/topology_coordinator",
-        "rw_concern_d",
-        "s/commands_db_s",
-        "s/op_observer_sharding_impl",
-        "s/sharding_runtime_d",
-        "startup_warnings_mongod",
-        "stats/counters",
-        "stats/serveronly_stats",
-        "stats/top",
-        "storage/biggie/storage_biggie",
-        "storage/devnull/storage_devnull",
-        "storage/ephemeral_for_test/storage_ephemeral_for_test",
-        "storage/storage_engine_lock_file",
-        "storage/storage_engine_metadata",
-        "storage/storage_init_d",
-        "storage/storage_options",
-        "storage/wiredtiger/storage_wiredtiger" if wiredtiger else [],
-        "ttl_d",
-        "update/update_driver",
-        "update_index_data",
-        "views/views_mongod",
-        'keys_collection_client_direct',
+        'commands/server_status_core',
+        'kill_sessions',
     ],
 )
 
@@ -1230,7 +1297,6 @@ env.Library(
         'dbdirectclient',
         'dbhelpers',
         'repair_database',
-        'repl/drop_pending_collection_reaper',
         'repl/repl_settings',
         'storage/storage_repair_observer',
     ],
@@ -1277,7 +1343,7 @@ env.Library(
 )
 
 envWithAsio = env.Clone()
-envWithAsio.InjectThirdPartyIncludePaths(libraries=['asio'])
+envWithAsio.InjectThirdParty(libraries=['asio'])
 
 envWithAsio.CppUnitTest(
     target='logical_session_id_test',
@@ -1441,6 +1507,9 @@ env.Library(
         'logical_session_id',
         'service_context',
     ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/idl/server_parameter',
+    ],
 )
 
 env.Library(
@@ -1449,6 +1518,7 @@ env.Library(
         'initialize_operation_session_info.cpp',
         'logical_session_cache_impl.cpp',
         'logical_session_server_status_section.cpp',
+        env.Idlc('logical_session_cache_impl.idl')[0],
         env.Idlc('commands/end_sessions.idl')[0],
     ],
     LIBDEPS=[
@@ -1462,6 +1532,7 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/commands/server_status',
+        '$BUILD_DIR/mongo/db/s/sharding_api_d',
     ]
 )
 
@@ -1583,6 +1654,9 @@ env.Library(
     LIBDEPS=[
         'kill_sessions',
         'query_exec',
+    ],
+    LIBDEPS_PRIVATE=[
+        'session_catalog',
     ],
 )
 
@@ -1708,6 +1782,7 @@ env.Library(
 env.Library(
     target='keys_collection_manager',
     source=[
+        env.Idlc('keys_collection_manager.idl')[0],
         'keys_collection_manager.cpp',
         'keys_collection_cache.cpp',
         'key_generator.cpp',
@@ -1724,6 +1799,7 @@ env.Library(
     target='logical_clock',
     source=[
         'logical_clock.cpp',
+        env.Idlc('logical_clock.idl')[0],
     ],
     LIBDEPS=[
         'global_settings',
@@ -1796,9 +1872,9 @@ env.CppUnitTest(
         'logical_time_validator_test.cpp',
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/db/auth/authmocks',
         '$BUILD_DIR/mongo/s/catalog/dist_lock_manager_mock',
         '$BUILD_DIR/mongo/s/config_server_test_fixture',
+        'auth/authmocks',
         'keys_collection_manager',
         'logical_time_validator',
     ],
@@ -1879,11 +1955,13 @@ env.Library(
         'service_context_test_fixture',
     ],
     LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/db/commands/mongod',
-        '$BUILD_DIR/mongo/db/storage/storage_options',
+        'catalog/catalog_impl',
+        'commands/mongod',
+        'index_builds_coordinator_mongod',
         'service_context_d',
         'storage/devnull/storage_devnull',
         'storage/ephemeral_for_test/storage_ephemeral_for_test',
+        'storage/storage_options',
     ],
 )
 
@@ -1919,9 +1997,10 @@ env.Library(
     target='cursor_server_params',
     source=[
         'cursor_server_params.cpp',
+        env.Idlc('cursor_server_params.idl')[0],
     ],
-    LIBDEPS=[
-        '$BUILD_DIR/mongo/db/server_parameters',
+    LIBDEPS_PRIVATE=[
+        "$BUILD_DIR/mongo/idl/server_parameter",
     ],
 )
 
@@ -1958,7 +2037,7 @@ env.Library(
 )
 
 asioEnv = env.Clone()
-asioEnv.InjectThirdPartyIncludePaths('asio')
+asioEnv.InjectThirdParty('asio')
 
 asioEnv.CppIntegrationTest(
     target='nesting_depth_test',
@@ -2001,9 +2080,8 @@ env.CppUnitTest(
         'session_catalog_test.cpp',
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/unittest/concurrency',
         'auth/authmocks',
-        'service_context_d_test_fixture',
+        'service_context_test_fixture',
         'session_catalog',
     ],
 )
@@ -2058,5 +2136,37 @@ env.CppIntegrationTest(
         '$BUILD_DIR/mongo/transport/transport_layer_egress_init',
         '$BUILD_DIR/mongo/rpc/protocol',
         '$BUILD_DIR/mongo/util/version_impl',
+    ],
+)
+
+env.Library(
+    target='traffic_recorder',
+    source=[
+        'traffic_recorder.cpp',
+        'traffic_recorder_validators.cpp',
+        env.Idlc('traffic_recorder.idl')[0],
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+    ],
+    LIBDEPS_PRIVATE=[
+        "$BUILD_DIR/mongo/db/commands/server_status",
+        '$BUILD_DIR/mongo/db/service_context',
+        '$BUILD_DIR/mongo/idl/server_parameter',
+        "$BUILD_DIR/mongo/rpc/rpc",
+    ],
+)
+
+env.Library(
+    target='traffic_reader',
+    source=[
+        "traffic_reader.cpp",
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/rpc/protocol',
+        "$BUILD_DIR/mongo/rpc/rpc",
     ],
 )

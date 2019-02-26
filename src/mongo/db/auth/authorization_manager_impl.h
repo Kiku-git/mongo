@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -46,7 +45,6 @@
 #include "mongo/db/auth/role_graph.h"
 #include "mongo/db/auth/user.h"
 #include "mongo/db/auth/user_name.h"
-#include "mongo/db/auth/user_name_hash.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/server_options.h"
@@ -120,6 +118,9 @@ public:
                                     std::vector<BSONObj>* result) override;
 
     StatusWith<UserHandle> acquireUser(OperationContext* opCtx, const UserName& userName) override;
+    StatusWith<UserHandle> acquireUserForSessionRefresh(OperationContext* opCtx,
+                                                        const UserName& userName,
+                                                        const User::UserId& uid) override;
 
     void invalidateUserByName(OperationContext* opCtx, const UserName& user) override;
 
@@ -204,7 +205,7 @@ private:
     /**
      * A cache of whether there are any users set up for the cluster.
      */
-    AtomicBool _privilegeDocsExist;
+    AtomicWord<bool> _privilegeDocsExist;
 
     std::unique_ptr<AuthzManagerExternalState> _externalState;
 
@@ -257,6 +258,9 @@ private:
      */
     stdx::condition_variable _fetchPhaseIsReady;
 
-    AtomicBool _inUserManagementCommand{false};
+    AtomicWord<bool> _inUserManagementCommand{false};
 };
+
+extern int authorizationManagerCacheSize;
+
 }  // namespace mongo

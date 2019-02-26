@@ -1,7 +1,3 @@
-// pdfiletests.cpp : pdfile unit tests.
-//
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -31,11 +27,14 @@
  *    it in the license file.
  */
 
+/**
+ * pdfile unit tests
+ */
+
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/client.h"
-#include "mongo/db/db.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/json.h"
 #include "mongo/db/ops/insert.h"

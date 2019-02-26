@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -122,7 +121,7 @@ PlanStage::StageState CollectionScan::doWork(WorkingSetID* out) {
                                                 << "Last seen record id: "
                                                 << _lastSeenId);
                     *out = WorkingSetCommon::allocateStatusMember(_workingSet, status);
-                    return PlanStage::DEAD;
+                    return PlanStage::FAILURE;
                 }
             }
 
@@ -211,13 +210,13 @@ bool CollectionScan::isEOF() {
     return _commonStats.isEOF;
 }
 
-void CollectionScan::saveState(RequiresCollTag) {
+void CollectionScan::doSaveStateRequiresCollection() {
     if (_cursor) {
         _cursor->save();
     }
 }
 
-void CollectionScan::restoreState(RequiresCollTag) {
+void CollectionScan::doRestoreStateRequiresCollection() {
     if (_cursor) {
         const bool couldRestore = _cursor->restore();
         uassert(ErrorCodes::CappedPositionLost,

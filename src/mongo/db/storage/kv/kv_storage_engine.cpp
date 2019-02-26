@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -37,11 +36,14 @@
 #include <algorithm>
 
 #include "mongo/db/catalog/catalog_control.h"
+#include "mongo/db/client.h"
+#include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/logical_clock.h"
 #include "mongo/db/operation_context_noop.h"
 #include "mongo/db/storage/kv/kv_catalog_feature_tracker.h"
 #include "mongo/db/storage/kv/kv_database_catalog_entry.h"
 #include "mongo/db/storage/kv/kv_engine.h"
+#include "mongo/db/storage/kv/temporary_kv_record_store.h"
 #include "mongo/db/storage/storage_repair_observer.h"
 #include "mongo/db/unclean_shutdown.h"
 #include "mongo/util/assert_util.h"
@@ -80,11 +82,15 @@ public:
 
 KVStorageEngine::KVStorageEngine(
     KVEngine* engine,
-    const KVStorageEngineOptions& options,
+    KVStorageEngineOptions options,
     stdx::function<KVDatabaseCatalogEntryFactory> databaseCatalogEntryFactory)
-    : _databaseCatalogEntryFactory(std::move(databaseCatalogEntryFactory)),
-      _options(options),
-      _engine(engine),
+    : _engine(engine),
+      _options(std::move(options)),
+      _databaseCatalogEntryFactory(std::move(databaseCatalogEntryFactory)),
+      _dropPendingIdentReaper(engine),
+      _minOfCheckpointAndOldestTimestampListener(
+          TimestampMonitor::TimestampType::kMinOfCheckpointAndOldest,
+          [this](Timestamp timestamp) { _onMinOfCheckpointAndOldestTimestampChanged(timestamp); }),
       _supportsDocLocking(_engine->supportsDocLocking()),
       _supportsDBLocking(_engine->supportsDBLocking()),
       _supportsCappedCollections(_engine->supportsCappedCollections()) {
@@ -270,8 +276,8 @@ void KVStorageEngine::closeCatalog(OperationContext* opCtx) {
     }
     _dbs.clear();
 
-    _catalog.reset(nullptr);
-    _catalogRecordStore.reset(nullptr);
+    _catalog.reset();
+    _catalogRecordStore.reset();
 }
 
 Status KVStorageEngine::_recoverOrphanedCollection(OperationContext* opCtx,
@@ -296,7 +302,7 @@ Status KVStorageEngine::_recoverOrphanedCollection(OperationContext* opCtx,
     }
     if (dataModified) {
         StorageRepairObserver::get(getGlobalServiceContext())
-            ->onModification(str::stream() << "Collection " << collectionName.ns() << " recovered: "
+            ->onModification(str::stream() << "Collection " << collectionName << " recovered: "
                                            << status.reason());
     }
     wuow.commit();
@@ -343,11 +349,21 @@ KVStorageEngine::reconcileCatalogAndIdents(OperationContext* opCtx) {
         std::vector<std::string> vec = _catalog->getAllIdents(opCtx);
         catalogIdents.insert(vec.begin(), vec.end());
     }
+    std::set<std::string> internalIdentsToDrop;
+
+    auto dropPendingIdents = _dropPendingIdentReaper.getAllIdents();
 
     // Drop all idents in the storage engine that are not known to the catalog. This can happen in
     // the case of a collection or index creation being rolled back.
     for (const auto& it : engineIdents) {
         if (catalogIdents.find(it) != catalogIdents.end()) {
+            continue;
+        }
+
+        // Internal idents are dropped at the end after those left over from index builds are
+        // identified.
+        if (_catalog->isInternalIdent(it)) {
+            internalIdentsToDrop.insert(it);
             continue;
         }
 
@@ -358,6 +374,14 @@ KVStorageEngine::reconcileCatalogAndIdents(OperationContext* opCtx) {
         // In repair context, any orphaned collection idents from the engine should already be
         // recovered in the catalog in loadCatalog().
         invariant(!(_catalog->isCollectionIdent(it) && _options.forRepair));
+
+        // Leave drop-pending idents alone.
+        // These idents have to be retained as long as the corresponding drops are not part of a
+        // checkpoint.
+        if (dropPendingIdents.find(it) != dropPendingIdents.cend()) {
+            log() << "Not removing ident for uncheckpointed collection or index drop: " << it;
+            continue;
+        }
 
         const auto& toRemove = it;
         log() << "Dropping unknown ident: " << toRemove;
@@ -411,6 +435,31 @@ KVStorageEngine::reconcileCatalogAndIdents(OperationContext* opCtx) {
                 continue;
             }
 
+            // If this index was draining, do not delete any internal idents that it may have owned.
+            // Instead, the idents can be used later on to resume draining instead of a
+            // performing a full rebuild. This is only done for background secondary builds, because
+            // the index must be rebuilt, and it is dropped otherwise.
+            // TODO: SERVER-37952 Do not drop these idents for background index builds on
+            // primaries once index builds are resumable from draining.
+            if (!indexMetaData.ready && indexMetaData.isBackgroundSecondaryBuild &&
+                indexMetaData.buildPhase ==
+                    BSONCollectionCatalogEntry::kIndexBuildDraining.toString()) {
+
+                if (indexMetaData.constraintViolationsIdent) {
+                    auto it = internalIdentsToDrop.find(*indexMetaData.constraintViolationsIdent);
+                    if (it != internalIdentsToDrop.end()) {
+                        internalIdentsToDrop.erase(it);
+                    }
+                }
+
+                if (indexMetaData.sideWritesIdent) {
+                    auto it = internalIdentsToDrop.find(*indexMetaData.sideWritesIdent);
+                    if (it != internalIdentsToDrop.end()) {
+                        internalIdentsToDrop.erase(it);
+                    }
+                }
+            }
+
             // If the index was kicked off as a background secondary index build, replication
             // recovery will not run into the oplog entry to recreate the index. If the index
             // table is not found, or the index build did not successfully complete, this code
@@ -451,17 +500,34 @@ KVStorageEngine::reconcileCatalogAndIdents(OperationContext* opCtx) {
         }
     }
 
+    for (auto&& temp : internalIdentsToDrop) {
+        log() << "Dropping internal ident: " << temp;
+        WriteUnitOfWork wuow(opCtx);
+        fassert(51067, _engine->dropIdent(opCtx, temp));
+        wuow.commit();
+    }
+
     return ret;
 }
 
+std::string KVStorageEngine::getFilesystemPathForDb(const std::string& dbName) const {
+    return _catalog->getFilesystemPathForDb(dbName);
+}
+
 void KVStorageEngine::cleanShutdown() {
+    if (_timestampMonitor) {
+        _timestampMonitor->removeListener(&_minOfCheckpointAndOldestTimestampListener);
+    }
+
     for (DBMap::const_iterator it = _dbs.begin(); it != _dbs.end(); ++it) {
         delete it->second;
     }
     _dbs.clear();
 
-    _catalog.reset(NULL);
-    _catalogRecordStore.reset(NULL);
+    _catalog.reset();
+    _catalogRecordStore.reset();
+
+    _timestampMonitor.reset();
 
     _engine->cleanShutdown();
     // intentionally not deleting _engine
@@ -469,12 +535,19 @@ void KVStorageEngine::cleanShutdown() {
 
 KVStorageEngine::~KVStorageEngine() {}
 
-void KVStorageEngine::finishInit() {}
+void KVStorageEngine::finishInit() {
+    if (_engine->supportsRecoveryTimestamp()) {
+        _timestampMonitor = std::make_unique<TimestampMonitor>(
+            _engine.get(), getGlobalServiceContext()->getPeriodicRunner());
+        _timestampMonitor->startup();
+        _timestampMonitor->addListener(&_minOfCheckpointAndOldestTimestampListener);
+    }
+}
 
 RecoveryUnit* KVStorageEngine::newRecoveryUnit() {
     if (!_engine) {
         // shutdown
-        return NULL;
+        return nullptr;
     }
     return _engine->newRecoveryUnit();
 }
@@ -544,7 +617,7 @@ Status KVStorageEngine::_dropCollectionsNoTimestamp(OperationContext* opCtx,
     }
 
     // Ensure the method exits with the same "commit timestamp" state that it was called with.
-    auto addCommitTimestamp = MakeGuard([&opCtx, commitTs] {
+    auto addCommitTimestamp = makeGuard([&opCtx, commitTs] {
         if (!commitTs.isNull()) {
             opCtx->recoveryUnit()->setCommitTimestamp(commitTs);
         }
@@ -596,6 +669,10 @@ void KVStorageEngine::endNonBlockingBackup(OperationContext* opCtx) {
     return _engine->endNonBlockingBackup(opCtx);
 }
 
+StatusWith<std::vector<std::string>> KVStorageEngine::extendBackupCursor(OperationContext* opCtx) {
+    return _engine->extendBackupCursor(opCtx);
+}
+
 bool KVStorageEngine::isDurable() const {
     return _engine->isDurable();
 }
@@ -627,13 +704,22 @@ Status KVStorageEngine::repairRecordStore(OperationContext* opCtx, const std::st
     return Status::OK();
 }
 
+std::unique_ptr<TemporaryRecordStore> KVStorageEngine::makeTemporaryRecordStore(
+    OperationContext* opCtx) {
+    std::unique_ptr<RecordStore> rs =
+        _engine->makeTemporaryRecordStore(opCtx, _catalog->newInternalIdent());
+    LOG(1) << "created temporary record store: " << rs->getIdent();
+    return std::make_unique<TemporaryKVRecordStore>(getEngine(), std::move(rs));
+}
+
 void KVStorageEngine::setJournalListener(JournalListener* jl) {
     _engine->setJournalListener(jl);
 }
 
 void KVStorageEngine::setStableTimestamp(Timestamp stableTimestamp,
-                                         boost::optional<Timestamp> maximumTruncationTimestamp) {
-    _engine->setStableTimestamp(stableTimestamp, maximumTruncationTimestamp);
+                                         boost::optional<Timestamp> maximumTruncationTimestamp,
+                                         bool force) {
+    _engine->setStableTimestamp(stableTimestamp, maximumTruncationTimestamp, force);
 }
 
 void KVStorageEngine::setInitialDataTimestamp(Timestamp initialDataTimestamp) {
@@ -708,12 +794,24 @@ bool KVStorageEngine::supportsReadConcernMajority() const {
     return _engine->supportsReadConcernMajority();
 }
 
+bool KVStorageEngine::supportsPendingDrops() const {
+    return supportsReadConcernMajority();
+}
+
+void KVStorageEngine::clearDropPendingState() {
+    _dropPendingIdentReaper.clearDropPendingState();
+}
+
 void KVStorageEngine::replicationBatchIsComplete() const {
     return _engine->replicationBatchIsComplete();
 }
 
 Timestamp KVStorageEngine::getAllCommittedTimestamp() const {
     return _engine->getAllCommittedTimestamp();
+}
+
+Timestamp KVStorageEngine::getOldestOpenReadTimestamp() const {
+    return _engine->getOldestOpenReadTimestamp();
 }
 
 void KVStorageEngine::_dumpCatalog(OperationContext* opCtx) {
@@ -729,5 +827,134 @@ void KVStorageEngine::_dumpCatalog(OperationContext* opCtx) {
     }
     opCtx->recoveryUnit()->abandonSnapshot();
 }
+
+void KVStorageEngine::addDropPendingIdent(const Timestamp& dropTimestamp,
+                                          const NamespaceString& nss,
+                                          StringData ident) {
+    _dropPendingIdentReaper.addDropPendingIdent(dropTimestamp, nss, ident);
+}
+
+void KVStorageEngine::_onMinOfCheckpointAndOldestTimestampChanged(const Timestamp& timestamp) {
+    if (timestamp.isNull()) {
+        return;
+    }
+
+    // No drop-pending idents present if getEarliestDropTimestamp() returns boost::none.
+    if (auto earliestDropTimestamp = _dropPendingIdentReaper.getEarliestDropTimestamp()) {
+        if (timestamp > *earliestDropTimestamp) {
+            log() << "Removing drop-pending idents with drop timestamps before timestamp "
+                  << timestamp;
+            auto opCtx = cc().makeOperationContext();
+            _dropPendingIdentReaper.dropIdentsOlderThan(opCtx.get(), timestamp);
+        }
+    }
+}
+
+KVStorageEngine::TimestampMonitor::TimestampMonitor(KVEngine* engine, PeriodicRunner* runner)
+    : _engine(engine), _running(false), _periodicRunner(runner) {
+    _currentTimestamps.checkpoint = _engine->getCheckpointTimestamp();
+    _currentTimestamps.oldest = _engine->getOldestTimestamp();
+    _currentTimestamps.stable = _engine->getStableTimestamp();
+    _currentTimestamps.minOfCheckpointAndOldest =
+        (_currentTimestamps.checkpoint.isNull() ||
+         (_currentTimestamps.checkpoint > _currentTimestamps.oldest))
+        ? _currentTimestamps.oldest
+        : _currentTimestamps.checkpoint;
+}
+
+KVStorageEngine::TimestampMonitor::~TimestampMonitor() {
+    log() << "Timestamp monitor shutting down";
+    stdx::lock_guard<stdx::mutex> lock(_monitorMutex);
+    invariant(_listeners.empty());
+}
+
+void KVStorageEngine::TimestampMonitor::startup() {
+    invariant(!_running);
+
+    log() << "Timestamp monitor starting";
+    PeriodicRunner::PeriodicJob job(
+        "TimestampMonitor",
+        [&](Client* client) {
+            {
+                stdx::lock_guard<stdx::mutex> lock(_monitorMutex);
+                if (_listeners.empty()) {
+                    return;
+                }
+            }
+
+            Timestamp checkpoint = _currentTimestamps.checkpoint;
+            Timestamp oldest = _currentTimestamps.oldest;
+            Timestamp stable = _currentTimestamps.stable;
+
+            // Take a global lock in MODE_IS while fetching timestamps to guarantee that
+            // rollback-to-stable isn't running concurrently.
+            {
+                auto opCtx = client->makeOperationContext();
+                Lock::GlobalLock lock(opCtx.get(), MODE_IS);
+
+                // The checkpoint timestamp is not cached in mongod and needs to be fetched with a
+                // call into WiredTiger, all the other timestamps are cached in mongod.
+                checkpoint = _engine->getCheckpointTimestamp();
+                oldest = _engine->getOldestTimestamp();
+                stable = _engine->getStableTimestamp();
+            }
+
+            Timestamp minOfCheckpointAndOldest =
+                (checkpoint.isNull() || (checkpoint > oldest)) ? oldest : checkpoint;
+
+            // Notify listeners if the timestamps changed.
+            if (_currentTimestamps.checkpoint != checkpoint) {
+                _currentTimestamps.checkpoint = checkpoint;
+                notifyAll(TimestampType::kCheckpoint, checkpoint);
+            }
+
+            if (_currentTimestamps.oldest != oldest) {
+                _currentTimestamps.oldest = oldest;
+                notifyAll(TimestampType::kOldest, oldest);
+            }
+
+            if (_currentTimestamps.stable != stable) {
+                _currentTimestamps.stable = stable;
+                notifyAll(TimestampType::kStable, stable);
+            }
+
+            if (_currentTimestamps.minOfCheckpointAndOldest != minOfCheckpointAndOldest) {
+                _currentTimestamps.minOfCheckpointAndOldest = minOfCheckpointAndOldest;
+                notifyAll(TimestampType::kMinOfCheckpointAndOldest, minOfCheckpointAndOldest);
+            }
+        },
+        Seconds(1));
+
+    _periodicRunner->scheduleJob(std::move(job));
+    _running = true;
+}
+
+void KVStorageEngine::TimestampMonitor::notifyAll(TimestampType type, Timestamp newTimestamp) {
+    stdx::lock_guard<stdx::mutex> lock(_monitorMutex);
+    for (auto& listener : _listeners) {
+        if (listener->getType() == type) {
+            listener->notify(newTimestamp);
+        }
+    }
+}
+
+void KVStorageEngine::TimestampMonitor::addListener(TimestampListener* listener) {
+    stdx::lock_guard<stdx::mutex> lock(_monitorMutex);
+    if (std::find(_listeners.begin(), _listeners.end(), listener) != _listeners.end()) {
+        bool listenerAlreadyRegistered = true;
+        invariant(!listenerAlreadyRegistered);
+    }
+    _listeners.push_back(listener);
+}
+
+void KVStorageEngine::TimestampMonitor::removeListener(TimestampListener* listener) {
+    stdx::lock_guard<stdx::mutex> lock(_monitorMutex);
+    if (std::find(_listeners.begin(), _listeners.end(), listener) == _listeners.end()) {
+        bool listenerNotRegistered = true;
+        invariant(!listenerNotRegistered);
+    }
+    _listeners.erase(std::remove(_listeners.begin(), _listeners.end(), listener));
+}
+
 
 }  // namespace mongo

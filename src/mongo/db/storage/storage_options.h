@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -79,11 +78,11 @@ struct StorageGlobalParams {
 
     // --journalCommitInterval
     static const int kMaxJournalCommitIntervalMs;
-    AtomicInt32 journalCommitIntervalMs;
+    AtomicWord<int> journalCommitIntervalMs;
 
     // --notablescan
     // no table scans allowed
-    AtomicBool noTableScan;
+    AtomicWord<bool> noTableScan;
 
     // --directoryperdb
     // Stores each database’s files in its own folder in the data directory.
@@ -96,7 +95,7 @@ struct StorageGlobalParams {
     // via an fsync operation.
     // Do not set this value on production systems.
     // In almost every situation, you should use the default setting.
-    static const double kMaxSyncdelaySecs;
+    static constexpr double kMaxSyncdelaySecs = 9.0 * 1000.0 * 1000.0;
     AtomicDouble syncdelay;  // seconds between fsyncs
 
     // --queryableBackupMode

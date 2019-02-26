@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -128,12 +127,12 @@ public:
         MONGO_UNREACHABLE;
     }
 
-    void schedule(ScheduleMode mode, Task task) final {
-        if (mode == kDispatch) {
-            asio::dispatch(_ioContext, std::move(task));
-        } else {
-            asio::post(_ioContext, std::move(task));
-        }
+    void schedule(Task task) final {
+        asio::post(_ioContext, std::move(task));
+    }
+
+    void dispatch(Task task) final {
+        asio::dispatch(_ioContext, std::move(task));
     }
 
     bool onReactorThread() const final {
@@ -198,7 +197,7 @@ void scheduleBasicTask(ServiceExecutor* exec, bool expectSuccess) {
 
 TEST_F(ServiceExecutorAdaptiveFixture, BasicTaskRuns) {
     ASSERT_OK(executor->start());
-    auto guard = MakeGuard([this] { ASSERT_OK(executor->shutdown(kShutdownTime)); });
+    auto guard = makeGuard([this] { ASSERT_OK(executor->shutdown(kShutdownTime)); });
 
     scheduleBasicTask(executor.get(), true);
 }
@@ -209,7 +208,7 @@ TEST_F(ServiceExecutorAdaptiveFixture, ScheduleFailsBeforeStartup) {
 
 TEST_F(ServiceExecutorSynchronousFixture, BasicTaskRuns) {
     ASSERT_OK(executor->start());
-    auto guard = MakeGuard([this] { ASSERT_OK(executor->shutdown(kShutdownTime)); });
+    auto guard = makeGuard([this] { ASSERT_OK(executor->shutdown(kShutdownTime)); });
 
     scheduleBasicTask(executor.get(), true);
 }

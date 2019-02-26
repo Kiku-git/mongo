@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -96,7 +95,7 @@ public:
 
 private:
     LogComponentSettings _settings;
-    AtomicBool _shouldRedact{false};
+    AtomicWord<bool> _shouldRedact{false};
 };
 
 }  // namespace logger

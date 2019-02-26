@@ -1,6 +1,3 @@
-// storage_engine.h
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -38,6 +35,7 @@
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
+#include "mongo/db/storage/temporary_record_store.h"
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
@@ -277,6 +275,11 @@ public:
         return;
     }
 
+    virtual StatusWith<std::vector<std::string>> extendBackupCursor(OperationContext* opCtx) {
+        return Status(ErrorCodes::CommandNotSupported,
+                      "The current storage engine does not support a concurrent mode.");
+    }
+
     /**
      * Recover as much data as possible from a potentially corrupt RecordStore.
      * This only recovers the record data, not indexes or anything else.
@@ -285,6 +288,15 @@ public:
      * free function.
      */
     virtual Status repairRecordStore(OperationContext* opCtx, const std::string& ns) = 0;
+
+    /**
+     * Creates a temporary RecordStore on the storage engine. This record store will drop itself
+     * automatically when it goes out of scope. This means the TemporaryRecordStore should not exist
+     * any longer than the OperationContext used to create it. On startup, the storage engine will
+     * drop any un-dropped temporary record stores.
+     */
+    virtual std::unique_ptr<TemporaryRecordStore> makeTemporaryRecordStore(
+        OperationContext* opCtx) = 0;
 
     /**
      * This method will be called before there is a clean shutdown.  Storage engines should
@@ -340,6 +352,24 @@ public:
     }
 
     /**
+     * Returns true if the storage engine supports deferring collection drops until the the storage
+     * engine determines that the storage layer artifacts for the pending drops are no longer needed
+     * based on the stable and oldest timestamps.
+     */
+    virtual bool supportsPendingDrops() const = 0;
+
+    /**
+     * Returns a set of drop pending idents inside the storage engine.
+     */
+    virtual std::set<std::string> getDropPendingIdents() const = 0;
+
+    /**
+     * Clears list of drop-pending idents in the storage engine.
+     * Used primarily by rollback after recovering to a stable timestamp.
+     */
+    virtual void clearDropPendingState() = 0;
+
+    /**
      * Recovers the storage engine state to the last stable timestamp. "Stable" in this case
      * refers to a timestamp that is guaranteed to never be rolled back. The stable timestamp
      * used should be one provided by StorageEngine::setStableTimestamp().
@@ -383,8 +413,9 @@ public:
     }
 
     /**
-     * Sets the highest timestamp at which the storage engine is allowed to take a checkpoint.
-     * This timestamp can never decrease, and thus should be a timestamp that can never roll back.
+     * Sets the highest timestamp at which the storage engine is allowed to take a checkpoint. This
+     * timestamp must not decrease unless force=true is set, in which case we force the stable
+     * timestamp, the oldest timestamp, and the commit timestamp backward.
      *
      * The maximumTruncationTimestamp (and newer) must not be truncated from the oplog in order to
      * recover from the `stableTimestamp`.  `boost::none` implies there are no additional
@@ -396,7 +427,8 @@ public:
      * before a call to this method protects it.
      */
     virtual void setStableTimestamp(Timestamp stableTimestamp,
-                                    boost::optional<Timestamp> maximumTruncationTimestamp) {}
+                                    boost::optional<Timestamp> maximumTruncationTimestamp,
+                                    bool force = false) {}
 
     /**
      * Tells the storage engine the timestamp of the data at startup. This is necessary because
@@ -467,6 +499,18 @@ public:
      * implementation.
      */
     virtual Timestamp getAllCommittedTimestamp() const = 0;
+
+    /**
+     * Returns the oldest read timestamp in use by an open transaction. Storage engines that support
+     * the 'snapshot' ReadConcern must provide an implementation. Other storage engines may provide
+     * a no-op implementation.
+     */
+    virtual Timestamp getOldestOpenReadTimestamp() const = 0;
+
+    /**
+     * Returns the path to the directory which has the data files of database with `dbName`.
+     */
+    virtual std::string getFilesystemPathForDb(const std::string& dbName) const = 0;
 };
 
 }  // namespace mongo

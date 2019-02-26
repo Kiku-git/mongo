@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -55,7 +54,6 @@
 
 namespace mongo {
 namespace unittest {
-
 namespace {
 
 bool stringContains(const std::string& haystack, const std::string& needle) {
@@ -66,7 +64,7 @@ logger::MessageLogDomain* unittestOutput = logger::globalLogManager()->getNamedD
 
 typedef std::map<std::string, std::shared_ptr<Suite>> SuiteMap;
 
-inline SuiteMap& _allSuites() {
+SuiteMap& _allSuites() {
     static SuiteMap allSuites;
     return allSuites;
 }
@@ -75,6 +73,10 @@ inline SuiteMap& _allSuites() {
 
 logger::LogstreamBuilder log() {
     return LogstreamBuilder(unittestOutput, getThreadName(), logger::LogSeverity::Log());
+}
+
+logger::LogstreamBuilder warning() {
+    return LogstreamBuilder(unittestOutput, getThreadName(), logger::LogSeverity::Warning());
 }
 
 void setupTestLogger() {
@@ -94,17 +96,23 @@ public:
     Result(const std::string& name)
         : _name(name), _rc(0), _tests(0), _fails(), _asserts(0), _millis(0) {}
 
-    std::string toString() {
-        std::stringstream ss;
+    std::string toString() const {
+        char result[144];
+        size_t numWritten = std::snprintf(
+            result,
+            sizeof(result),
+            "%-40s | tests: %4d | fails: %4d | assert calls: %10d | time secs: %6.3f\n",
+            _name.c_str(),
+            _tests,
+            static_cast<int>(_fails.size()),
+            _asserts,
+            _millis / 1000.0);
 
-        char result[128];
-        sprintf(result,
-                "%-30s | tests: %4d | fails: %4d | assert calls: %10d | time secs: %6.3f\n",
-                _name.c_str(),
-                _tests,
-                static_cast<int>(_fails.size()),
-                _asserts,
-                _millis / 1000.0);
+        if (numWritten >= sizeof(result)) {
+            warning() << "Output for test " << _name << " was truncated";
+        }
+
+        std::stringstream ss;
         ss << result;
 
         for (const auto& i : _messages) {
@@ -153,9 +161,41 @@ private:
 };
 
 template <typename F>
-inline UnsafeScopeGuard<F> MakeUnsafeScopeGuard(F fun) {
+UnsafeScopeGuard<F> MakeUnsafeScopeGuard(F fun) {
     return UnsafeScopeGuard<F>(std::move(fun));
 }
+
+// Attempting to read the featureCompatibilityVersion parameter before it is explicitly initialized
+// with a meaningful value will trigger failures as of SERVER-32630.
+void setUpFCV() {
+    serverGlobalParams.featureCompatibility.setVersion(
+        ServerGlobalParams::FeatureCompatibility::Version::kFullyUpgradedTo42);
+}
+void tearDownFCV() {
+    serverGlobalParams.featureCompatibility.reset();
+}
+
+struct TestSuiteEnvironment {
+    explicit TestSuiteEnvironment() {
+        setUpFCV();
+    }
+
+    ~TestSuiteEnvironment() noexcept(false) {
+        tearDownFCV();
+    }
+};
+
+struct UnitTestEnvironment {
+    explicit UnitTestEnvironment(Test* const t) : test(t) {
+        test->setUp();
+    }
+
+    ~UnitTestEnvironment() noexcept(false) {
+        test->tearDown();
+    }
+
+    Test* const test;
+};
 
 }  // namespace
 
@@ -168,8 +208,7 @@ Test::~Test() {
 }
 
 void Test::run() {
-    setUp();
-    auto guard = MakeUnsafeScopeGuard([this] { tearDown(); });
+    UnitTestEnvironment environment(this);
 
     // An uncaught exception does not prevent the tear down from running. But
     // such an event still constitutes an error. To test this behavior we use a
@@ -177,19 +216,9 @@ void Test::run() {
     // not considered an error.
     try {
         _doTest();
-    } catch (FixtureExceptionForTesting&) {
+    } catch (const FixtureExceptionForTesting&) {
         return;
     }
-}
-
-// Attempting to read the featureCompatibilityVersion parameter before it is explicitly initialized
-// with a meaningful value will trigger failures as of SERVER-32630.
-void Test::setUp() {
-    serverGlobalParams.featureCompatibility.setVersion(
-        ServerGlobalParams::FeatureCompatibility::Version::kFullyUpgradedTo42);
-}
-void Test::tearDown() {
-    serverGlobalParams.featureCompatibility.reset();
 }
 
 namespace {
@@ -300,7 +329,9 @@ Result* Suite::run(const std::string& filter, int runsPerTest) {
                 if (runsPerTest > 1) {
                     runTimes << "  (" << x + 1 << "/" << runsPerTest << ")";
                 }
+
                 log() << "\t going to run test: " << tc->getName() << runTimes.str();
+                TestSuiteEnvironment environment;
                 tc->run();
             }
             passes = true;

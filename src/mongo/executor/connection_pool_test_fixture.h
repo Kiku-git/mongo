@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -53,6 +52,8 @@ public:
 
     void cancelTimeout() override;
 
+    Date_t now() override;
+
     // launches all timers for whom now() has passed
     static void fireIfNecessary();
 
@@ -83,12 +84,10 @@ public:
 
     size_t id() const;
 
-    void indicateSuccess() override;
-    void indicateFailure(Status status) override;
-
-    void resetToUnknown() override;
-
     const HostAndPort& getHostAndPort() const override;
+    transport::ConnectSSLMode getSslMode() const override {
+        return transport::kGlobalSSLMode;
+    }
 
     bool isHealthy() override;
 
@@ -105,32 +104,23 @@ public:
     static void pushRefresh(Status status);
     static size_t refreshQueueDepth();
 
-private:
-    void indicateUsed() override;
-
-    Date_t getLastUsed() const override;
-
-    const Status& getStatus() const override;
-
     void setTimeout(Milliseconds timeout, TimeoutCallback cb) override;
 
     void cancelTimeout() override;
 
+    Date_t now() override;
+
+private:
     void setup(Milliseconds timeout, SetupCallback cb) override;
 
     void refresh(Milliseconds timeout, RefreshCallback cb) override;
 
-    size_t getGeneration() const override;
-
     HostAndPort _hostAndPort;
-    Date_t _lastUsed;
-    Status _status = Status::OK();
     SetupCallback _setupCallback;
     RefreshCallback _refreshCallback;
     TimerImpl _timer;
     PoolImpl* _global;
     size_t _id;
-    size_t _generation;
 
     // Answer queues
     static std::deque<PushSetupCallback> _pushSetupQueue;
@@ -151,7 +141,9 @@ class PoolImpl final : public ConnectionPool::DependentTypeFactoryInterface {
 
 public:
     std::shared_ptr<ConnectionPool::ConnectionInterface> makeConnection(
-        const HostAndPort& hostAndPort, size_t generation) override;
+        const HostAndPort& hostAndPort,
+        transport::ConnectSSLMode sslMode,
+        size_t generation) override;
 
     std::shared_ptr<ConnectionPool::TimerInterface> makeTimer() override;
 

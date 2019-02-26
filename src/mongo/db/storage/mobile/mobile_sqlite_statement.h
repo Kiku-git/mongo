@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -131,7 +130,7 @@ public:
     uint64_t _id;
 
 private:
-    static AtomicInt64 _nextID;
+    static AtomicWord<long long> _nextID;
     sqlite3_stmt* _stmt;
     std::string _sqlQuery;
 

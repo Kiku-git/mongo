@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -66,6 +65,7 @@ void ConfigServerOpObserver::onDelete(OperationContext* opCtx,
 repl::OpTime ConfigServerOpObserver::onDropCollection(OperationContext* opCtx,
                                                       const NamespaceString& collectionName,
                                                       OptionalCollectionUUID uuid,
+                                                      std::uint64_t numRecords,
                                                       const CollectionDropType dropType) {
     if (collectionName == VersionType::ConfigNS) {
         if (!repl::ReplicationCoordinator::get(opCtx)->getMemberState().rollback()) {

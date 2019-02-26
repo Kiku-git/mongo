@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -32,10 +31,12 @@
 
 #include "mongo/db/pipeline/mongos_process_interface.h"
 
+#include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/catalog/uuid_catalog.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/pipeline/document_source.h"
+#include "mongo/db/pipeline/sharded_agg_helpers.h"
 #include "mongo/db/query/collation/collation_spec.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/repl/read_concern_args.h"
@@ -45,8 +46,11 @@
 #include "mongo/s/cluster_commands_helpers.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/query/cluster_cursor_manager.h"
+#include "mongo/s/query/cluster_query_knobs.h"
 #include "mongo/s/query/establish_cursors.h"
 #include "mongo/s/query/router_exec_stage.h"
+#include "mongo/s/transaction_router.h"
+#include "mongo/util/fail_point.h"
 
 namespace mongo {
 
@@ -56,6 +60,7 @@ using std::string;
 using std::unique_ptr;
 
 namespace {
+
 /**
  * Determines the single shard to which the given query will be targeted, and its associated
  * shardVersion. Throws if the query targets more than one shard.
@@ -115,12 +120,37 @@ bool supportsUniqueKey(const boost::intrusive_ptr<ExpressionContext>& expCtx,
 
 }  // namespace
 
+std::unique_ptr<Pipeline, PipelineDeleter> MongoSInterface::makePipeline(
+    const std::vector<BSONObj>& rawPipeline,
+    const boost::intrusive_ptr<ExpressionContext>& expCtx,
+    const MakePipelineOptions pipelineOptions) {
+    // Explain is not supported for auxiliary lookups.
+    invariant(!expCtx->explain);
+
+    auto pipeline = uassertStatusOK(Pipeline::parse(rawPipeline, expCtx));
+    if (pipelineOptions.optimize) {
+        pipeline->optimizePipeline();
+    }
+    if (pipelineOptions.attachCursorSource) {
+        // 'attachCursorSourceToPipeline' handles any complexity related to sharding.
+        pipeline = attachCursorSourceToPipeline(expCtx, pipeline.release());
+    }
+
+    return pipeline;
+}
+
+std::unique_ptr<Pipeline, PipelineDeleter> MongoSInterface::attachCursorSourceToPipeline(
+    const boost::intrusive_ptr<ExpressionContext>& expCtx, Pipeline* ownedPipeline) {
+    return sharded_agg_helpers::targetShardsAndAddMergeCursors(expCtx, ownedPipeline);
+}
+
 boost::optional<Document> MongoSInterface::lookupSingleDocument(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const NamespaceString& nss,
     UUID collectionUUID,
     const Document& filter,
-    boost::optional<BSONObj> readConcern) {
+    boost::optional<BSONObj> readConcern,
+    bool allowSpeculativeMajorityRead) {
     auto foreignExpCtx = expCtx->copyWith(nss, collectionUUID);
 
     // Create the find command to be dispatched to the shard in order to return the post-change
@@ -137,6 +167,9 @@ boost::optional<Document> MongoSInterface::lookupSingleDocument(
     cmdBuilder.append("comment", expCtx->comment);
     if (readConcern) {
         cmdBuilder.append(repl::ReadConcernArgs::kReadConcernFieldName, *readConcern);
+    }
+    if (allowSpeculativeMajorityRead) {
+        cmdBuilder.append("allowSpeculativeMajorityRead", true);
     }
 
     auto shardResult = std::vector<RemoteCursor>();

@@ -1,6 +1,3 @@
-//@file indexupdatetests.cpp : mongo/db/index_update.{h,cpp} tests
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -37,7 +34,6 @@
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/multi_index_block.h"
-#include "mongo/db/catalog/multi_index_block_impl.h"
 #include "mongo/db/client.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
@@ -75,16 +71,20 @@ public:
 protected:
     Status createIndex(const std::string& dbname, const BSONObj& indexSpec);
 
-    bool buildIndexInterrupted(const BSONObj& key, bool allowInterruption) {
+    bool buildIndexInterrupted(const BSONObj& key) {
         try {
-            MultiIndexBlockImpl indexer(&_opCtx, collection());
-            if (allowInterruption)
-                indexer.allowInterruption();
+            MultiIndexBlock indexer;
 
-            uassertStatusOK(indexer.init(key));
-            uassertStatusOK(indexer.insertAllDocumentsInCollection());
+            ON_BLOCK_EXIT([&] { indexer.cleanUpAfterBuild(&_opCtx, collection()); });
+
+            uassertStatusOK(
+                indexer.init(&_opCtx, collection(), key, MultiIndexBlock::kNoopOnInitFn));
+            uassertStatusOK(indexer.insertAllDocumentsInCollection(&_opCtx, collection()));
             WriteUnitOfWork wunit(&_opCtx);
-            indexer.commit();
+            ASSERT_OK(indexer.commit(&_opCtx,
+                                     collection(),
+                                     MultiIndexBlock::kNoopOnCreateEachFn,
+                                     MultiIndexBlock::kNoopOnCommitFn));
             wunit.commit();
         } catch (const DBException& e) {
             if (ErrorCodes::isInterruption(e.code()))
@@ -130,9 +130,7 @@ public:
             wunit.commit();
         }
 
-        MultiIndexBlockImpl indexer(&_opCtx, coll);
-        indexer.allowBackgroundBuilding();
-        indexer.allowInterruption();
+        MultiIndexBlock indexer;
         indexer.ignoreUniqueConstraint();
 
         const BSONObj spec = BSON("name"
@@ -148,11 +146,14 @@ public:
                                   << "background"
                                   << background);
 
-        ASSERT_OK(indexer.init(spec).getStatus());
-        ASSERT_OK(indexer.insertAllDocumentsInCollection());
+        ON_BLOCK_EXIT([&] { indexer.cleanUpAfterBuild(&_opCtx, coll); });
+
+        ASSERT_OK(indexer.init(&_opCtx, coll, spec, MultiIndexBlock::kNoopOnInitFn).getStatus());
+        ASSERT_OK(indexer.insertAllDocumentsInCollection(&_opCtx, coll));
 
         WriteUnitOfWork wunit(&_opCtx);
-        indexer.commit();
+        ASSERT_OK(indexer.commit(
+            &_opCtx, coll, MultiIndexBlock::kNoopOnCreateEachFn, MultiIndexBlock::kNoopOnCommitFn));
         wunit.commit();
     }
 };
@@ -171,25 +172,20 @@ public:
             coll = db->createCollection(&_opCtx, _ns);
 
             OpDebug* const nullOpDebug = nullptr;
-            coll->insertDocument(&_opCtx,
-                                 InsertStatement(BSON("_id" << 1 << "a"
-                                                            << "dup")),
-                                 nullOpDebug,
-                                 true)
-                .transitional_ignore();
-            coll->insertDocument(&_opCtx,
-                                 InsertStatement(BSON("_id" << 2 << "a"
-                                                            << "dup")),
-                                 nullOpDebug,
-                                 true)
-                .transitional_ignore();
+            ASSERT_OK(coll->insertDocument(&_opCtx,
+                                           InsertStatement(BSON("_id" << 1 << "a"
+                                                                      << "dup")),
+                                           nullOpDebug,
+                                           true));
+            ASSERT_OK(coll->insertDocument(&_opCtx,
+                                           InsertStatement(BSON("_id" << 2 << "a"
+                                                                      << "dup")),
+                                           nullOpDebug,
+                                           true));
             wunit.commit();
         }
 
-        MultiIndexBlockImpl indexer(&_opCtx, coll);
-        indexer.allowBackgroundBuilding();
-        indexer.allowInterruption();
-        // indexer.ignoreUniqueConstraint(); // not calling this
+        MultiIndexBlock indexer;
 
         const BSONObj spec = BSON("name"
                                   << "a"
@@ -204,8 +200,18 @@ public:
                                   << "background"
                                   << background);
 
-        ASSERT_OK(indexer.init(spec).getStatus());
-        const Status status = indexer.insertAllDocumentsInCollection();
+        ON_BLOCK_EXIT([&] { indexer.cleanUpAfterBuild(&_opCtx, coll); });
+
+        ASSERT_OK(indexer.init(&_opCtx, coll, spec, MultiIndexBlock::kNoopOnInitFn).getStatus());
+
+        auto desc =
+            coll->getIndexCatalog()->findIndexByName(&_opCtx, "a", true /* includeUnfinished */);
+        ASSERT(desc);
+
+        // Hybrid index builds check duplicates explicitly.
+        ASSERT_OK(indexer.insertAllDocumentsInCollection(&_opCtx, coll));
+
+        auto status = indexer.checkConstraints(&_opCtx);
         ASSERT_EQUALS(status.code(), ErrorCodes::DuplicateKey);
     }
 };
@@ -239,47 +245,11 @@ public:
                                        << "v"
                                        << static_cast<int>(kIndexVersion));
         // The call is interrupted because mayInterrupt == true.
-        ASSERT_TRUE(buildIndexInterrupted(indexInfo, true));
+        ASSERT_TRUE(buildIndexInterrupted(indexInfo));
         // only want to interrupt the index build
         getGlobalServiceContext()->unsetKillAllOperations();
         // The new index is not listed in the index catalog because the index build failed.
         ASSERT(!coll->getIndexCatalog()->findIndexByName(&_opCtx, "a_1"));
-    }
-};
-
-/** Index creation is not killed if mayInterrupt is false. */
-class InsertBuildIndexInterruptDisallowed : public IndexBuildBase {
-public:
-    void run() {
-        // Create a new collection.
-        Database* db = _ctx.db();
-        Collection* coll;
-        {
-            WriteUnitOfWork wunit(&_opCtx);
-            db->dropCollection(&_opCtx, _ns).transitional_ignore();
-            coll = db->createCollection(&_opCtx, _ns);
-            coll->getIndexCatalog()->dropAllIndexes(&_opCtx, true);
-            // Insert some documents.
-            int32_t nDocs = 1000;
-            OpDebug* const nullOpDebug = nullptr;
-            for (int32_t i = 0; i < nDocs; ++i) {
-                coll->insertDocument(&_opCtx, InsertStatement(BSON("a" << i)), nullOpDebug, true)
-                    .transitional_ignore();
-            }
-            wunit.commit();
-        }
-        // Request an interrupt.
-        getGlobalServiceContext()->setKillAllOperations();
-        BSONObj indexInfo = BSON("key" << BSON("a" << 1) << "ns" << _ns << "name"
-                                       << "a_1"
-                                       << "v"
-                                       << static_cast<int>(kIndexVersion));
-        // The call is not interrupted because mayInterrupt == false.
-        ASSERT_FALSE(buildIndexInterrupted(indexInfo, false));
-        // only want to interrupt the index build
-        getGlobalServiceContext()->unsetKillAllOperations();
-        // The new index is listed in the index catalog because the index build completed.
-        ASSERT(coll->getIndexCatalog()->findIndexByName(&_opCtx, "a_1"));
     }
 };
 
@@ -318,8 +288,7 @@ public:
                                        << "_id_"
                                        << "v"
                                        << static_cast<int>(kIndexVersion));
-        // The call is interrupted because mayInterrupt == true.
-        ASSERT_TRUE(buildIndexInterrupted(indexInfo, true));
+        ASSERT_TRUE(buildIndexInterrupted(indexInfo));
         // only want to interrupt the index build
         getGlobalServiceContext()->unsetKillAllOperations();
         // The new index is not listed in the index catalog because the index build failed.
@@ -327,65 +296,26 @@ public:
     }
 };
 
-/** Index creation is not killed when building the _id index if mayInterrupt is false. */
-class InsertBuildIdIndexInterruptDisallowed : public IndexBuildBase {
-public:
-    void run() {
-        // Skip the test if the storage engine doesn't support capped collections.
-        if (!getGlobalServiceContext()->getStorageEngine()->supportsCappedCollections()) {
-            return;
-        }
-
-        // Recreate the collection as capped, without an _id index.
-        Database* db = _ctx.db();
-        Collection* coll;
-        {
-            WriteUnitOfWork wunit(&_opCtx);
-            db->dropCollection(&_opCtx, _ns).transitional_ignore();
-            CollectionOptions options;
-            options.capped = true;
-            options.cappedSize = 10 * 1024;
-            coll = db->createCollection(&_opCtx, _ns, options);
-            coll->getIndexCatalog()->dropAllIndexes(&_opCtx, true);
-            // Insert some documents.
-            int32_t nDocs = 1000;
-            OpDebug* const nullOpDebug = nullptr;
-            for (int32_t i = 0; i < nDocs; ++i) {
-                coll->insertDocument(&_opCtx, InsertStatement(BSON("_id" << i)), nullOpDebug, true)
-                    .transitional_ignore();
-            }
-            wunit.commit();
-        }
-        // Request an interrupt.
-        getGlobalServiceContext()->setKillAllOperations();
-        BSONObj indexInfo = BSON("key" << BSON("_id" << 1) << "ns" << _ns << "name"
-                                       << "_id_"
-                                       << "v"
-                                       << static_cast<int>(kIndexVersion));
-        // The call is not interrupted because mayInterrupt == false.
-        ASSERT_FALSE(buildIndexInterrupted(indexInfo, false));
-        // only want to interrupt the index build
-        getGlobalServiceContext()->unsetKillAllOperations();
-        // The new index is listed in the index catalog because the index build succeeded.
-        ASSERT(coll->getIndexCatalog()->findIndexByName(&_opCtx, "_id_"));
-    }
-};
-
 Status IndexBuildBase::createIndex(const std::string& dbname, const BSONObj& indexSpec) {
-    MultiIndexBlockImpl indexer(&_opCtx, collection());
-    Status status = indexer.init(indexSpec).getStatus();
+    MultiIndexBlock indexer;
+    ON_BLOCK_EXIT([&] { indexer.cleanUpAfterBuild(&_opCtx, collection()); });
+    Status status =
+        indexer.init(&_opCtx, collection(), indexSpec, MultiIndexBlock::kNoopOnInitFn).getStatus();
     if (status == ErrorCodes::IndexAlreadyExists) {
         return Status::OK();
     }
     if (!status.isOK()) {
         return status;
     }
-    status = indexer.insertAllDocumentsInCollection();
+    status = indexer.insertAllDocumentsInCollection(&_opCtx, collection());
     if (!status.isOK()) {
         return status;
     }
     WriteUnitOfWork wunit(&_opCtx);
-    indexer.commit();
+    ASSERT_OK(indexer.commit(&_opCtx,
+                             collection(),
+                             MultiIndexBlock::kNoopOnCreateEachFn,
+                             MultiIndexBlock::kNoopOnCommitFn));
     wunit.commit();
     return Status::OK();
 }
@@ -767,13 +697,11 @@ public:
             // tests are disabled.
             add<InsertBuildIgnoreUnique<true>>();
             add<InsertBuildIgnoreUnique<false>>();
+            add<InsertBuildEnforceUnique<true>>();
+            add<InsertBuildEnforceUnique<false>>();
         }
-        add<InsertBuildEnforceUnique<true>>();
-        add<InsertBuildEnforceUnique<false>>();
         add<InsertBuildIndexInterrupt>();
-        add<InsertBuildIndexInterruptDisallowed>();
         add<InsertBuildIdIndexInterrupt>();
-        add<InsertBuildIdIndexInterruptDisallowed>();
         add<SameSpecDifferentOption>();
         add<SameSpecSameOptions>();
         add<DifferentSpecSameName>();

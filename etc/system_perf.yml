@@ -55,11 +55,37 @@ post:
           # these default values in the distro config in evergreen.
 
           if [ -d "${scons_cache_path}" ]; then
-              ${python|/opt/mongodbtoolchain/v2/bin/python2} buildscripts/scons_cache_prune.py --cache-dir ${scons_cache_path} --cache-size ${scons_cache_size|200} --prune-ratio ${scons_prune_ratio|0.8}
+              /opt/mongodbtoolchain/v3/bin/python2 buildscripts/scons_cache_prune.py --cache-dir ${scons_cache_path} --cache-size ${scons_cache_size|200} --prune-ratio ${scons_prune_ratio|0.8}
           fi
 
 functions:
+  "git get project": &git_get_project
+    command: git.get_project
+    params:
+      directory: src
+      revisions:  # for each module include revision as <module_name> : ${<module_name>_rev}
+        dsi: ${dsi_rev}
+        enterprise: ${enterprise_rev}
+        linkbench: ${linkbench_rev}
+        genny: ${genny_rev}
+        workloads: ${workloads_rev}
+        wtdevelop: ${wtdevelop_rev}
+
   "compile mongodb":
+    # We create a virtual environment with the Python dependencies for compiling the server
+    # installed.
+    - command: shell.exec
+      params:
+        working_dir: src
+        script: |
+          set -o errexit
+          set -o verbose
+
+          /opt/mongodbtoolchain/v3/bin/virtualenv --python /opt/mongodbtoolchain/v3/bin/python2 "${workdir}/venv"
+          source "${workdir}/venv/bin/activate"
+
+          python2 -m pip install -r etc/pip/compile-requirements.txt
+
     - command: shell.exec
       params:
         working_dir: src
@@ -84,14 +110,15 @@ functions:
 
           # This script converts the generated version string into a sanitized version string for
           # use by scons and uploading artifacts as well as information about for the scons cache.
-          MONGO_VERSION=$MONGO_VERSION USE_SCONS_CACHE=${use_scons_cache|false} ${python|/opt/mongodbtoolchain/v2/bin/python2} buildscripts/generate_compile_expansions.py --out compile_expansions.yml
+          source "${workdir}/venv/bin/activate"
+          MONGO_VERSION=$MONGO_VERSION USE_SCONS_CACHE=${use_scons_cache|false} python2 buildscripts/generate_compile_expansions.py --out compile_expansions.yml
     # Then we load the generated version data into the agent so we can use it in task definitions
     - command: expansions.update
       params:
         file: src/compile_expansions.yml
     - command: shell.exec
       params:
-        working_dir: src/src/mongo/gotools
+        working_dir: src/src/mongo/gotools/src/github.com/mongodb/mongo-tools
         script: |
           set -o verbose
           set -o errexit
@@ -99,16 +126,17 @@ functions:
           if [ "Windows_NT" = "$OS" ]; then
             set -o igncr
           fi;
-          sed -i.bak "s/built-without-version-string/$(git describe)/" common/options/options.go
-          sed -i.bak "s/built-without-git-spec/$(git rev-parse HEAD)/" common/options/options.go
-          . ./${set_tools_gopath|set_gopath.sh}
+          # set_goenv provides set_goenv(), print_ldflags() and print_tags() used below
+          . ./set_goenv.sh
+          GOROOT="" set_goenv || exit
+          go version
           build_tools="bsondump mongostat mongofiles mongoexport mongoimport mongorestore mongodump mongotop"
           if [ "${build_mongoreplay}" = "true" ]; then
-            build_tools="$build_tools mongoreplay"
+              build_tools="$build_tools mongoreplay"
           fi
           for i in $build_tools; do
-            ${gorootvars} go build ${tooltags|} -o "../../mongo-tools/$i${exe|}" $i/main/$i.go
-            "../../mongo-tools/$i${exe|}" --version
+              go build -ldflags "$(print_ldflags)" ${args} -tags "$(print_tags ${tooltags})" -o "../../../../../../mongo-tools/$i${exe|}" $i/main/$i.go
+              "../../../../../../mongo-tools/$i${exe|}" --version
           done
     - command: shell.exec
       params:
@@ -116,7 +144,8 @@ functions:
         script: |
           set -o errexit
           set -o verbose
-          ${python|/opt/mongodbtoolchain/v2/bin/python2} ./buildscripts/scons.py ${compile_flags|} ${scons_cache_args|} mongo${extension} --use-new-tools mongod${extension} mongos${extension} MONGO_VERSION=${version}
+          source "${workdir}/venv/bin/activate"
+          python2 ./buildscripts/scons.py ${compile_flags|} ${scons_cache_args|} mongo${extension} --use-new-tools mongod${extension} mongos${extension} MONGO_VERSION=${version}
           mkdir -p mongodb/bin
           mkdir -p mongodb/jstests/hooks
           mv mongo${extension|} mongodb/bin
@@ -149,19 +178,20 @@ functions:
         content_type: ${content_type|application/x-gzip}
         display_name: mongodb${compile-variant|}.tar.gz
 
-  # NOTE: Unlike evergreen.yml, there's no conditional here. If called, this is never a noop!
-  "use WiredTiger develop" :
+  "use WiredTiger develop":
     command: shell.exec
     params:
       working_dir: src
       script: |
         set -o errexit
         set -o verbose
-        cd src/third_party
-        for wtdir in api dist examples ext lang src test tools ; do
-          rm -rf wiredtiger/$wtdir
-          mv wtdevelop/$wtdir wiredtiger/
-        done
+        if [ "${compile-variant|}" = "-wtdevelop" ]; then
+          cd src/third_party
+          for wtdir in api dist examples ext lang src test tools ; do
+            rm -rf wiredtiger/$wtdir
+            mv wtdevelop/$wtdir wiredtiger/
+          done
+        fi
 
   "prepare environment":
     - command: shell.exec
@@ -171,14 +201,9 @@ functions:
           mkdir src
           mkdir work
     - command: manifest.load
-    - command: git.get_project
-      params:
-        directory: src
-        revisions: # for each module include revision as <module_name> : ${<module_name>_rev}
-          dsi: ${dsi_rev}
-          workloads: ${workloads_rev}
-          linkbench: ${linkbench_rev}
-          enterprise: ${enterprise_rev}
+    # Calling the git.get_project command here will clone the mongodb/mongo repository, as well as
+    # the repositories defined in the build variant's "modules" section.
+    - *git_get_project
     - command: shell.exec
       params:
         working_dir: work
@@ -194,30 +219,31 @@ functions:
           workloads_dir: ../src/workloads/workloads
           ycsb_dir: ../src/YCSB/YCSB
           linkbench_dir: ../src/linkbench/linkbench
+          genny_dir: ../src/genny/genny
           authentication: ${authentication}
           EOF
 
           cat > runtime.yml <<EOF
           # evergreen default expansions
-          is_patch: ${is_patch}
-          task_id: ${task_id}
-          task_name: ${task_name}
-          execution: ${execution}
+          branch_name: ${branch_name}
           build_id: ${build_id}
           build_variant: ${build_variant}
+          execution: ${execution}
+          is_patch: ${is_patch}
+          project: ${project}
+          project_dir: ${project_dir}
+          revision: ${revision}
+          task_id: ${task_id}
+          task_name: ${task_name}
           version_id: ${version_id}
           workdir: ${workdir}
-          revision: ${revision}
-          project_dir: ${project_dir}
-          branch_name: ${branch_name}
 
           # sys-perf expansions
-          # Shouldn't be needed: testList: ${testList}
+          dsi_rev: ${dsi_rev}
+          enterprise_rev: ${enterprise_rev}
           ext: ${ext}
           script_flags : ${script_flags}
-          dsi_rev: ${dsi_rev}
           workloads_rev: ${workloads_rev}
-          enterprise_rev: ${enterprise_rev}
           EOF
 
     - command: shell.exec
@@ -291,7 +317,12 @@ functions:
         script: |
           ../src/dsi/dsi/run-dsi detect-changes
     - command: shell.exec
-      type : test
+      params:
+        working_dir: work
+        script: |
+          ../src/dsi/dsi/run-dsi detect-outliers
+    - command: shell.exec
+      type: test
       params:
         working_dir: work
         script: |
@@ -309,38 +340,9 @@ tasks:
 - name: compile
   commands:
     - command: manifest.load
-    - command: git.get_project
-      params:
-        directory: src
+    - func: "git get project"
+    - func: "use WiredTiger develop" # noop if ${compile-variant|} is not "-wtdevelop"
     - func: "compile mongodb"
-
-- name: compile_enterprise
-  commands:
-    - command: manifest.load
-    - command: git.get_project
-      # In addition to mongo repo, checkout enterprise as module
-      params:
-        revisions:
-          enterprise: ${enterprise_rev}
-        directory: src
-    - func: "compile mongodb"
-      vars:
-        compile-variant: -enterprise
-
-- name: compile_wtdevelop
-  commands:
-    - command: manifest.load
-    - command: git.get_project
-      # In addition to mongo repo, checkout wtdevelop as module
-      params:
-        revisions:
-          wtdevelop: ${wtdevelop_rev}
-      params:
-        directory: src
-    - func: "use WiredTiger develop"
-    - func: "compile mongodb"
-      vars:
-        compile-variant: -wtdevelop
 
 - name: linkbench
   priority: 5
@@ -364,12 +366,34 @@ tasks:
     - func: "run test"
     - func: "analyze"
 
-- name: genny_workloads
+- name: insert_remove
   priority: 5
   commands:
     - func: "prepare environment"
       vars:
-        test: "genny_workloads"
+        test: "insert_remove"
+        authentication: disabled
+    - func: "deploy cluster"
+    - func: "run test"
+    - func: "analyze"
+
+- name: service_architecture_workloads
+  priority: 5
+  commands:
+    - func: "prepare environment"
+      vars:
+        test: "service_architecture_workloads"
+        authentication: disabled
+    - func: "deploy cluster"
+    - func: "run test"
+    - func: "analyze"
+
+- name: big_update
+  priority: 5
+  commands:
+    - func: "prepare environment"
+      vars:
+        test: "big_update"
         authentication: disabled
     - func: "deploy cluster"
     - func: "run test"
@@ -510,6 +534,17 @@ tasks:
     - func: "run test"
     - func: "analyze"
 
+- name: bestbuy_agg_out
+  priority: 5
+  commands:
+    - func: "prepare environment"
+      vars:
+        test: "bestbuy_agg_out"
+        authentication: disabled
+    - func: "deploy cluster"
+    - func: "run test"
+    - func: "analyze"
+
 - name: bestbuy_query
   priority: 5
   commands:
@@ -538,6 +573,17 @@ tasks:
     - func: "prepare environment"
       vars:
         test: "mongos"
+        authentication: disabled
+    - func: "deploy cluster"
+    - func: "run test"
+    - func: "analyze"
+
+- name: mongos_large_catalog_workloads
+  priority: 5
+  commands:
+    - func: "prepare environment"
+      vars:
+        test: "mongos_large_catalog"
         authentication: disabled
     - func: "deploy cluster"
     - func: "run test"
@@ -654,6 +700,11 @@ modules:
   prefix: dsi
   branch: master
 
+- name: genny
+  repo: git@github.com:10gen/genny.git
+  prefix: genny
+  branch: master
+
 - name: workloads
   repo: git@github.com:10gen/workloads.git
   prefix: workloads
@@ -681,14 +732,17 @@ buildvariants:
 
 # We are explicitly tracking the Linux 64 Amazon variant compile options from evergreen.yml.  If we can get
 # proper artifacts directly from that project, we should do that and remove these tasks.
-- name: compile-linux-64-amzn
+- &compile-linux-64-amzn
+  name: compile-linux-64-amzn
   display_name: Compile on Linux64 Amazon
   batchtime: 1440 # 24 hours
-  modules:
-    - wtdevelop
-  expansions:
-    compile_flags: --ssl MONGO_DISTMOD=linux-64-amzn-build -j$(grep -c ^processor /proc/cpuinfo) --release --variables-files=etc/scons/mongodbtoolchain_gcc.vars
-    gorootvars: GOROOT=/opt/go PATH="/opt/go/bin:$PATH"
+  expansions: &compile-linux-64-amzn-expansions
+    compile_flags: >-
+      --ssl
+      MONGO_DISTMOD=linux-64-amzn-build
+      -j$(grep -c ^processor /proc/cpuinfo)
+      --release
+      --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
     platform: linux
     project_dir: &project_dir dsi
     tooltags: ""
@@ -697,23 +751,34 @@ buildvariants:
       - "linux-64-amzn-build"
   tasks:
     - name: compile
-    - name: compile_wtdevelop
+
+- <<: *compile-linux-64-amzn
+  name: wtdevelop-compile-linux-64-amzn
+  display_name: WT Develop Compile on Linux64 Amazon
+  modules:
+    - wtdevelop
+  expansions:
+    <<: *compile-linux-64-amzn-expansions
+    compile-variant: -wtdevelop
 
 - name: compile-amazon2
   display_name: Compile on Amazon Linux 2
   modules:
     - enterprise
+  batchtime: 1440 # 24 hours
   expansions:
-    compile_flags: --ssl MONGO_DISTMOD=amazon2 -j$(grep -c ^processor /proc/cpuinfo) --release --variables-files=etc/scons/mongodbtoolchain_gcc.vars
-    gorootvars: GOROOT=/opt/go PATH="/opt/go/bin:$PATH"
-    platform: linux
-    project_dir: &project_dir dsi
-    tooltags: ""
-    use_scons_cache: true
+    <<: *compile-linux-64-amzn-expansions
+    compile_flags: >-
+      --ssl
+      MONGO_DISTMOD=amazon2
+      -j$(grep -c ^processor /proc/cpuinfo)
+      --release
+      --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+    compile-variant: -enterprise
   run_on:
       - "amazon2-build"
   tasks:
-    - name: compile_enterprise
+    - name: compile
 
 #######################################
 #         Linux Buildvariants         #
@@ -723,6 +788,7 @@ buildvariants:
   batchtime: 1440 # 24 hours
   modules: &modules
     - dsi
+    - genny
     - workloads
     - linkbench
   expansions:
@@ -747,13 +813,15 @@ buildvariants:
     - name: retryable_writes_workloads
     - name: non_sharded_workloads
     - name: bestbuy_agg
+    - name: bestbuy_agg_out
     - name: bestbuy_query
     - name: change_streams_throughput
     - name: change_streams_latency
     - name: snapshot_reads
     - name: linkbench
     - name: tpcc
-    - name: genny_workloads
+    - name: insert_remove
+    - name: big_update
 
 - name: linux-standalone
   display_name: Linux Standalone
@@ -774,14 +842,16 @@ buildvariants:
   tasks: &standalonetasks
     - name: industry_benchmarks
     - name: crud_workloads
-    - name: genny_workloads
+    - name: insert_remove
     - name: mixed_workloads
     - name: misc_workloads
     - name: map_reduce_workloads
     - name: smoke_test
     - name: non_sharded_workloads
     - name: bestbuy_agg
+    - name: bestbuy_agg_out
     - name: bestbuy_query
+    - name: big_update
 
 - name: linux-standalone-audit
   display_name: Linux Standalone Audit
@@ -798,7 +868,7 @@ buildvariants:
   run_on:
       - "rhel70-perf-single"
   depends_on:
-      - name: compile_enterprise
+      - name: compile
         variant: compile-amazon2
   tasks:
     - name: industry_benchmarks
@@ -824,13 +894,14 @@ buildvariants:
   tasks:
     - name: industry_benchmarks
     - name: crud_workloads
-    - name: genny_workloads
+    - name: insert_remove
     - name: mixed_workloads
     - name: misc_workloads
     - name: map_reduce_workloads
     - name: smoke_test
     - name: industry_benchmarks_wmajority
     - name: mongos_workloads
+    - name: mongos_large_catalog_workloads
     - name: change_streams_throughput
     - name: change_streams_latency
     - name: change_streams_multi_mongos
@@ -853,13 +924,16 @@ buildvariants:
         variant: compile-linux-64-amzn
   tasks: &shardlitetasks
     - name: bestbuy_agg
+    - name: bestbuy_agg_out
     - name: bestbuy_query
     - name: change_streams_latency
     - name: change_streams_throughput
     - name: industry_benchmarks
     - name: industry_benchmarks_wmajority
+    - name: linkbench
     - name: mixed_workloads
     - name: mongos_workloads
+    - name: mongos_large_catalog_workloads
     - name: move_chunk_workloads
     - name: move_chunk_waiting_workloads
     - name: retryable_writes_workloads
@@ -886,7 +960,8 @@ buildvariants:
     - name: industry_benchmarks
     - name: industry_benchmarks_secondary_reads
     - name: crud_workloads
-    - name: genny_workloads
+    - name: insert_remove
+    - name: service_architecture_workloads
     - name: mixed_workloads
     - name: misc_workloads
     - name: map_reduce_workloads
@@ -896,12 +971,15 @@ buildvariants:
     - name: secondary_performance
     - name: non_sharded_workloads
     - name: bestbuy_agg
+    - name: bestbuy_agg_out
     - name: bestbuy_query
     - name: change_streams_throughput
     - name: change_streams_latency
     - name: snapshot_reads
     - name: secondary_reads
+    - name: tpcc
     - name: linkbench
+    - name: big_update
 
 - name: linux-3-node-replSet-initialsync
   display_name: Linux 3-Node ReplSet Initial Sync
@@ -958,8 +1036,8 @@ buildvariants:
   run_on:
       - "rhel70-perf-single"
   depends_on:
-      - name: compile_wtdevelop
-        variant: compile-linux-64-amzn
+      - name: compile
+        variant: wtdevelop-compile-linux-64-amzn
   tasks: *1nodetasks
 
 - name: wtdevelop-standalone
@@ -977,8 +1055,8 @@ buildvariants:
   run_on:
       - "rhel70-perf-single"
   depends_on:
-      - name: compile_wtdevelop
-        variant: compile-linux-64-amzn
+      - name: compile
+        variant: wtdevelop-compile-linux-64-amzn
   tasks: *standalonetasks
 
 - name: wtdevelop-3-node-replSet
@@ -996,8 +1074,8 @@ buildvariants:
   run_on:
       - "rhel70-perf-replset"
   depends_on:
-      - name: compile_wtdevelop
-        variant: compile-linux-64-amzn
+      - name: compile
+        variant: wtdevelop-compile-linux-64-amzn
   tasks: *3nodetasks
 
 # Disabled: SERVER-35586
@@ -1016,6 +1094,6 @@ buildvariants:
 #  run_on:
 #      - "rhel70-perf-shard-lite"
 #  depends_on:
-#      - name: compile_wtdevelop
-#        variant: compile-linux-64-amzn
+#      - name: compile
+#        variant: wtdevelop-compile-linux-64-amzn
 #  tasks: *shardlitetasks

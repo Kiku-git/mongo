@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -53,7 +52,7 @@
 #include "mongo/db/exec/shard_filter.h"
 #include "mongo/db/exec/sort_key_generator.h"
 #include "mongo/db/exec/subplan.h"
-#include "mongo/db/exec/update.h"
+#include "mongo/db/exec/update_stage.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index/wildcard_access_method.h"
 #include "mongo/db/index_names.h"
@@ -71,7 +70,7 @@
 #include "mongo/db/query/planner_analysis.h"
 #include "mongo/db/query/planner_ixselect.h"
 #include "mongo/db/query/planner_wildcard_helpers.h"
-#include "mongo/db/query/query_knobs.h"
+#include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_planner.h"
 #include "mongo/db/query/query_planner_common.h"
 #include "mongo/db/query/query_settings.h"
@@ -181,6 +180,26 @@ IndexEntry indexEntryFromIndexCatalogEntry(OperationContext* opCtx,
             projExec};
 }
 
+CoreIndexInfo indexInfoFromIndexCatalogEntry(const IndexCatalogEntry& ice) {
+    auto desc = ice.descriptor();
+    invariant(desc);
+
+    auto accessMethod = ice.accessMethod();
+    invariant(accessMethod);
+
+    const ProjectionExecAgg* projExec = nullptr;
+    if (desc->getIndexType() == IndexType::INDEX_WILDCARD)
+        projExec = static_cast<const WildcardAccessMethod*>(accessMethod)->getProjectionExec();
+
+    return {desc->keyPattern(),
+            desc->getIndexType(),
+            desc->isSparse(),
+            IndexEntry::Identifier{desc->indexName()},
+            ice.getFilterExpression(),
+            ice.getCollator(),
+            projExec};
+}
+
 void fillOutPlannerParams(OperationContext* opCtx,
                           Collection* collection,
                           CanonicalQuery* canonicalQuery,
@@ -190,7 +209,7 @@ void fillOutPlannerParams(OperationContext* opCtx,
     std::unique_ptr<IndexCatalog::IndexIterator> ii =
         collection->getIndexCatalog()->getIndexIterator(opCtx, false);
     while (ii->more()) {
-        IndexCatalogEntry* ice = ii->next();
+        const IndexCatalogEntry* ice = ii->next();
         plannerParams->indices.push_back(
             indexEntryFromIndexCatalogEntry(opCtx, *ice, canonicalQuery));
     }
@@ -342,7 +361,7 @@ StatusWith<PrepareExecutionResult> prepareExecution(OperationContext* opCtx,
     if (descriptor && IDHackStage::supportsQuery(collection, *canonicalQuery)) {
         LOG(2) << "Using idhack: " << redact(canonicalQuery->toStringShort());
 
-        root = make_unique<IDHackStage>(opCtx, collection, canonicalQuery.get(), ws, descriptor);
+        root = make_unique<IDHackStage>(opCtx, canonicalQuery.get(), ws, descriptor);
 
         // Might have to filter out orphaned docs.
         if (plannerParams.options & QueryPlannerParams::INCLUDE_SHARD_FILTER) {
@@ -357,10 +376,7 @@ StatusWith<PrepareExecutionResult> prepareExecution(OperationContext* opCtx,
         // There might be a projection. The idhack stage will always fetch the full
         // document, so we don't support covered projections. However, we might use the
         // simple inclusion fast path.
-        if (NULL != canonicalQuery->getProj()) {
-            ProjectionStageParams params;
-            params.projObj = canonicalQuery->getProj()->getProjObj();
-            params.collator = canonicalQuery->getCollator();
+        if (nullptr != canonicalQuery->getProj()) {
 
             // Add a SortKeyGeneratorStage if there is a $meta sortKey projection.
             if (canonicalQuery->getProj()->wantSortKey()) {
@@ -377,13 +393,16 @@ StatusWith<PrepareExecutionResult> prepareExecution(OperationContext* opCtx,
                 canonicalQuery->getProj()->wantIndexKey() ||
                 canonicalQuery->getProj()->wantSortKey() ||
                 canonicalQuery->getProj()->hasDottedFieldPath()) {
-                params.fullExpression = canonicalQuery->root();
-                params.projImpl = ProjectionStageParams::NO_FAST_PATH;
+                root = make_unique<ProjectionStageDefault>(opCtx,
+                                                           canonicalQuery->getProj()->getProjObj(),
+                                                           ws,
+                                                           std::move(root),
+                                                           *canonicalQuery->root(),
+                                                           canonicalQuery->getCollator());
             } else {
-                params.projImpl = ProjectionStageParams::SIMPLE_DOC;
+                root = make_unique<ProjectionStageSimple>(
+                    opCtx, canonicalQuery->getProj()->getProjObj(), ws, std::move(root));
             }
-
-            root = make_unique<ProjectionStage>(opCtx, params, ws, root.release());
         }
 
         return PrepareExecutionResult(std::move(canonicalQuery), nullptr, std::move(root));
@@ -768,11 +787,12 @@ StatusWith<unique_ptr<PlanStage>> applyProjection(OperationContext* opCtx,
                 "Cannot use a $meta sortKey projection in findAndModify commands."};
     }
 
-    ProjectionStageParams params;
-    params.projObj = proj;
-    params.collator = cq->getCollator();
-    params.fullExpression = cq->root();
-    return {make_unique<ProjectionStage>(opCtx, params, ws, root.release())};
+    return {make_unique<ProjectionStageDefault>(opCtx,
+                                                proj,
+                                                ws,
+                                                std::unique_ptr<PlanStage>(root.release()),
+                                                *cq->root(),
+                                                cq->getCollator())};
 }
 
 }  // namespace
@@ -809,14 +829,14 @@ StatusWith<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDelete(
                       str::stream() << "Not primary while removing from " << nss.ns());
     }
 
-    DeleteStageParams deleteStageParams;
-    deleteStageParams.isMulti = request->isMulti();
-    deleteStageParams.fromMigrate = request->isFromMigrate();
-    deleteStageParams.isExplain = request->isExplain();
-    deleteStageParams.returnDeleted = request->shouldReturnDeleted();
-    deleteStageParams.sort = request->getSort();
-    deleteStageParams.opDebug = opDebug;
-    deleteStageParams.stmtId = request->getStmtId();
+    auto deleteStageParams = std::make_unique<DeleteStageParams>();
+    deleteStageParams->isMulti = request->isMulti();
+    deleteStageParams->fromMigrate = request->isFromMigrate();
+    deleteStageParams->isExplain = request->isExplain();
+    deleteStageParams->returnDeleted = request->shouldReturnDeleted();
+    deleteStageParams->sort = request->getSort();
+    deleteStageParams->opDebug = opDebug;
+    deleteStageParams->stmtId = request->getStmtId();
 
     unique_ptr<WorkingSet> ws = make_unique<WorkingSet>();
     const PlanExecutor::YieldPolicy policy = parsedDelete->yieldPolicy();
@@ -854,10 +874,10 @@ StatusWith<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDelete(
             request->getProj().isEmpty() && hasCollectionDefaultCollation) {
             LOG(2) << "Using idhack: " << redact(unparsedQuery);
 
-            PlanStage* idHackStage = new IDHackStage(
-                opCtx, collection, unparsedQuery["_id"].wrap(), ws.get(), descriptor);
+            auto idHackStage = std::make_unique<IDHackStage>(
+                opCtx, unparsedQuery["_id"].wrap(), ws.get(), descriptor);
             unique_ptr<DeleteStage> root = make_unique<DeleteStage>(
-                opCtx, deleteStageParams, ws.get(), collection, idHackStage);
+                opCtx, std::move(deleteStageParams), ws.get(), collection, idHackStage.release());
             return PlanExecutor::make(opCtx, std::move(ws), std::move(root), collection, policy);
         }
 
@@ -882,10 +902,11 @@ StatusWith<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDelete(
     unique_ptr<QuerySolution> querySolution = std::move(executionResult.getValue().querySolution);
     unique_ptr<PlanStage> root = std::move(executionResult.getValue().root);
 
-    deleteStageParams.canonicalQuery = cq.get();
+    deleteStageParams->canonicalQuery = cq.get();
 
     invariant(root);
-    root = make_unique<DeleteStage>(opCtx, deleteStageParams, ws.get(), collection, root.release());
+    root = make_unique<DeleteStage>(
+        opCtx, std::move(deleteStageParams), ws.get(), collection, root.release());
 
     if (!request->getProj().isEmpty()) {
         invariant(request->shouldReturnDeleted());
@@ -1338,8 +1359,12 @@ bool turnIxscanIntoDistinctIxscan(QuerySolution* soln,
     QuerySolutionNode* root = soln->root.get();
 
     // Root stage must be a project.
-    if (STAGE_PROJECTION != root->getType()) {
-        return false;
+    switch (root->getType()) {
+        default:
+            return false;
+        case STAGE_PROJECTION_DEFAULT:
+        case STAGE_PROJECTION_COVERED:
+        case STAGE_PROJECTION_SIMPLE:;
     }
 
     // Child should be either an ixscan or fetch.
@@ -1452,7 +1477,13 @@ bool turnIxscanIntoDistinctIxscan(QuerySolution* soln,
         // If there is a fetch node, then there is no need for the projection. The fetch node should
         // become the new root, with the distinct as its child. The PROJECT=>FETCH=>IXSCAN tree
         // should become FETCH=>DISTINCT_SCAN.
-        invariant(STAGE_PROJECTION == root->getType());
+        switch (root->getType()) {
+            default:
+                MONGO_UNREACHABLE;
+            case STAGE_PROJECTION_DEFAULT:
+            case STAGE_PROJECTION_COVERED:
+            case STAGE_PROJECTION_SIMPLE:;
+        }
         invariant(STAGE_FETCH == root->children[0]->getType());
         invariant(STAGE_IXSCAN == root->children[0]->children[0]->getType());
 
@@ -1469,7 +1500,13 @@ bool turnIxscanIntoDistinctIxscan(QuerySolution* soln,
         fetchNode->children[0] = distinctNode.release();
     } else {
         // There is no fetch node. The PROJECT=>IXSCAN tree should become PROJECT=>DISTINCT_SCAN.
-        invariant(STAGE_PROJECTION == root->getType());
+        switch (root->getType()) {
+            default:
+                MONGO_UNREACHABLE;
+            case STAGE_PROJECTION_DEFAULT:
+            case STAGE_PROJECTION_COVERED:
+            case STAGE_PROJECTION_SIMPLE:;
+        }
         invariant(STAGE_IXSCAN == root->children[0]->getType());
 
         // Take ownership of the index scan node, detaching it from the solution tree.
@@ -1496,7 +1533,7 @@ QueryPlannerParams fillOutPlannerParamsForDistinct(OperationContext* opCtx,
         collection->getIndexCatalog()->getIndexIterator(opCtx, false);
     auto query = parsedDistinct.getQuery()->getQueryRequest().getFilter();
     while (ii->more()) {
-        IndexCatalogEntry* ice = ii->next();
+        const IndexCatalogEntry* ice = ii->next();
         const IndexDescriptor* desc = ice->descriptor();
         if (desc->keyPattern().hasField(parsedDistinct.getKey())) {
             plannerParams.indices.push_back(
@@ -1504,7 +1541,7 @@ QueryPlannerParams fillOutPlannerParamsForDistinct(OperationContext* opCtx,
         } else if (desc->getIndexType() == IndexType::INDEX_WILDCARD && !query.isEmpty()) {
             // Check whether the $** projection captures the field over which we are distinct-ing.
             const auto* proj =
-                static_cast<WildcardAccessMethod*>(ice->accessMethod())->getProjectionExec();
+                static_cast<const WildcardAccessMethod*>(ice->accessMethod())->getProjectionExec();
             if (proj->applyProjectionToOneField(parsedDistinct.getKey())) {
                 plannerParams.indices.push_back(
                     indexEntryFromIndexCatalogEntry(opCtx, *ice, parsedDistinct.getQuery()));

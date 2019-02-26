@@ -16,14 +16,9 @@
            "expected " + rsConn.host + " to be a replica set connection string");
 
     function stepDownPrimary(rst) {
-        const awaitShell = startParallelShell(function() {
-            const error = assert.throws(function() {
-                const res = db.adminCommand({replSetStepDown: 60, force: true});
-                print("replSetStepDown did not throw exception but returned: " + tojson(res));
-            });
-            assert(isNetworkError(error),
-                   "replSetStepDown did not disconnect client; failed with " + tojson(error));
-        }, directConn.port);
+        const awaitShell = startParallelShell(
+            () => assert.commandWorked(db.adminCommand({replSetStepDown: 60, force: true})),
+            directConn.port);
 
         // We wait for the primary to transition to the SECONDARY state to ensure we're waiting
         // until after the parallel shell has started the replSetStepDown command and the server is
@@ -41,14 +36,17 @@
 
     const awaitShell = stepDownPrimary(rst);
 
-    // DBClientRS will continue to send command requests to the node it believed to be primary even
-    // after it stepped down so long as it hasn't closed its connection.
-    assert.commandFailedWithCode(rsConn.getDB("test").runCommand({find: "mycoll"}),
-                                 ErrorCodes.NotMasterNoSlaveOk);
-
-    // However, once the server responds back with a "not master" error, DBClientRS will cause the
-    // ReplicaSetMonitor to attempt to discover the current primary.
     const error = assert.throws(function() {
+        // DBClientRS will continue to send command requests to the node it believed to be primary
+        // even after it stepped down so long as it hasn't closed its connection. But this may also
+        // throw if the ReplicaSetMonitor's backgroud refresh has already noticed that this node is
+        // no longer primary.
+        assert.commandFailedWithCode(rsConn.getDB("test").runCommand({find: "mycoll"}),
+                                     ErrorCodes.NotMasterNoSlaveOk);
+
+        // However, once the server responds back with a "not master" error, DBClientRS will cause
+        // the ReplicaSetMonitor to attempt to discover the current primary, which will cause this
+        // to definitely throw.
         rsConn.getDB("test").runCommand({find: "mycoll"});
     });
     assert(/Could not find host/.test(error.toString()),

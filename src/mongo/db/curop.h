@@ -1,6 +1,3 @@
-// @file curop.h
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -87,11 +84,6 @@ public:
         void incrementKeysDeleted(long long n);
 
         /**
-         * Increments nmoved by n.
-         */
-        void incrementNmoved(long long n);
-
-        /**
          * Increments ninserted by n.
          */
         void incrementNinserted(long long n);
@@ -106,7 +98,7 @@ public:
          * field2, ..., with corresponding values value1, value2, ..., we will output a string in
          * the format: "<field1>:<value1> <field2>:<value2> ...".
          */
-        std::string report();
+        std::string report() const;
 
         boost::optional<long long> keysExamined;
         boost::optional<long long> docsExamined;
@@ -118,8 +110,6 @@ public:
         boost::optional<long long> ninserted;
         boost::optional<long long> ndeleted;
 
-        // Updates resulted in a move (moves are expensive).
-        boost::optional<long long> nmoved;
         // Number of index keys inserted.
         boost::optional<long long> keysInserted;
         // Number of index keys removed.
@@ -204,6 +194,9 @@ public:
 
     // Stores additive metrics.
     AdditiveMetrics additiveMetrics;
+
+    // Stores storage statistics.
+    std::shared_ptr<StorageStats> storageStats;
 };
 
 /**
@@ -244,6 +237,14 @@ public:
                                          Client* client,
                                          bool truncateOps,
                                          BSONObjBuilder* infoBuilder);
+
+    /**
+     * Serializes the fields of a GenericCursor which do not appear elsewhere in the currentOp
+     * output. If 'maxQuerySize' is given, truncates the cursor's originatingCommand but preserves
+     * the comment.
+     */
+    static BSONObj truncateAndSerializeGenericCursor(GenericCursor* cursor,
+                                                     boost::optional<size_t> maxQuerySize);
 
     /**
      * Constructs a nested CurOp at the top of the given "opCtx"'s CurOp stack.
@@ -511,17 +512,20 @@ public:
     void reportState(BSONObjBuilder* builder, bool truncateOps = false);
 
     /**
+     * Sets the message for this CurOp.
+     */
+    void setMessage_inlock(StringData message);
+
+    /**
      * Sets the message and the progress meter for this CurOp.
      *
      * While it is necessary to hold the lock while this method executes, the
      * "hit" and "finished" methods of ProgressMeter may be called safely from
      * the thread executing the operation without locking the Client.
      */
-    ProgressMeter& setMessage_inlock(const char* msg,
-                                     std::string name = "Progress",
-                                     unsigned long long progressMeterTotal = 0,
-                                     int secondsBetween = 3);
-
+    ProgressMeter& setProgress_inlock(StringData name,
+                                      unsigned long long progressMeterTotal = 0,
+                                      int secondsBetween = 3);
     /**
      * Gets the message for this CurOp.
      */

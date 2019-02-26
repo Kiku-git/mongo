@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -174,6 +173,7 @@ public:
      * single request + response or find tests.
      */
     void onCommand(OnCommandFunction func);
+    void onCommands(std::vector<OnCommandFunction> funcs);
     void onCommandWithMetadata(OnCommandWithMetadataFunction func);
     void onFindCommand(OnFindCommandFunction func);
     void onFindWithMetadataCommand(OnFindCommandWithMetadataFunction func);

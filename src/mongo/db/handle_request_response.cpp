@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -29,6 +28,7 @@
  */
 
 #include "mongo/db/handle_request_response.h"
+#include "mongo/base/transaction_error.h"
 
 namespace mongo {
 
@@ -44,24 +44,12 @@ BSONObj getErrorLabels(const OperationSessionInfoFromClient& sessionOptions,
     }
 
     // The errors that indicate the transaction fails without any persistent side-effect.
-    bool isTransientTransactionError = code == ErrorCodes::WriteConflict  //
-        || code == ErrorCodes::SnapshotUnavailable                        //
-        || code == ErrorCodes::LockTimeout                                //
-        || code == ErrorCodes::PreparedTransactionInProgress;
+    bool isTransient = isTransientTransactionError(
+        code,
+        hasWriteConcernError,
+        commandName == "commitTransaction" || commandName == "coordinateCommitTransaction");
 
-    if (commandName == "commitTransaction") {
-        // NoSuchTransaction is determined based on the data. It's safe to retry the whole
-        // transaction, only if the data cannot be rolled back.
-        isTransientTransactionError |=
-            code == ErrorCodes::NoSuchTransaction && !hasWriteConcernError;
-    } else {
-        bool isRetryable = ErrorCodes::isNotMasterError(code) || ErrorCodes::isShutdownError(code);
-        // For commands other than "commitTransaction", we know there's no side-effect for these
-        // errors, but it's not true for "commitTransaction" if a failover happens.
-        isTransientTransactionError |= isRetryable || code == ErrorCodes::NoSuchTransaction;
-    }
-
-    if (isTransientTransactionError) {
+    if (isTransient) {
         return BSON("errorLabels" << BSON_ARRAY("TransientTransactionError"));
     }
     return {};

@@ -1,6 +1,3 @@
-// drop_indexes.cpp
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -45,13 +42,11 @@
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/index_key_validate.h"
 #include "mongo/db/catalog/multi_index_block.h"
-#include "mongo/db/catalog/multi_index_block_impl.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/db_raii.h"
-#include "mongo/db/dbdirectclient.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index_builder.h"
 #include "mongo/db/logical_clock.h"
@@ -123,7 +118,6 @@ public:
                    const BSONObj& jsobj,
                    string& errmsg,
                    BSONObjBuilder& result) {
-        DBDirectClient db(opCtx);
 
         const NamespaceString toReIndexNss =
             CommandHelpers::parseNsCollectionRequired(dbname, jsobj);
@@ -195,27 +189,32 @@ public:
 
         result.appendNumber("nIndexesWas", all.size());
 
-        std::unique_ptr<MultiIndexBlock> indexer;
+        std::unique_ptr<MultiIndexBlock> indexer = std::make_unique<MultiIndexBlock>();
         StatusWith<std::vector<BSONObj>> swIndexesToRebuild(ErrorCodes::UnknownError,
                                                             "Uninitialized");
+
+        // The 'indexer' can throw, so ensure build cleanup occurs.
+        ON_BLOCK_EXIT([&] { indexer->cleanUpAfterBuild(opCtx, collection); });
 
         {
             WriteUnitOfWork wunit(opCtx);
             collection->getIndexCatalog()->dropAllIndexes(opCtx, true);
 
-            indexer = std::make_unique<MultiIndexBlockImpl>(opCtx, collection);
-
-            swIndexesToRebuild = indexer->init(all);
+            swIndexesToRebuild =
+                indexer->init(opCtx, collection, all, MultiIndexBlock::kNoopOnInitFn);
             uassertStatusOK(swIndexesToRebuild.getStatus());
             wunit.commit();
         }
 
-        auto status = indexer->insertAllDocumentsInCollection();
+        auto status = indexer->insertAllDocumentsInCollection(opCtx, collection);
         uassertStatusOK(status);
 
         {
             WriteUnitOfWork wunit(opCtx);
-            indexer->commit();
+            uassertStatusOK(indexer->commit(opCtx,
+                                            collection,
+                                            MultiIndexBlock::kNoopOnCreateEachFn,
+                                            MultiIndexBlock::kNoopOnCommitFn));
             wunit.commit();
         }
 

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -35,12 +34,44 @@
 
 namespace mongo {
 namespace biggie {
-namespace {
 
-using StringStore = RadixStore<std::string, std::string>;
 using value_type = StringStore::value_type;
 
 class RadixStoreTest : public unittest::Test {
+public:
+    virtual ~RadixStoreTest() {
+        checkValid(thisStore);
+        checkValid(parallelStore);
+        checkValid(otherStore);
+        checkValid(baseStore);
+        checkValid(expected);
+    }
+
+    StringStore::Head* getRootAddress() const {
+        return thisStore._root.get();
+    }
+
+    int getRootCount() const {
+        return thisStore._root.use_count();
+    }
+
+    bool hasPreviousVersion() const {
+        return thisStore._root->hasPreviousVersion();
+    }
+
+    void checkValid(StringStore& store) const {
+        size_t actualSize = 0;
+        size_t actualDataSize = 0;
+        std::string lastKey = "";
+        for (auto& item : store) {
+            ASSERT_GT(item.first, lastKey);
+            actualDataSize += item.second.size();
+            actualSize++;
+        }
+        ASSERT_EQ(store.size(), actualSize);
+        ASSERT_EQ(store.dataSize(), actualDataSize);
+    }
+
 protected:
     StringStore thisStore;
     StringStore parallelStore;
@@ -677,6 +708,21 @@ TEST_F(RadixStoreTest, UpdateTest) {
     ASSERT_TRUE(it2 == thisStore.end());
 }
 
+TEST_F(RadixStoreTest, DuplicateKeyTest) {
+    std::string msg1 = "Hello, world!";
+    std::string msg2 = msg1 + "!!";
+    value_type value1 = std::make_pair("msg", msg1);
+    value_type value2 = std::make_pair("msg", msg2);
+
+    ASSERT(thisStore.insert(value_type(value1)).second);
+    ASSERT_EQ(thisStore.size(), 1u);
+    ASSERT_EQ(thisStore.dataSize(), msg1.size());
+
+    ASSERT(!thisStore.insert(value_type(value2)).second);
+    ASSERT_EQ(thisStore.size(), 1u);
+    ASSERT_EQ(thisStore.dataSize(), msg1.size());
+}
+
 TEST_F(RadixStoreTest, UpdateLeafOnSharedNodeTest) {
     value_type value1 = std::make_pair("foo", "1");
     value_type value2 = std::make_pair("bar", "2");
@@ -891,7 +937,7 @@ TEST_F(RadixStoreTest, EraseNonLeafNodeWithSharedParent) {
 
     otherStore = thisStore;
 
-    StringStore::size_type success = otherStore.erase(value3.first);
+    bool success = otherStore.erase(value3.first);
 
     ASSERT_TRUE(success);
     ASSERT_EQ(thisStore.size(), StringStore::size_type(4));
@@ -1624,6 +1670,7 @@ TEST_F(RadixStoreTest, LowerBoundTest) {
     value_type value2 = std::make_pair("bad", "2");
     value_type value3 = std::make_pair("foo", "3");
     value_type value4 = std::make_pair("fools", "4");
+    value_type value5 = std::make_pair("baz", "5");
 
     thisStore.insert(value_type(value3));
     thisStore.insert(value_type(value1));
@@ -1660,6 +1707,10 @@ TEST_F(RadixStoreTest, LowerBoundTest) {
 
     iter = thisStore.lower_bound("three");
     ASSERT_TRUE(iter == thisStore.end());
+
+    thisStore.insert(value_type(value5));
+    iter = thisStore.lower_bound("bah");
+    ASSERT_TRUE(iter == thisStore.find("baz"));
 }
 
 TEST_F(RadixStoreTest, LowerBoundTestSmallerThanExistingPrefix) {
@@ -1744,7 +1795,7 @@ TEST_F(RadixStoreTest, BasicInsertFindDeleteNullCharacter) {
     ASSERT_TRUE(iter != thisStore.end());
     ASSERT_EQ(iter->first, value1.first);
 
-    ASSERT_EQ(thisStore.erase(std::string("ab\0", 3)), StringStore::size_type(1));
+    ASSERT_TRUE(thisStore.erase(std::string("ab\0", 3)));
     ASSERT_EQ(thisStore.size(), StringStore::size_type(1));
 
     iter = thisStore.find(std::string("ab\0", 3));
@@ -2259,27 +2310,187 @@ TEST_F(RadixStoreTest, SizeTest) {
     ASSERT_TRUE(thisStore.dataSize() == 10);
 }
 
-TEST_F(RadixStoreTest, SubtreeSizeTest) {
-    value_type value1 = std::make_pair("<index", ".");
-    value_type value2 = std::make_pair("<collection-1", "..");
-    value_type value3 = std::make_pair("<collection-2", "...");
+TEST_F(RadixStoreTest, CannotRevalidateExhaustedCursor) {
+    value_type value1 = std::make_pair("a", "1");
+    value_type value2 = std::make_pair("b", "2");
+
+    thisStore.insert(value_type(value1));
+
+    auto it = thisStore.begin();
+    it++;
+
+    // 'it' should be exhausted.
+    ASSERT_TRUE(it == thisStore.end());
+
+    thisStore.insert(value_type(value2));
+
+    // 'it' should still be exhausted even though we have a new tree version available.
+    ASSERT_TRUE(it == thisStore.end());
+}
+
+TEST_F(RadixStoreTest, AvoidComparingDifferentTreeVersions) {
+    value_type value = std::make_pair("a", "1");
+    value_type value2 = std::make_pair("b", "2");
+    value_type updated = std::make_pair("a", "10");
+
+    thisStore.insert(value_type(value));
+    thisStore.insert(value_type(value2));
+
+    {
+        auto it = thisStore.begin();
+
+        // Updating value1 causes a new tree to be made since it's shared with the cursor.
+        thisStore.update(value_type(updated));
+
+        auto it2 = thisStore.begin();
+
+        it.repositionIfChanged();
+        ASSERT_TRUE(it2 == it);
+    }
+
+    {
+        auto it = thisStore.begin();
+
+        // Updating value1 causes a new tree to be made since it's shared with the cursor.
+        thisStore.erase("a");
+
+        auto it2 = thisStore.begin();
+
+        it.repositionIfChanged();
+        ASSERT_TRUE(it2->first == "b");
+        ASSERT_TRUE(it2 == it);
+    }
+}
+
+TEST_F(RadixStoreTest, TreeUniqueness) {
+    value_type value1 = std::make_pair("a", "1");
+    value_type value2 = std::make_pair("b", "2");
+    value_type value3 = std::make_pair("c", "3");
+    value_type value4 = std::make_pair("d", "4");
+
+    auto rootAddr = getRootAddress();
+    thisStore.insert(value_type(value1));
+
+    // Neither the address or count should change.
+    ASSERT_EQUALS(rootAddr, getRootAddress());
+    ASSERT_EQUALS(1, getRootCount());
+
+    thisStore.insert(value_type(value2));
+    ASSERT_EQUALS(rootAddr, getRootAddress());
+    ASSERT_EQUALS(1, getRootCount());
+
+    {
+        // Make the tree shared.
+        auto it = thisStore.begin();
+        ASSERT_EQUALS(rootAddr, getRootAddress());
+        ASSERT_EQUALS(2, getRootCount());
+
+        // Inserting should make a copy of the tree.
+        thisStore.insert(value_type(value3));
+
+        // The root's address should change.
+        ASSERT_NOT_EQUALS(rootAddr, getRootAddress());
+        rootAddr = getRootAddress();
+
+        // Count should remain 2 because of _nextVersion
+        ASSERT_EQUALS(2, getRootCount());
+
+        // Inserting again shouldn't make a copy because the cursor hasn't been updated
+        thisStore.insert(value_type(value4));
+        ASSERT_EQUALS(rootAddr, getRootAddress());
+        ASSERT_EQUALS(2, getRootCount());
+
+        // Use the pointer to reposition it on the new tree.
+        *it;
+        ASSERT_EQUALS(rootAddr, getRootAddress());
+        ASSERT_EQUALS(2, getRootCount());
+
+        thisStore.erase("d");
+        ASSERT_NOT_EQUALS(rootAddr, getRootAddress());
+        rootAddr = getRootAddress();
+        ASSERT_EQUALS(2, getRootCount());
+    }
+
+    ASSERT_EQUALS(rootAddr, getRootAddress());
+    ASSERT_EQUALS(1, getRootCount());
+
+    thisStore.erase("c");
+    thisStore.erase("b");
+    thisStore.erase("a");
+
+    ASSERT_EQUALS(rootAddr, getRootAddress());
+    ASSERT_EQUALS(1, getRootCount());
+}
+
+TEST_F(RadixStoreTest, HasPreviousVersionFlagTest) {
+    value_type value1 = std::make_pair("a", "1");
+    value_type value2 = std::make_pair("b", "2");
+    value_type value3 = std::make_pair("c", "3");
+
+    ASSERT_FALSE(hasPreviousVersion());
+    thisStore.insert(value_type(value1));
+
+    {
+        auto it = thisStore.begin();
+        ASSERT_FALSE(hasPreviousVersion());
+    }
+
+    ASSERT_FALSE(hasPreviousVersion());
+
+    {
+        auto it = thisStore.begin();
+        ASSERT_FALSE(hasPreviousVersion());
+
+        thisStore.insert(value_type(value2));
+        ASSERT_TRUE(hasPreviousVersion());
+    }
+
+    ASSERT_FALSE(hasPreviousVersion());
+    thisStore.erase("b");
+
+    // Use multiple cursors
+    {
+        auto it = thisStore.begin();
+        auto it2 = thisStore.begin();
+        ASSERT_FALSE(hasPreviousVersion());
+
+        thisStore.insert(value_type(value2));
+        ASSERT_TRUE(hasPreviousVersion());
+
+        *it;  // Change to repositionIfChanged when merging (SERVER-38262 in master);
+        ASSERT_TRUE(hasPreviousVersion());
+
+        *it2;
+        ASSERT_FALSE(hasPreviousVersion());
+
+        thisStore.insert(value_type(value3));
+        ASSERT_TRUE(hasPreviousVersion());
+
+        *it;
+    }
+
+    ASSERT_FALSE(hasPreviousVersion());
+}
+
+TEST_F(RadixStoreTest, LowerBoundEndpoint) {
+    value_type value1 = std::make_pair("AAA", "1");
+    value_type value2 = std::make_pair("\xff\xff\xff", "2");
 
     thisStore.insert(value_type(value1));
     thisStore.insert(value_type(value2));
-    ASSERT_TRUE(thisStore.size() == 2);
-    ASSERT_TRUE(thisStore.dataSize() == 3);
 
-    ASSERT_TRUE(thisStore.subtreeSize("<collection-") == 1);
-    ASSERT_TRUE(thisStore.subtreeDataSize("<collection-") == 2);
+    auto it = thisStore.lower_bound("AAA");
+    ASSERT_TRUE(it->first == "AAA");
 
-    thisStore.insert(value_type(value3));
-    ASSERT_TRUE(thisStore.size() == 3);
-    ASSERT_TRUE(thisStore.dataSize() == 6);
+    it = thisStore.lower_bound("\xff\xff");
+    ASSERT_TRUE(it->first == "\xff\xff\xff");
 
-    ASSERT_TRUE(thisStore.subtreeSize("<collection-") == 2);
-    ASSERT_TRUE(thisStore.subtreeDataSize("<collection-") == 5);
+    it = thisStore.lower_bound("\xff\xff\xff");
+    ASSERT_TRUE(it->first == "\xff\xff\xff");
+
+    it = thisStore.lower_bound("\xff\xff\xff\xff");
+    ASSERT_TRUE(it == thisStore.end());
 }
 
-}  // namespace
-}  // mongo namespace
 }  // biggie namespace
+}  // mongo namespace

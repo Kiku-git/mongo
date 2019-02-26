@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -162,14 +161,19 @@ public:
         const std::string& path,
         const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
+    boost::optional<MergingLogic> mergingLogic() final {
+        return boost::none;
+    }
+
 protected:
     DocumentSourceMatch(const BSONObj& query,
                         const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
+    BSONObj _predicate;
+
 private:
     std::unique_ptr<MatchExpression> _expression;
 
-    BSONObj _predicate;
     const bool _isTextQuery;
 
     // Cache the dependencies so that we know what fields we need to serialize to BSON for matching.

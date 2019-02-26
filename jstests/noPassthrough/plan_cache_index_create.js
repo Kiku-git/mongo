@@ -11,17 +11,13 @@
 
     // Returns whether there is an active index build.
     function indexBuildIsRunning(testDB, indexName) {
-        const primaryIndexBuildFilter = {
+        const indexBuildFilter = {
             "command.createIndexes": collName,
             "command.indexes.0.name": indexName,
             "msg": /^Index Build/
         };
-        // TODO SERVER-34830: Add command name filter for secondaries once available.
-        const secondaryIndexBuildFilter = {"command.name": indexName, "msg": /^Index Build/};
-        const curOp = testDB.getSiblingDB("admin").aggregate([
-            {$currentOp: {}},
-            {$match: {$or: [primaryIndexBuildFilter, secondaryIndexBuildFilter]}}
-        ]);
+        const curOp =
+            testDB.getSiblingDB("admin").aggregate([{$currentOp: {}}, {$match: indexBuildFilter}]);
         return curOp.hasNext();
     }
 
@@ -40,7 +36,7 @@
         return cmdRes.plans[0].reason.stats.inputStage.indexName;
     }
 
-    function runTest({readDB, writeDB}) {
+    function runTest({rst, readDB, writeDB}) {
         const readColl = readDB.getCollection(collName);
         const writeColl = writeDB.getCollection(collName);
 
@@ -61,6 +57,8 @@
             ],
             writeConcern: {w: "majority"}
         }));
+
+        rst.waitForAllIndexBuildsToFinish(dbName, collName);
 
         //
         // Confirm that the plan cache is reset on start and completion of a background index build.
@@ -106,6 +104,8 @@
         assert.soon(() => !indexBuildIsRunning(readDB, "most_selective"));
         createIdxShell({checkExitSuccess: true});
 
+        rst.waitForAllIndexBuildsToFinish(dbName, collName);
+
         // Confirm that there are no cached plans post index build.
         assertDoesNotHaveCachedPlan(readColl, filter);
 
@@ -134,6 +134,8 @@
             writeConcern: {w: "majority"}
         }));
 
+        rst.waitForAllIndexBuildsToFinish(dbName, collName);
+
         // Confirm that there are no cached plans post index build.
         assertDoesNotHaveCachedPlan(readColl, filter);
 
@@ -153,8 +155,8 @@
     const primaryDB = rst.getPrimary().getDB(dbName);
     const secondaryDB = rst.getSecondary().getDB(dbName);
 
-    runTest({readDB: primaryDB, writeDB: primaryDB});
-    runTest({readDB: secondaryDB, writeDB: primaryDB});
+    runTest({rst: rst, readDB: primaryDB, writeDB: primaryDB});
+    runTest({rst: rst, readDB: secondaryDB, writeDB: primaryDB});
 
     rst.stopSet();
 })();

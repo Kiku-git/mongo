@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -47,6 +46,7 @@
 #include "mongo/transport/service_executor.h"
 #include "mongo/transport/session.h"
 #include "mongo/util/clock_source.h"
+#include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/periodic_runner.h"
 #include "mongo/util/tick_source.h"
@@ -355,17 +355,11 @@ public:
     /**
      * Kills the operation "opCtx" with the code "killCode", if opCtx has not already been killed.
      * Caller must own the lock on opCtx->getClient, and opCtx->getServiceContext() must be the same
-     *as
-     * this service context.
+     * as this service context. WithLock expects that the client lock be passed in.
      **/
-    void killOperation(OperationContext* opCtx,
+    void killOperation(WithLock,
+                       OperationContext* opCtx,
                        ErrorCodes::Error killCode = ErrorCodes::Interrupted);
-
-    /**
-     * Kills all operations that have a Client that is associated with an incoming user
-     * connection, except for the one associated with opCtx.
-     */
-    void killAllUserOperations(const OperationContext* opCtx, ErrorCodes::Error killCode);
 
     /**
      * Registers a listener to be notified each time an op is killed.
@@ -427,10 +421,23 @@ public:
      */
     void waitForStartupComplete();
 
+    /**
+     * Wait for all clients to complete and unregister themselves. Shutting-down, unmanaged threads
+     * may potentially be unable to acquire the service context mutex before the service context
+     * itself does on destruction.
+     * Used for testing.
+     */
+    void waitForClientsToFinish();
+
     /*
      * Marks initialization as complete and all transport layers as started.
      */
     void notifyStartupComplete();
+
+    /*
+     * Returns the number of active client operations
+     */
+    int getActiveClientOperations();
 
     /**
      * Set the OpObserver.
@@ -503,6 +510,11 @@ public:
      */
     void setServiceExecutor(std::unique_ptr<transport::ServiceExecutor> exec);
 
+    /**
+     * Creates a delayed execution baton with basic functionality
+     */
+    BatonHandle makeBaton(OperationContext* opCtx) const;
+
 private:
     class ClientObserverHolder {
     public:
@@ -557,6 +569,7 @@ private:
      */
     std::vector<ClientObserverHolder> _clientObservers;
     ClientSet _clients;
+    stdx::condition_variable _clientsEmptyCondVar;
 
     /**
      * The registered OpObserver.
@@ -583,7 +596,7 @@ private:
     std::vector<KillOpListenerInterface*> _killOpListeners;
 
     // Counter for assigning operation ids.
-    AtomicUInt32 _nextOpId{1};
+    AtomicWord<unsigned> _nextOpId{1};
 
     bool _startupComplete = false;
     stdx::condition_variable _startupCompleteCondVar;

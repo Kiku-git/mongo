@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -50,12 +49,7 @@
 
 namespace mongo {
 
-const Seconds KeysCollectionManager::kKeyValidInterval{3 * 30 * 24 * 60 * 60};  // ~3 months
 const std::string KeysCollectionManager::kKeyManagerPurposeString = "HMAC";
-
-MONGO_EXPORT_STARTUP_SERVER_PARAMETER(KeysRotationIntervalSec,
-                                      int,
-                                      KeysCollectionManager::kKeyValidInterval.count());
 
 namespace {
 
@@ -157,7 +151,7 @@ void KeysCollectionManager::startMonitoring(ServiceContext* service) {
     _keysCache.resetCache();
     _refresher.setFunc([this](OperationContext* opCtx) { return _keysCache.refresh(opCtx); });
     _refresher.start(
-        service, str::stream() << "monitoring keys for " << _purpose, _keyValidForInterval);
+        service, str::stream() << "monitoring-keys-for-" << _purpose, _keyValidForInterval);
 }
 
 void KeysCollectionManager::stopMonitoring() {

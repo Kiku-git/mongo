@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -244,8 +243,10 @@ Status UpdateDriver::update(StringData matchedField,
                             mutablebson::Document* doc,
                             bool validateForStorage,
                             const FieldRefSet& immutablePaths,
+                            bool isInsert,
                             BSONObj* logOpRec,
-                            bool* docWasModified) {
+                            bool* docWasModified,
+                            FieldRefSetWithStorage* modifiedPaths) {
     // TODO: assert that update() is called at most once in a !_multi case.
 
     _affectIndices = (isDocReplacement() && (_indexedFields != NULL));
@@ -255,10 +256,14 @@ Status UpdateDriver::update(StringData matchedField,
 
     UpdateNode::ApplyParams applyParams(doc->root(), immutablePaths);
     applyParams.matchedField = matchedField;
-    applyParams.insert = _insert;
+    applyParams.insert = isInsert;
     applyParams.fromOplogApplication = _fromOplogApplication;
     applyParams.validateForStorage = validateForStorage;
     applyParams.indexData = _indexedFields;
+    applyParams.modifiedPaths = modifiedPaths;
+    // The supplied 'modifiedPaths' must be an empty set.
+    invariant(!modifiedPaths || modifiedPaths->empty());
+
     if (_logOp && logOpRec) {
         applyParams.logBuilder = &logBuilder;
     }

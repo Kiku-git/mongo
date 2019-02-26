@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -39,6 +38,7 @@
 #include "mongo/db/storage/wiredtiger/wiredtiger_record_store.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_session_cache.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
+#include "mongo/unittest/death_test.h"
 #include "mongo/unittest/temp_dir.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/clock_source_mock.h"
@@ -74,7 +74,8 @@ public:
 
     virtual std::unique_ptr<RecordStore> createRecordStore(OperationContext* opCtx,
                                                            const std::string& ns) final {
-        std::string uri = "table:" + ns;
+        std::string ident = ns;
+        std::string uri = WiredTigerKVEngine::kTableUriPrefix + ns;
         const bool prefixed = false;
         StatusWith<std::string> result = WiredTigerRecordStore::generateCreateString(
             kWiredTigerEngineName, ns, CollectionOptions(), "", prefixed);
@@ -92,7 +93,7 @@ public:
 
         WiredTigerRecordStore::Params params;
         params.ns = ns;
-        params.uri = uri;
+        params.ident = ident;
         params.engineName = kWiredTigerEngineName;
         params.isCapped = false;
         params.isEphemeral = false;
@@ -536,7 +537,7 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, ReadOnceCursorsAreNotCached) {
     auto ru = WiredTigerRecoveryUnit::get(opCtx);
 
     std::unique_ptr<RecordStore> rs(harnessHelper->createRecordStore(opCtx, "test.read_once"));
-    auto uri = rs->getIdent();
+    auto uri = dynamic_cast<WiredTigerRecordStore*>(rs.get())->getURI();
 
     // Insert a record.
     ru->beginUnitOfWork(opCtx);
@@ -580,5 +581,56 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, ReadOnceCursorsAreNotCached) {
 
     ASSERT(ru->getReadOnce());
 }
+
+TEST_F(WiredTigerRecoveryUnitTestFixture, CommitWithDurableTimestamp) {
+    auto opCtx = clientAndCtx1.second.get();
+    Timestamp ts1(3, 3);
+    Timestamp ts2(5, 5);
+
+    opCtx->recoveryUnit()->setCommitTimestamp(ts1);
+    opCtx->recoveryUnit()->setDurableTimestamp(ts2);
+    auto durableTs = opCtx->recoveryUnit()->getDurableTimestamp();
+    ASSERT_EQ(ts2, durableTs);
+
+    {
+        WriteUnitOfWork wuow(opCtx);
+        wuow.commit();
+    }
+}
+
+TEST_F(WiredTigerRecoveryUnitTestFixture, CommitWithoutDurableTimestamp) {
+    auto opCtx = clientAndCtx1.second.get();
+    Timestamp ts1(5, 5);
+    opCtx->recoveryUnit()->setCommitTimestamp(ts1);
+
+    {
+        WriteUnitOfWork wuow(opCtx);
+        wuow.commit();
+    }
+}
+
+DEATH_TEST_F(WiredTigerRecoveryUnitTestFixture,
+             SetDurableTimestampTwice,
+             "Trying to reset durable timestamp when it was already set.") {
+    auto opCtx = clientAndCtx1.second.get();
+    Timestamp ts1(3, 3);
+    Timestamp ts2(5, 5);
+    opCtx->recoveryUnit()->setDurableTimestamp(ts1);
+    opCtx->recoveryUnit()->setDurableTimestamp(ts2);
+}
+
+DEATH_TEST_F(WiredTigerRecoveryUnitTestFixture,
+             RollbackHandlerAbortsOnTxnOpen,
+             "rollback handler reopened transaction") {
+    auto opCtx = clientAndCtx1.second.get();
+    auto ru = WiredTigerRecoveryUnit::get(opCtx);
+    ASSERT(ru->getSession());
+    {
+        WriteUnitOfWork wuow(opCtx);
+        ru->assertInActiveTxn();
+        ru->onRollback([ru] { ru->getSession(); });
+    }
+}
+
 }  // namespace
 }  // namespace mongo

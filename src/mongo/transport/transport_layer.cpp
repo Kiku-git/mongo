@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -31,10 +30,19 @@
 #include "mongo/platform/basic.h"
 
 #include "mongo/base/status.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/platform/atomic_word.h"
+#include "mongo/transport/baton.h"
 #include "mongo/transport/transport_layer.h"
 
 namespace mongo {
 namespace transport {
+
+namespace {
+
+AtomicWord<uint64_t> reactorTimerIdCounter(0);
+
+}  // namespace
 
 const Status TransportLayer::SessionUnknownStatus =
     Status(ErrorCodes::TransportSessionUnknown, "TransportLayer does not own the Session.");
@@ -47,6 +55,8 @@ const Status TransportLayer::TicketSessionUnknownStatus = Status(
 
 const Status TransportLayer::TicketSessionClosedStatus = Status(
     ErrorCodes::TransportSessionClosed, "Operation attempted on a closed transport Session.");
+
+ReactorTimer::ReactorTimer() : _id(reactorTimerIdCounter.addAndFetch(1)) {}
 
 }  // namespace transport
 }  // namespace mongo

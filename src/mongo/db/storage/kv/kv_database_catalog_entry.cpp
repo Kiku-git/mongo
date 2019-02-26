@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -49,7 +48,8 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/log.h"
 
-auto mongo::defaultDatabaseCatalogEntryFactory(const StringData name, KVStorageEngine* const engine)
+auto mongo::defaultDatabaseCatalogEntryFactory(const StringData name,
+                                               KVStorageEngineInterface* const engine)
     -> std::unique_ptr<KVDatabaseCatalogEntryBase> {
     return stdx::make_unique<KVDatabaseCatalogEntry>(name, engine);
 }
@@ -91,6 +91,10 @@ IndexAccessMethod* KVDatabaseCatalogEntry::getIndex(OperationContext* opCtx,
         return new WildcardAccessMethod(index, sdi);
 
     log() << "Can't find index for keyPattern " << desc->keyPattern();
-    MONGO_UNREACHABLE;
+
+    // We should never reach this point.
+    bool foundIndex = false;
+    fassert(51072, foundIndex);
+    return nullptr;
 }
 }  // namespace mongo

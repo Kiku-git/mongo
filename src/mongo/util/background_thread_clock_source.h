@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -75,8 +74,8 @@ private:
     int64_t _updateCurrent_inlock();
 
     const std::unique_ptr<ClockSource> _clockSource;
-    AtomicInt64 _current{0};           // 0 if _timer is paused due to idleness.
-    AtomicBool _timerWillPause{true};  // If true when _timer wakes up, it will pause.
+    AtomicWord<long long> _current{0};       // 0 if _timer is paused due to idleness.
+    AtomicWord<bool> _timerWillPause{true};  // If true when _timer wakes up, it will pause.
 
     const Milliseconds _granularity;
 

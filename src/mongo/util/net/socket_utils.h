@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -37,7 +36,7 @@ namespace mongo {
 
 void setSocketKeepAliveParams(int sock,
                               unsigned int maxKeepIdleSecs = 300,
-                              unsigned int maxKeepIntvlSecs = 300);
+                              unsigned int maxKeepIntvlSecs = 1);
 
 std::string makeUnixSockPath(int port);
 

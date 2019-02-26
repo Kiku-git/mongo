@@ -1,6 +1,3 @@
-// @file time_support.h
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -36,6 +33,7 @@
 #include <boost/date_time/posix_time/posix_time_types.hpp>
 #include <ctime>
 #include <iosfwd>
+#include <limits>
 #include <string>
 
 #include "mongo/base/status_with.h"
@@ -70,7 +68,7 @@ public:
      * The minimum representable Date_t.
      */
     static constexpr Date_t min() {
-        return fromMillisSinceEpoch(0);
+        return fromMillisSinceEpoch(std::numeric_limits<long long>::min());
     }
 
     /**
@@ -178,7 +176,7 @@ public:
 
     template <typename Duration>
     Date_t& operator+=(Duration d) {
-        millis += duration_cast<Milliseconds>(d).count();
+        *this = *this + d;
         return *this;
     }
 
@@ -189,9 +187,7 @@ public:
 
     template <typename Duration>
     Date_t operator+(Duration d) const {
-        Date_t result = *this;
-        result += d;
-        return result;
+        return Date_t::fromDurationSinceEpoch(toDurationSinceEpoch() + d);
     }
 
     template <typename Duration>
@@ -313,28 +309,29 @@ void sleepFor(DurationType time) {
 
 class Backoff {
 public:
-    Backoff(int maxSleepMillis, int resetAfter)
-        : _maxSleepMillis(maxSleepMillis),
-          _resetAfterMillis(maxSleepMillis + resetAfter),  // Don't reset < the max sleep
+    Backoff(Milliseconds maxSleep, Milliseconds resetAfter)
+        : _maxSleepMillis(durationCount<Milliseconds>(maxSleep)),
+          _resetAfterMillis(
+              durationCount<Milliseconds>(resetAfter)),  // Don't reset < the max sleep
           _lastSleepMillis(0),
           _lastErrorTimeMillis(0) {}
 
-    void nextSleepMillis();
+    Milliseconds nextSleep();
 
     /**
      * testing-only function. used in dbtests/basictests.cpp
      */
-    int getNextSleepMillis(int lastSleepMillis,
+    int getNextSleepMillis(long long lastSleepMillis,
                            unsigned long long currTimeMillis,
                            unsigned long long lastErrorTimeMillis) const;
 
 private:
     // Parameters
-    int _maxSleepMillis;
-    int _resetAfterMillis;
+    long long _maxSleepMillis;
+    long long _resetAfterMillis;
 
     // Last sleep information
-    int _lastSleepMillis;
+    long long _lastSleepMillis;
     unsigned long long _lastErrorTimeMillis;
 };
 

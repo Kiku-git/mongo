@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -35,7 +34,6 @@
 
 #include "mongo/base/string_data.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/platform/hash_namespace.h"
 
 namespace mongo {
 
@@ -174,17 +172,17 @@ public:
 
     std::string toString() const;
 
-    inline size_t hash() const {
-        // TODO: Choose a better hash function.
-        return MONGO_HASH_NAMESPACE::hash<std::string>()(_ns.ns()) ^ _matchType;
-    }
-
     bool operator==(const ResourcePattern& other) const {
         if (_matchType != other._matchType)
             return false;
         if (_ns != other._ns)
             return false;
         return true;
+    }
+
+    template <typename H>
+    friend H AbslHashValue(H h, const ResourcePattern& rp) {
+        return H::combine(std::move(h), rp._ns, rp._matchType);
     }
 
 private:
@@ -208,12 +206,3 @@ private:
 std::ostream& operator<<(std::ostream& os, const ResourcePattern& pattern);
 
 }  // namespace mongo
-
-MONGO_HASH_NAMESPACE_START
-template <>
-struct hash<mongo::ResourcePattern> {
-    size_t operator()(const mongo::ResourcePattern& resource) const {
-        return resource.hash();
-    }
-};
-MONGO_HASH_NAMESPACE_END

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -194,11 +193,24 @@ void TransactionMetricsObserver::onAbortInactive(
     }
 }
 
-void TransactionMetricsObserver::onTransactionOperation(Client* client,
-                                                        OpDebug::AdditiveMetrics additiveMetrics) {
+void TransactionMetricsObserver::onTransactionOperation(
+    Client* client,
+    OpDebug::AdditiveMetrics additiveMetrics,
+    std::shared_ptr<StorageStats> storageStats) {
     // Add the latest operation stats to the aggregate OpDebug::AdditiveMetrics object stored in the
     // SingleTransactionStats instance on the TransactionMetricsObserver.
     _singleTransactionStats.getOpDebug()->additiveMetrics.add(additiveMetrics);
+
+    // If there are valid storage statistics for this operation, put those in the
+    // SingleTransactionStats instance either by creating a new storageStats instance or by adding
+    // into an existing storageStats instance stored in SingleTransactionStats.
+    if (storageStats) {
+        if (!_singleTransactionStats.getOpDebug()->storageStats) {
+            _singleTransactionStats.getOpDebug()->storageStats = storageStats->getCopy();
+        } else {
+            *_singleTransactionStats.getOpDebug()->storageStats += *storageStats;
+        }
+    }
 
     // Update the LastClientInfo object stored in the SingleTransactionStats instance on the
     // TransactionMetricsObserver with this Client's information. This is the last client that ran a

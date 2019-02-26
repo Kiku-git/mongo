@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -43,6 +42,7 @@ namespace mongo {
 OperationSessionInfoFromClient initializeOperationSessionInfo(OperationContext* opCtx,
                                                               const BSONObj& requestBody,
                                                               bool requiresAuth,
+                                                              bool attachToOpCtx,
                                                               bool isReplSetMemberOrMongos,
                                                               bool supportsDocLocking) {
     auto osi = OperationSessionInfoFromClient::parse("OperationSessionInfo"_sd, requestBody);
@@ -60,16 +60,20 @@ OperationSessionInfoFromClient initializeOperationSessionInfo(OperationContext* 
                 !osi.getAutocommit());
         uassert(
             50889, "It is illegal to provide a txnNumber for this command", !osi.getTxnNumber());
-        return {};
     }
 
-    {
+    if (auto authSession = AuthorizationSession::get(opCtx->getClient())) {
         // If we're using the localhost bypass, and the client hasn't authenticated,
         // logical sessions are disabled. A client may authenticate as the __sytem user,
         // or as an externally authorized user.
-        AuthorizationSession* authSession = AuthorizationSession::get(opCtx->getClient());
-        if (authSession && authSession->isUsingLocalhostBypass() &&
-            !authSession->isAuthenticated()) {
+        if (authSession->isUsingLocalhostBypass() && !authSession->isAuthenticated()) {
+            return {};
+        }
+
+        // Do not initialize lsid when auth is enabled and no user is logged in since
+        // there is no sensible uid that can be assigned to it.
+        if (AuthorizationManager::get(opCtx->getServiceContext())->isAuthEnabled() &&
+            !authSession->isAuthenticated() && !requiresAuth) {
             return {};
         }
     }
@@ -84,7 +88,15 @@ OperationSessionInfoFromClient initializeOperationSessionInfo(OperationContext* 
             return {};
         }
 
-        opCtx->setLogicalSessionId(makeLogicalSessionId(osi.getSessionId().get(), opCtx));
+        // If osi lsid includes the uid, makeLogicalSessionId will also verify that the hash
+        // matches with the current user logged in.
+        auto lsid = makeLogicalSessionId(osi.getSessionId().get(), opCtx);
+
+        if (!attachToOpCtx) {
+            return {};
+        }
+
+        opCtx->setLogicalSessionId(std::move(lsid));
         uassertStatusOK(lsc->vivify(opCtx, opCtx->getLogicalSessionId().get()));
     } else {
         uassert(ErrorCodes::InvalidOptions,

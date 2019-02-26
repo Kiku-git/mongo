@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -120,13 +119,13 @@ public:
         if (targetHost.isOK()) {
             _credentials = _clientCache->getCachedSecrets(targetHost.getValue(), presecrets);
             if (!_credentials) {
-                _credentials = presecrets;
+                _credentials = scram::Secrets<HashBlock>(presecrets);
 
                 _clientCache->setCachedSecrets(
                     std::move(targetHost.getValue()), std::move(presecrets), _credentials);
             }
         } else {
-            _credentials = presecrets;
+            _credentials = scram::Secrets<HashBlock>(presecrets);
         }
 
         return _credentials.generateClientProof(_authMessage);
@@ -140,7 +139,7 @@ public:
         if (std::is_same<SHA1Block, HashBlock>::value) {
             return val.toString();
         } else {
-            return mongo::saslPrep(val);
+            return icuSaslPrep(val);
         }
     }
 

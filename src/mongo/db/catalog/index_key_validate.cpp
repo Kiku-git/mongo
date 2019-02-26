@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -28,6 +27,8 @@
  *    it in the license file.
  */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kIndex
+
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/catalog/index_key_validate.h"
@@ -47,9 +48,10 @@
 #include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
-#include "mongo/db/query/query_knobs.h"
+#include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/service_context.h"
 #include "mongo/util/fail_point_service.h"
+#include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/represent_as.h"
 
@@ -237,6 +239,20 @@ Status validateKeyPattern(const BSONObj& key, IndexDescriptor::IndexVersion inde
     return Status::OK();
 }
 
+BSONObj removeUnknownFields(const BSONObj& indexSpec) {
+    BSONObjBuilder builder;
+    for (const auto& indexSpecElem : indexSpec) {
+        StringData fieldName = indexSpecElem.fieldNameStringData();
+        if (allowedFieldNames.count(fieldName)) {
+            builder.append(indexSpecElem);
+        } else {
+            warning() << "Removing field '" << redact(fieldName)
+                      << "' from index spec: " << redact(indexSpec);
+        }
+    }
+    return builder.obj();
+}
+
 StatusWith<BSONObj> validateIndexSpec(
     OperationContext* opCtx,
     const BSONObj& indexSpec,
@@ -326,7 +342,7 @@ StatusWith<BSONObj> validateIndexSpec(
                                       << "' ("
                                       << ns
                                       << ") doesn't match the namespace '"
-                                      << expectedNamespace.ns()
+                                      << expectedNamespace
                                       << "'"};
             }
 

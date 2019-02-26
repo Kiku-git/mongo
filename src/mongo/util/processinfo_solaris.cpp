@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -207,7 +206,7 @@ bool ProcessInfo::checkNumaEnabled() {
         return false;
     }
 
-    ON_BLOCK_EXIT(lgrp_fini, cookie);
+    ON_BLOCK_EXIT([&] { lgrp_fini(cookie); });
 
     int groups = lgrp_nlgrps(cookie);
 

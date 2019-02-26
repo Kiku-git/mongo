@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -50,6 +49,9 @@ namespace mongo {
  */
 class OutOfLineExecutor {
 public:
+    using Task = unique_function<void()>;
+
+public:
     /**
      * Invokes the callback on the executor, as in schedule(), returning a future with its result.
      * That future may be ready by the time the caller returns, which means that continuations
@@ -69,7 +71,7 @@ public:
     /**
      * Invokes the callback on the executor.  This never happens immediately on the caller's stack.
      */
-    virtual void schedule(unique_function<void()> func) = 0;
+    virtual void schedule(Task func) = 0;
 
 protected:
     ~OutOfLineExecutor() noexcept {}

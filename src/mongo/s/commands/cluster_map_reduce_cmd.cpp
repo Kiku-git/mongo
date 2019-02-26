@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -62,7 +61,7 @@
 namespace mongo {
 namespace {
 
-AtomicUInt32 JOB_NUMBER;
+AtomicWord<unsigned> JOB_NUMBER;
 
 const Milliseconds kNoDistLockTimeout(-1);
 

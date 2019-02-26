@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -32,6 +31,7 @@
 
 #include <functional>
 #include <memory>
+#include <tuple>
 
 #include "mongo/unittest/unittest.h"
 
@@ -256,7 +256,7 @@ void construction() {
     }
 
     // Test move construction.
-    { mongo::clonable_ptr<Clonable>{mongo::clonable_ptr<Clonable>{}}; }
+    { std::ignore = mongo::clonable_ptr<Clonable>{mongo::clonable_ptr<Clonable>{}}; }
 
     // Test copy construction.
     {
@@ -342,7 +342,7 @@ void augmentedConstruction() {
 
     // Test move construction.
     {
-        mongo::clonable_ptr<Clonable, CloneFactory>{
+        std::ignore = mongo::clonable_ptr<Clonable, CloneFactory>{
             mongo::clonable_ptr<Clonable, CloneFactory>{Clonable::getCloningFunction()}};
     }
 

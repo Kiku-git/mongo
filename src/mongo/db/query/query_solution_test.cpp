@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -28,6 +27,8 @@
  *    it in the license file.
  */
 
+#include <utility>
+
 #include "mongo/platform/basic.h"
 
 #include "mongo/bson/bsontypes.h"
@@ -44,11 +45,30 @@ namespace {
 
 using namespace mongo;
 
+/**
+ * Make a minimal IndexEntry from just a key pattern. A dummy name will be added.
+ */
+IndexEntry buildSimpleIndexEntry(const BSONObj& kp) {
+    return {kp,
+            IndexNames::nameToType(IndexNames::findPluginName(kp)),
+            false,
+            {},
+            {},
+            false,
+            false,
+            CoreIndexInfo::Identifier("test_foo"),
+            nullptr,
+            {},
+            nullptr,
+            nullptr};
+}
+
 // Index: {a: 1, b: 1, c: 1, d: 1, e: 1}
 // Min: {a: 1, b: 1, c: 1, d: 1, e: 1}
 // Max: {a: 1, b: 1, c: 1, d: 1, e: 1}
 TEST(QuerySolutionTest, SimpleRangeAllEqual) {
-    IndexScanNode node{IndexEntry(BSON("a" << 1 << "b" << 1 << "c" << 1 << "d" << 1 << "e" << 1))};
+    IndexScanNode node{
+        buildSimpleIndexEntry(BSON("a" << 1 << "b" << 1 << "c" << 1 << "d" << 1 << "e" << 1))};
     node.bounds.isSimpleRange = true;
     node.bounds.startKey = BSON("a" << 1 << "b" << 1 << "c" << 1 << "d" << 1 << "e" << 1);
     node.bounds.endKey = BSON("a" << 1 << "b" << 1 << "c" << 1 << "d" << 1 << "e" << 1);
@@ -71,7 +91,8 @@ TEST(QuerySolutionTest, SimpleRangeAllEqual) {
 // Min: {a: 1, b: 1, c: 1, d: 1, e: 1}
 // Max: {a: 2, b: 2, c: 2, d: 2, e: 2}
 TEST(QuerySolutionTest, SimpleRangeNoneEqual) {
-    IndexScanNode node{IndexEntry(BSON("a" << 1 << "b" << 1 << "c" << 1 << "d" << 1 << "e" << 1))};
+    IndexScanNode node{
+        buildSimpleIndexEntry(BSON("a" << 1 << "b" << 1 << "c" << 1 << "d" << 1 << "e" << 1))};
     node.bounds.isSimpleRange = true;
     node.bounds.startKey = BSON("a" << 1 << "b" << 1 << "c" << 1 << "d" << 1 << "e" << 1);
     node.bounds.endKey = BSON("a" << 2 << "b" << 2 << "c" << 2 << "d" << 2 << "e" << 2);
@@ -90,7 +111,8 @@ TEST(QuerySolutionTest, SimpleRangeNoneEqual) {
 // Min: {a: 1, b: 1, c: 1, d: 1, e: 1}
 // Max: {a: 1, b: 1, c: 2, d: 2, e: 2}
 TEST(QuerySolutionTest, SimpleRangeSomeEqual) {
-    IndexScanNode node{IndexEntry(BSON("a" << 1 << "b" << 1 << "c" << 1 << "d" << 1 << "e" << 1))};
+    IndexScanNode node{
+        buildSimpleIndexEntry(BSON("a" << 1 << "b" << 1 << "c" << 1 << "d" << 1 << "e" << 1))};
     node.bounds.isSimpleRange = true;
     node.bounds.startKey = BSON("a" << 1 << "b" << 1 << "c" << 1 << "d" << 1 << "e" << 1);
     node.bounds.endKey = BSON("a" << 1 << "b" << 1 << "c" << 2 << "d" << 2 << "e" << 2);
@@ -112,7 +134,8 @@ TEST(QuerySolutionTest, SimpleRangeSomeEqual) {
 // Index: {a: 1, b: 1, c: 1, d: 1, e: 1}
 // Intervals: a: [1,1], b: [1,1], c: [1,1], d: [1,1], e: [1,1]
 TEST(QuerySolutionTest, IntervalListAllPoints) {
-    IndexScanNode node{IndexEntry(BSON("a" << 1 << "b" << 1 << "c" << 1 << "d" << 1 << "e" << 1))};
+    IndexScanNode node{
+        buildSimpleIndexEntry(BSON("a" << 1 << "b" << 1 << "c" << 1 << "d" << 1 << "e" << 1))};
 
     OrderedIntervalList a{};
     a.name = "a";
@@ -158,7 +181,8 @@ TEST(QuerySolutionTest, IntervalListAllPoints) {
 // Index: {a: 1, b: 1, c: 1, d: 1, e: 1}
 // Intervals: a: [1,2], b: [1,2], c: [1,2], d: [1,2], e: [1,2]
 TEST(QuerySolutionTest, IntervalListNoPoints) {
-    IndexScanNode node{IndexEntry(BSON("a" << 1 << "b" << 1 << "c" << 1 << "d" << 1 << "e" << 1))};
+    IndexScanNode node{
+        buildSimpleIndexEntry(BSON("a" << 1 << "b" << 1 << "c" << 1 << "d" << 1 << "e" << 1))};
 
     OrderedIntervalList a{};
     a.name = "a";
@@ -204,7 +228,8 @@ TEST(QuerySolutionTest, IntervalListNoPoints) {
 // Index: {a: 1, b: 1, c: 1, d: 1, e: 1}
 // Intervals: a: [1,1], b: [1,1], c: [1,2], d: [1,2], e: [1,2]
 TEST(QuerySolutionTest, IntervalListSomePoints) {
-    IndexScanNode node{IndexEntry(BSON("a" << 1 << "b" << 1 << "c" << 1 << "d" << 1 << "e" << 1))};
+    IndexScanNode node{
+        buildSimpleIndexEntry(BSON("a" << 1 << "b" << 1 << "c" << 1 << "d" << 1 << "e" << 1))};
 
     OrderedIntervalList a{};
     a.name = "a";
@@ -420,7 +445,7 @@ TEST(QuerySolutionTest, GetFieldsWithStringBoundsIdentifiesStringsWithInclusiveB
 }
 
 TEST(QuerySolutionTest, IndexScanNodeRemovesNonMatchingCollatedFieldsFromSortsOnSimpleBounds) {
-    IndexScanNode node{IndexEntry(BSON("a" << 1 << "b" << 1))};
+    IndexScanNode node{buildSimpleIndexEntry(BSON("a" << 1 << "b" << 1))};
     CollatorInterfaceMock queryCollator(CollatorInterfaceMock::MockType::kReverseString);
     node.queryCollator = &queryCollator;
 
@@ -437,7 +462,7 @@ TEST(QuerySolutionTest, IndexScanNodeRemovesNonMatchingCollatedFieldsFromSortsOn
 }
 
 TEST(QuerySolutionTest, IndexScanNodeGetFieldsWithStringBoundsCorrectlyHandlesEndKeyInclusive) {
-    IndexScanNode node{IndexEntry(BSON("a" << 1 << "b" << 1))};
+    IndexScanNode node{buildSimpleIndexEntry(BSON("a" << 1 << "b" << 1))};
     CollatorInterfaceMock queryCollator(CollatorInterfaceMock::MockType::kReverseString);
     node.queryCollator = &queryCollator;
 
@@ -467,7 +492,7 @@ TEST(QuerySolutionTest, IndexScanNodeGetFieldsWithStringBoundsCorrectlyHandlesEn
 // Index: {a: 1}
 // Bounds: [MINKEY, MAXKEY]
 TEST(QuerySolutionTest, IndexScanNodeRemovesCollatedFieldsFromSortsIfCollationDifferent) {
-    IndexScanNode node{IndexEntry(BSON("a" << 1))};
+    IndexScanNode node{buildSimpleIndexEntry(BSON("a" << 1))};
     CollatorInterfaceMock queryCollator(CollatorInterfaceMock::MockType::kReverseString);
     node.queryCollator = &queryCollator;
 
@@ -484,7 +509,7 @@ TEST(QuerySolutionTest, IndexScanNodeRemovesCollatedFieldsFromSortsIfCollationDi
 }
 
 TEST(QuerySolutionTest, IndexScanNodeDoesNotRemoveCollatedFieldsFromSortsIfCollationMatches) {
-    IndexScanNode node{IndexEntry(BSON("a" << 1))};
+    IndexScanNode node{buildSimpleIndexEntry(BSON("a" << 1))};
     CollatorInterfaceMock queryCollator(CollatorInterfaceMock::MockType::kReverseString);
 
     OrderedIntervalList oilA{};
@@ -503,11 +528,13 @@ TEST(QuerySolutionTest, IndexScanNodeDoesNotRemoveCollatedFieldsFromSortsIfColla
 // Index: {a: 1, b: 1, c: 1, d: 1, e: 1}
 // Intervals: a: [1,1], b: [1,1], c: [MinKey, MaxKey], d: [1,2], e: [1,2]
 TEST(QuerySolutionTest, CompoundIndexWithNonMatchingCollationFiltersAllSortsWithCollatedField) {
-    IndexScanNode node{IndexEntry(BSON("a" << 1 << "b" << 1 << "c" << 1 << "d" << 1 << "e" << 1))};
+    IndexScanNode node{
+        buildSimpleIndexEntry(BSON("a" << 1 << "b" << 1 << "c" << 1 << "d" << 1 << "e" << 1))};
     CollatorInterfaceMock queryCollator(CollatorInterfaceMock::MockType::kReverseString);
     node.queryCollator = &queryCollator;
 
-    node.index = IndexEntry(BSON("a" << 1 << "b" << 1 << "c" << 1 << "d" << 1 << "e" << 1));
+    node.index =
+        buildSimpleIndexEntry(BSON("a" << 1 << "b" << 1 << "c" << 1 << "d" << 1 << "e" << 1));
 
     OrderedIntervalList a{};
     a.name = "a";
@@ -548,7 +575,7 @@ TEST(QuerySolutionTest, CompoundIndexWithNonMatchingCollationFiltersAllSortsWith
 // Index: {a : 1}
 // Bounds: [{}, {}]
 TEST(QuerySolutionTest, IndexScanNodeWithNonMatchingCollationFiltersObjectField) {
-    IndexScanNode node{IndexEntry(BSON("a" << 1))};
+    IndexScanNode node{buildSimpleIndexEntry(BSON("a" << 1))};
     CollatorInterfaceMock queryCollator(CollatorInterfaceMock::MockType::kReverseString);
     node.queryCollator = &queryCollator;
 
@@ -568,7 +595,7 @@ TEST(QuerySolutionTest, IndexScanNodeWithNonMatchingCollationFiltersObjectField)
 // Index: {a : 1}
 // Bounds: [[], []]
 TEST(QuerySolutionTest, IndexScanNodeWithNonMatchingCollationFiltersArrayField) {
-    IndexScanNode node{IndexEntry(BSON("a" << 1))};
+    IndexScanNode node{buildSimpleIndexEntry(BSON("a" << 1))};
     CollatorInterfaceMock queryCollator(CollatorInterfaceMock::MockType::kReverseString);
     node.queryCollator = &queryCollator;
 
@@ -586,7 +613,7 @@ TEST(QuerySolutionTest, IndexScanNodeWithNonMatchingCollationFiltersArrayField) 
 }
 
 TEST(QuerySolutionTest, WithNonMatchingCollatorAndNoEqualityPrefixSortsAreNotDuplicated) {
-    IndexScanNode node{IndexEntry(BSON("a" << 1 << "b" << 1))};
+    IndexScanNode node{buildSimpleIndexEntry(BSON("a" << 1 << "b" << 1))};
     CollatorInterfaceMock queryCollator(CollatorInterfaceMock::MockType::kReverseString);
     node.queryCollator = &queryCollator;
 
@@ -614,7 +641,7 @@ TEST(QuerySolutionTest, WithNonMatchingCollatorAndNoEqualityPrefixSortsAreNotDup
 }
 
 TEST(QuerySolutionTest, IndexScanNodeHasFieldIncludesStringFieldWhenNoCollator) {
-    IndexScanNode node{IndexEntry(BSON("a" << 1 << "b" << 1))};
+    IndexScanNode node{buildSimpleIndexEntry(BSON("a" << 1 << "b" << 1))};
 
     OrderedIntervalList oilA{};
     oilA.name = "a";
@@ -636,7 +663,7 @@ TEST(QuerySolutionTest, IndexScanNodeHasFieldIncludesStringFieldWhenNoCollator) 
 }
 
 TEST(QuerySolutionTest, IndexScanNodeHasFieldIncludesSimpleBoundsStringFieldWhenNoCollator) {
-    IndexScanNode node{IndexEntry(BSON("a" << 1 << "b" << 1))};
+    IndexScanNode node{buildSimpleIndexEntry(BSON("a" << 1 << "b" << 1))};
 
     node.bounds.isSimpleRange = true;
     node.bounds.startKey = BSON("a" << 1 << "b" << 2);
@@ -648,7 +675,7 @@ TEST(QuerySolutionTest, IndexScanNodeHasFieldIncludesSimpleBoundsStringFieldWhen
 }
 
 TEST(QuerySolutionTest, IndexScanNodeHasFieldExcludesStringFieldWhenIndexHasCollator) {
-    IndexScanNode node{IndexEntry(BSON("a" << 1 << "b" << 1))};
+    IndexScanNode node{buildSimpleIndexEntry(BSON("a" << 1 << "b" << 1))};
     CollatorInterfaceMock indexCollator(CollatorInterfaceMock::MockType::kReverseString);
     node.index.collator = &indexCollator;
 
@@ -673,7 +700,7 @@ TEST(QuerySolutionTest, IndexScanNodeHasFieldExcludesStringFieldWhenIndexHasColl
 }
 
 TEST(QuerySolutionTest, IndexScanNodeHasFieldExcludesSimpleBoundsStringFieldWhenIndexHasCollator) {
-    IndexScanNode node{IndexEntry(BSON("a" << 1 << "b" << 1))};
+    IndexScanNode node{buildSimpleIndexEntry(BSON("a" << 1 << "b" << 1))};
     CollatorInterfaceMock indexCollator(CollatorInterfaceMock::MockType::kReverseString);
     node.index.collator = &indexCollator;
 
@@ -686,8 +713,7 @@ TEST(QuerySolutionTest, IndexScanNodeHasFieldExcludesSimpleBoundsStringFieldWhen
     ASSERT_FALSE(node.hasField("b"));
 }
 
-std::unique_ptr<ParsedProjection> createParsedProjection(const BSONObj& query,
-                                                         const BSONObj& projObj) {
+auto createMatchExprAndParsedProjection(const BSONObj& query, const BSONObj& projObj) {
     QueryTestServiceContext serviceCtx;
     auto opCtx = serviceCtx.makeOperationContext();
     const CollatorInterface* collator = nullptr;
@@ -706,20 +732,23 @@ std::unique_ptr<ParsedProjection> createParsedProjection(const BSONObj& query,
                                        << status.toString());
     }
     ASSERT(out);
-    return std::unique_ptr<ParsedProjection>(out);
+    return std::make_pair(std::move(queryMatchExpr.getValue()),
+                          std::unique_ptr<ParsedProjection>(out));
 }
 
 TEST(QuerySolutionTest, InclusionProjectionPreservesSort) {
-    IndexEntry index(BSON("a" << 1));
+    auto index = buildSimpleIndexEntry(BSON("a" << 1));
     auto node = stdx::make_unique<IndexScanNode>(index);
 
     BSONObj projection = BSON("a" << 1);
     BSONObj match;
 
-    auto parsedProjection = createParsedProjection(match, projection);
+    auto matchExprAndParsedProjection = createMatchExprAndParsedProjection(match, projection);
 
-    ProjectionNode proj{*parsedProjection};
-    proj.children.push_back(node.release());
+    ProjectionNodeDefault proj{std::move(node),
+                               *matchExprAndParsedProjection.first,
+                               projection,
+                               *matchExprAndParsedProjection.second};
     proj.computeProperties();
 
     ASSERT_EQ(proj.getSort().size(), 1U);
@@ -727,31 +756,35 @@ TEST(QuerySolutionTest, InclusionProjectionPreservesSort) {
 }
 
 TEST(QuerySolutionTest, ExclusionProjectionDoesNotPreserveSort) {
-    IndexEntry index(BSON("a" << 1));
+    auto index = buildSimpleIndexEntry(BSON("a" << 1));
     auto node = stdx::make_unique<IndexScanNode>(index);
 
     BSONObj projection = BSON("a" << 0);
     BSONObj match;
 
-    auto parsedProjection = createParsedProjection(match, projection);
+    auto matchExprAndParsedProjection = createMatchExprAndParsedProjection(match, projection);
 
-    ProjectionNode proj{*parsedProjection};
-    proj.children.push_back(node.release());
+    ProjectionNodeDefault proj{std::move(node),
+                               *matchExprAndParsedProjection.first,
+                               projection,
+                               *matchExprAndParsedProjection.second};
     proj.computeProperties();
 
     ASSERT_EQ(proj.getSort().size(), 0U);
 }
 
 TEST(QuerySolutionTest, InclusionProjectionTruncatesSort) {
-    auto node = stdx::make_unique<IndexScanNode>(IndexEntry(BSON("a" << 1 << "b" << 1)));
+    auto node = stdx::make_unique<IndexScanNode>(buildSimpleIndexEntry(BSON("a" << 1 << "b" << 1)));
 
     BSONObj projection = BSON("a" << 1);
     BSONObj match;
 
-    auto parsedProjection = createParsedProjection(match, projection);
+    auto matchExprAndParsedProjection = createMatchExprAndParsedProjection(match, projection);
 
-    ProjectionNode proj{*parsedProjection};
-    proj.children.push_back(node.release());
+    ProjectionNodeDefault proj{std::move(node),
+                               *matchExprAndParsedProjection.first,
+                               projection,
+                               *matchExprAndParsedProjection.second};
     proj.computeProperties();
 
     ASSERT_EQ(proj.getSort().size(), 1U);
@@ -759,15 +792,17 @@ TEST(QuerySolutionTest, InclusionProjectionTruncatesSort) {
 }
 
 TEST(QuerySolutionTest, ExclusionProjectionTruncatesSort) {
-    auto node = stdx::make_unique<IndexScanNode>(IndexEntry(BSON("a" << 1 << "b" << 1)));
+    auto node = stdx::make_unique<IndexScanNode>(buildSimpleIndexEntry(BSON("a" << 1 << "b" << 1)));
 
     BSONObj projection = BSON("b" << 0);
     BSONObj match;
 
-    auto parsedProjection = createParsedProjection(match, projection);
+    auto matchExprAndParsedProjection = createMatchExprAndParsedProjection(match, projection);
 
-    ProjectionNode proj{*parsedProjection};
-    proj.children.push_back(node.release());
+    ProjectionNodeDefault proj{std::move(node),
+                               *matchExprAndParsedProjection.first,
+                               projection,
+                               *matchExprAndParsedProjection.second};
     proj.computeProperties();
 
     ASSERT_EQ(proj.getSort().size(), 1U);
@@ -775,7 +810,8 @@ TEST(QuerySolutionTest, ExclusionProjectionTruncatesSort) {
 }
 
 TEST(QuerySolutionTest, NonMultikeyIndexWithoutPathLevelInfoCanCoverItsFields) {
-    auto node = stdx::make_unique<IndexScanNode>(IndexEntry(BSON("a" << 1 << "b.c.d" << 1)));
+    auto node =
+        stdx::make_unique<IndexScanNode>(buildSimpleIndexEntry(BSON("a" << 1 << "b.c.d" << 1)));
     node->index.multikey = false;
     node->index.multikeyPaths = MultikeyPaths{};
     ASSERT_TRUE(node->hasField("a"));
@@ -786,7 +822,8 @@ TEST(QuerySolutionTest, NonMultikeyIndexWithoutPathLevelInfoCanCoverItsFields) {
 }
 
 TEST(QuerySolutionTest, NonMultikeyIndexWithPathLevelInfoCanCoverItsFields) {
-    auto node = stdx::make_unique<IndexScanNode>(IndexEntry(BSON("a" << 1 << "b.c.d" << 1)));
+    auto node =
+        stdx::make_unique<IndexScanNode>(buildSimpleIndexEntry(BSON("a" << 1 << "b.c.d" << 1)));
     node->index.multikey = false;
     node->index.multikeyPaths = MultikeyPaths{{}, {}};
     ASSERT_TRUE(node->hasField("a"));
@@ -797,7 +834,8 @@ TEST(QuerySolutionTest, NonMultikeyIndexWithPathLevelInfoCanCoverItsFields) {
 }
 
 TEST(QuerySolutionTest, MultikeyIndexWithoutPathLevelInfoCannotCoverAnyFields) {
-    auto node = stdx::make_unique<IndexScanNode>(IndexEntry(BSON("a" << 1 << "b.c.d" << 1)));
+    auto node =
+        stdx::make_unique<IndexScanNode>(buildSimpleIndexEntry(BSON("a" << 1 << "b.c.d" << 1)));
     node->index.multikey = true;
     node->index.multikeyPaths = MultikeyPaths{};
     ASSERT_FALSE(node->hasField("a"));
@@ -808,8 +846,8 @@ TEST(QuerySolutionTest, MultikeyIndexWithoutPathLevelInfoCannotCoverAnyFields) {
 }
 
 TEST(QuerySolutionTest, MultikeyIndexWithPathLevelInfoCanCoverNonMultikeyFields) {
-    auto node =
-        stdx::make_unique<IndexScanNode>(IndexEntry(BSON("a" << 1 << "b" << 1 << "c" << 1)));
+    auto node = stdx::make_unique<IndexScanNode>(
+        buildSimpleIndexEntry(BSON("a" << 1 << "b" << 1 << "c" << 1)));
 
     // Add metadata indicating that "b" is multikey.
     node->index.multikey = true;
@@ -822,8 +860,8 @@ TEST(QuerySolutionTest, MultikeyIndexWithPathLevelInfoCanCoverNonMultikeyFields)
 }
 
 TEST(QuerySolutionTest, MultikeyIndexCannotCoverFieldWithAnyMultikeyPathComponent) {
-    auto node =
-        stdx::make_unique<IndexScanNode>(IndexEntry(BSON("a" << 1 << "b.c.d" << 1 << "e" << 1)));
+    auto node = stdx::make_unique<IndexScanNode>(
+        buildSimpleIndexEntry(BSON("a" << 1 << "b.c.d" << 1 << "e" << 1)));
 
     // Add metadata indicating that "b.c" is multikey.
     node->index.multikey = true;
@@ -837,7 +875,7 @@ TEST(QuerySolutionTest, MultikeyIndexCannotCoverFieldWithAnyMultikeyPathComponen
 }
 
 TEST(QuerySolutionTest, MultikeyIndexWithoutPathLevelInfoCannotProvideAnySorts) {
-    IndexScanNode node{IndexEntry(BSON("a" << 1 << "b" << 1 << "c" << 1))};
+    IndexScanNode node{buildSimpleIndexEntry(BSON("a" << 1 << "b" << 1 << "c" << 1))};
     node.index.multikey = true;
 
     {
@@ -861,7 +899,7 @@ TEST(QuerySolutionTest, MultikeyIndexWithoutPathLevelInfoCannotProvideAnySorts) 
 
 TEST(QuerySolutionTest, SimpleRangeAllEqualExcludesFieldWithMultikeyComponent) {
     IndexScanNode node{
-        IndexEntry(BSON("a" << 1 << "b" << 1 << "c.z" << 1 << "d" << 1 << "e" << 1))};
+        buildSimpleIndexEntry(BSON("a" << 1 << "b" << 1 << "c.z" << 1 << "d" << 1 << "e" << 1))};
     node.bounds.isSimpleRange = true;
     node.bounds.startKey = BSON("a" << 1 << "b" << 1 << "c.z" << 1 << "d" << 1 << "e" << 1);
     node.bounds.endKey = BSON("a" << 1 << "b" << 1 << "c.z" << 1 << "d" << 1 << "e" << 1);
@@ -880,7 +918,7 @@ TEST(QuerySolutionTest, SimpleRangeAllEqualExcludesFieldWithMultikeyComponent) {
 }
 
 TEST(QuerySolutionTest, MultikeyFieldsEmptyWhenIndexIsNotMultikey) {
-    IndexScanNode node{IndexEntry(BSON("a.b" << 1 << "c.d" << 1))};
+    IndexScanNode node{buildSimpleIndexEntry(BSON("a.b" << 1 << "c.d" << 1))};
     node.index.multikey = false;
     node.index.multikeyPaths = MultikeyPaths{};
     node.computeProperties();
@@ -888,7 +926,7 @@ TEST(QuerySolutionTest, MultikeyFieldsEmptyWhenIndexIsNotMultikey) {
 }
 
 TEST(QuerySolutionTest, MultikeyFieldsEmptyWhenIndexHasNoMultikeynessMetadata) {
-    IndexScanNode node{IndexEntry(BSON("a.b" << 1 << "c.d" << 1))};
+    IndexScanNode node{buildSimpleIndexEntry(BSON("a.b" << 1 << "c.d" << 1))};
     node.index.multikey = true;
     node.index.multikeyPaths = MultikeyPaths{};
     node.computeProperties();
@@ -896,7 +934,7 @@ TEST(QuerySolutionTest, MultikeyFieldsEmptyWhenIndexHasNoMultikeynessMetadata) {
 }
 
 TEST(QuerySolutionTest, MultikeyFieldsChosenCorrectlyWhenIndexHasPathLevelMultikeyMetadata) {
-    IndexScanNode node{IndexEntry(BSON("a.b" << 1 << "c.d" << 1 << "e.f" << 1))};
+    IndexScanNode node{buildSimpleIndexEntry(BSON("a.b" << 1 << "c.d" << 1 << "e.f" << 1))};
     node.index.multikey = true;
     node.index.multikeyPaths = MultikeyPaths{{0U}, {}, {0U, 1U}};
     node.computeProperties();
@@ -907,7 +945,7 @@ TEST(QuerySolutionTest, MultikeyFieldsChosenCorrectlyWhenIndexHasPathLevelMultik
 
 TEST(QuerySolutionTest, NonSimpleRangeAllEqualExcludesFieldWithMultikeyComponent) {
     IndexScanNode node{
-        IndexEntry(BSON("a" << 1 << "b" << 1 << "c.z" << 1 << "d" << 1 << "e" << 1))};
+        buildSimpleIndexEntry(BSON("a" << 1 << "b" << 1 << "c.z" << 1 << "d" << 1 << "e" << 1))};
     // Add metadata indicating that "c.z" is multikey.
     node.index.multikey = true;
     node.index.multikeyPaths = MultikeyPaths{{}, {}, {1U}, {}, {}};

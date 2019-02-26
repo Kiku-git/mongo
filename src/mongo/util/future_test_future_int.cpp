@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -89,6 +88,17 @@ TEST(Future, Success_getNothrowRvalue) {
                         [](Future<int>&& fut) { ASSERT_EQ(std::move(fut).getNoThrow(), 1); });
 }
 
+TEST(Future, Success_shared_get) {
+    FUTURE_SUCCESS_TEST([] { return 1; },
+                        [](Future<int>&& fut) { ASSERT_EQ(std::move(fut).share().get(), 1); });
+}
+
+TEST(Future, Success_shared_getNothrow) {
+    FUTURE_SUCCESS_TEST(
+        [] { return 1; },
+        [](Future<int>&& fut) { ASSERT_EQ(std::move(fut).share().getNoThrow(), 1); });
+}
+
 TEST(Future, Success_getAsync) {
     FUTURE_SUCCESS_TEST(
         [] { return 1; },
@@ -127,6 +137,16 @@ TEST(Future, Fail_getNothrowConstLvalue) {
 TEST(Future, Fail_getNothrowRvalue) {
     FUTURE_FAIL_TEST<int>(
         [](Future<int>&& fut) { ASSERT_EQ(std::move(fut).getNoThrow(), failStatus()); });
+}
+
+TEST(Future, Fail_shared_get) {
+    FUTURE_FAIL_TEST<int>(
+        [](Future<int>&& fut) { ASSERT_THROWS_failStatus(std::move(fut).share().get()); });
+}
+
+TEST(Future, Fail_shared_getNothrow) {
+    FUTURE_FAIL_TEST<int>(
+        [](Future<int>&& fut) { ASSERT_EQ(std::move(fut).share().getNoThrow(), failStatus()); });
 }
 
 TEST(Future, Fail_getAsync) {
@@ -203,9 +223,24 @@ TEST(Future, isReady_TSAN_OK) {
         done = true;
         return 1;
     });
+    //(void)*const_cast<volatile bool*>(&done);  // Data Race! Uncomment to make sure TSAN works.
     while (!fut.isReady()) {
     }
-    // ASSERT(done);  // Data Race! Uncomment to make sure TSAN is working.
+    ASSERT(done);
+    (void)fut.get();
+    ASSERT(done);
+}
+
+TEST(Future, isReady_shared_TSAN_OK) {
+    bool done = false;
+    auto fut = async([&] {
+                   done = true;
+                   return 1;
+               }).share();
+    //(void)*const_cast<volatile bool*>(&done);  // Data Race! Uncomment to make sure TSAN works.
+    while (!fut.isReady()) {
+    }
+    ASSERT(done);
     (void)fut.get();
     ASSERT(done);
 }
@@ -493,6 +528,50 @@ TEST(Future, Fail_onErrorCodeMismatch) {
     });
 }
 
+TEST(Future, Success_onErrorCategory) {
+    FUTURE_SUCCESS_TEST([] { return 1; },
+                        [](Future<int>&& fut) {
+                            ASSERT_EQ(
+                                std::move(fut)
+                                    .onErrorCategory<ErrorCategory::NetworkError>([](Status) {
+                                        FAIL("onErrorCategory<category>() callback was called");
+                                        return 0;
+                                    })
+                                    .then([](int i) { return i + 2; })
+                                    .get(),
+                                3);
+                        });
+}
+
+TEST(Future, Fail_onErrorCategoryMatch) {
+    FUTURE_FAIL_TEST<int>([](Future<int>&& fut) {
+        auto res = std::move(fut)
+                       .onError([](Status s) {
+                           ASSERT_EQ(s, failStatus());
+                           return StatusWith<int>(ErrorCodes::HostUnreachable, "");
+                       })
+                       .onErrorCategory<ErrorCategory::NetworkError>(
+                           [](Status&&) { return StatusWith<int>(3); })
+                       .getNoThrow();
+        ASSERT_EQ(res, 3);
+    });
+}
+
+TEST(Future, Fail_onErrorCategoryMismatch) {
+    FUTURE_FAIL_TEST<int>([](Future<int>&& fut) {
+        ASSERT_EQ(std::move(fut)
+                      .onErrorCategory<ErrorCategory::NetworkError>([](Status s) -> int {
+                          FAIL("Why was this called?") << s;
+                          MONGO_UNREACHABLE;
+                      })
+                      .onError([](Status s) {
+                          ASSERT_EQ(s, failStatus());
+                          return 3;
+                      })
+                      .getNoThrow(),
+                  3);
+    });
+}
 
 TEST(Future, Success_tap) {
     FUTURE_SUCCESS_TEST([] { return 1; },
@@ -636,5 +715,204 @@ TEST(Future, Fail_tapAll_Overloaded) {
         ASSERT(callback.called);
     });
 }
+
+TEST(Future, Success_onCompletionSimple) {
+    FUTURE_SUCCESS_TEST(
+        [] { return 1; },
+        [](Future<int>&& fut) {
+            ASSERT_EQ(std::move(fut)
+                          .onCompletion([](StatusWith<int> i) { return i.getValue() + 2; })
+                          .get(),
+                      3);
+        });
+}
+
+TEST(Future, Success_onCompletionMultiOverload) {
+    FUTURE_SUCCESS_TEST([] { return 1; },
+                        [](Future<int>&& fut) {
+                            struct Callback {
+                                int operator()(int i) {
+                                    ASSERT_EQ(i, 1);
+                                    called = true;
+                                    return i + 2;
+                                }
+                                int operator()(Status status) {
+                                    FAIL("Status overload called with ") << status;
+                                    return int();
+                                }
+                                bool called = false;
+                            };
+
+                            Callback callback;
+                            ASSERT_EQ(std::move(fut).onCompletion(std::ref(callback)).get(), 3);
+                            ASSERT(callback.called);
+                        });
+}
+
+TEST(Future, Success_onCompletionVoid) {
+    FUTURE_SUCCESS_TEST(
+        [] { return 1; },
+        [](Future<int>&& fut) {
+            ASSERT_EQ(std::move(fut)
+                          .onCompletion([](StatusWith<int> i) { ASSERT_EQ(i.getValue(), 1); })
+                          .onCompletion([](Status s) {
+                              ASSERT_OK(s);
+                              return 3;
+                          })
+                          .get(),
+                      3);
+        });
+}
+
+TEST(Future, Success_onCompletionStatus) {
+    FUTURE_SUCCESS_TEST([] { return 1; },
+                        [](Future<int>&& fut) {
+                            ASSERT_EQ(std::move(fut)
+                                          .onCompletion([](StatusWith<int> i) {
+                                              ASSERT_EQ(i, 1);
+                                              return Status::OK();
+                                          })
+                                          .onCompletion([](Status s) {
+                                              ASSERT_OK(s);
+                                              return 3;
+                                          })
+                                          .get(),
+                                      3);
+                        });
+}
+
+TEST(Future, Success_onCompletionError_Status) {
+    FUTURE_SUCCESS_TEST([] { return 1; },
+                        [](Future<int>&& fut) {
+                            auto fut2 = std::move(fut).onCompletion([](StatusWith<int> i) {
+                                return Status(ErrorCodes::BadValue, "oh no!");
+                            });
+                            MONGO_STATIC_ASSERT(std::is_same<decltype(fut2), Future<void>>::value);
+                            ASSERT_THROWS(fut2.get(), ExceptionFor<ErrorCodes::BadValue>);
+                        });
+}
+
+TEST(Future, Success_onCompletionError_StatusWith) {
+    FUTURE_SUCCESS_TEST([] { return 1; },
+                        [](Future<int>&& fut) {
+                            auto fut2 = std::move(fut).onCompletion([](StatusWith<int> i) {
+                                return StatusWith<double>(ErrorCodes::BadValue, "oh no!");
+                            });
+                            MONGO_STATIC_ASSERT(
+                                std::is_same<decltype(fut2), Future<double>>::value);
+                            ASSERT_THROWS(fut2.get(), ExceptionFor<ErrorCodes::BadValue>);
+                        });
+}
+
+TEST(Future, Success_onCompletionFutureImmediate) {
+    FUTURE_SUCCESS_TEST([] { return 1; },
+                        [](Future<int>&& fut) {
+                            ASSERT_EQ(std::move(fut)
+                                          .onCompletion([](StatusWith<int> i) {
+                                              return Future<int>::makeReady(i.getValue() + 2);
+                                          })
+                                          .get(),
+                                      3);
+                        });
+}
+
+TEST(Future, Success_onCompletionFutureReady) {
+    FUTURE_SUCCESS_TEST([] { return 1; },
+                        [](Future<int>&& fut) {
+                            ASSERT_EQ(std::move(fut)
+                                          .onCompletion([](StatusWith<int> i) {
+                                              auto pf = makePromiseFuture<int>();
+                                              pf.promise.emplaceValue(i.getValue() + 2);
+                                              return std::move(pf.future);
+                                          })
+                                          .get(),
+                                      3);
+                        });
+}
+
+TEST(Future, Success_onCompletionFutureAsync) {
+    FUTURE_SUCCESS_TEST([] { return 1; },
+                        [](Future<int>&& fut) {
+                            ASSERT_EQ(std::move(fut)
+                                          .onCompletion([](StatusWith<int> i) {
+                                              return async([i = i.getValue()] { return i + 2; });
+                                          })
+                                          .get(),
+                                      3);
+                        });
+}
+
+TEST(Future, Success_onCompletionFutureAsyncThrow) {
+    FUTURE_SUCCESS_TEST([] { return 1; },
+                        [](Future<int>&& fut) {
+                            ASSERT_EQ(std::move(fut)
+                                          .onCompletion([](StatusWith<int> i) {
+                                              uasserted(ErrorCodes::BadValue, "oh no!");
+                                              return Future<int>();
+                                          })
+                                          .getNoThrow(),
+                                      ErrorCodes::BadValue);
+                        });
+}
+
+TEST(Future, Fail_onCompletionSimple) {
+    FUTURE_FAIL_TEST<int>([](Future<int>&& fut) {
+        ASSERT_EQ(std::move(fut)
+                      .onCompletion([](StatusWith<int> i) {
+                          ASSERT_NOT_OK(i);
+
+                          return i.getStatus();
+                      })
+                      .getNoThrow(),
+                  failStatus());
+    });
+}
+
+TEST(Future, Fail_onCompletionError_throw) {
+    FUTURE_FAIL_TEST<int>([](Future<int>&& fut) {
+        auto fut2 = std::move(fut).onCompletion([](StatusWith<int> s) -> int {
+            ASSERT_EQ(s.getStatus(), failStatus());
+            uasserted(ErrorCodes::BadValue, "oh no!");
+        });
+        ASSERT_EQ(fut2.getNoThrow(), ErrorCodes::BadValue);
+    });
+}
+
+TEST(Future, Fail_onCompletionError_StatusWith) {
+    FUTURE_FAIL_TEST<int>([](Future<int>&& fut) {
+        auto fut2 = std::move(fut).onCompletion([](StatusWith<int> s) {
+            ASSERT_EQ(s.getStatus(), failStatus());
+            return StatusWith<int>(ErrorCodes::BadValue, "oh no!");
+        });
+        ASSERT_EQ(fut2.getNoThrow(), ErrorCodes::BadValue);
+    });
+}
+
+TEST(Future, Fail_onCompletionFutureImmediate) {
+    FUTURE_FAIL_TEST<int>([](Future<int>&& fut) {
+        ASSERT_EQ(std::move(fut)
+                      .onCompletion([](StatusWith<int> s) {
+                          ASSERT_EQ(s.getStatus(), failStatus());
+                          return Future<int>::makeReady(3);
+                      })
+                      .get(),
+                  3);
+    });
+}
+
+TEST(Future, Fail_onCompletionFutureReady) {
+    FUTURE_FAIL_TEST<int>([](Future<int>&& fut) {
+        ASSERT_EQ(std::move(fut)
+                      .onCompletion([](StatusWith<int> s) {
+                          ASSERT_EQ(s.getStatus(), failStatus());
+                          auto pf = makePromiseFuture<int>();
+                          pf.promise.emplaceValue(3);
+                          return std::move(pf.future);
+                      })
+                      .get(),
+                  3);
+    });
+}
+
 }  // namespace
 }  // namespace mongo

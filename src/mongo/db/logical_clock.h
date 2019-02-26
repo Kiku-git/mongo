@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -49,9 +48,6 @@ public:
     static void set(ServiceContext* service, std::unique_ptr<LogicalClock> logicalClock);
 
     static const uint32_t kMaxSignedInt = ((1U << 31) - 1);
-
-    static constexpr Seconds kMaxAcceptableLogicalClockDriftSecs =
-        Seconds(365 * 24 * 60 * 60);  // 1 year
 
     /**
      * Returns the current cluster time if this is a replica set node, otherwise returns a null

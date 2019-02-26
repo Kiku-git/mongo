@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -35,6 +34,7 @@
 
 #include "mongo/db/jsobj.h"
 #include "mongo/rpc/metadata.h"
+#include "mongo/transport/transport_layer.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/time_support.h"
 
@@ -105,6 +105,8 @@ struct RemoteCommandRequest {
 
     // Deadline by when the request must be completed
     Date_t expirationDate = kNoExpirationDate;
+
+    transport::ConnectSSLMode sslMode = transport::kGlobalSSLMode;
 };
 
 std::ostream& operator<<(std::ostream& os, const RemoteCommandRequest& response);

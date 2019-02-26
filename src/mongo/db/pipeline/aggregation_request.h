@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -56,6 +55,7 @@ public:
     static constexpr StringData kBatchSizeName = "batchSize"_sd;
     static constexpr StringData kFromMongosName = "fromMongos"_sd;
     static constexpr StringData kNeedsMergeName = "needsMerge"_sd;
+    static constexpr StringData kMergeByPBRTName = "mergeByPBRT"_sd;
     static constexpr StringData kPipelineName = "pipeline"_sd;
     static constexpr StringData kCollationName = "collation"_sd;
     static constexpr StringData kExplainName = "explain"_sd;
@@ -106,7 +106,8 @@ public:
      * Constructs an AggregationRequest over the given namespace with the given pipeline. All
      * options aside from the pipeline assume their default values.
      */
-    AggregationRequest(NamespaceString nss, std::vector<BSONObj> pipeline);
+    AggregationRequest(NamespaceString nss, std::vector<BSONObj> pipeline)
+        : _nss(std::move(nss)), _pipeline(std::move(pipeline)), _batchSize(kDefaultBatchSize) {}
 
     /**
      * Serializes the options to a Document. Note that this serialization includes the original
@@ -150,6 +151,22 @@ public:
      */
     bool needsMerge() const {
         return _needsMerge;
+    }
+
+    /**
+     * Returns true if this request is a change stream pipeline which originated from a mongoS that
+     * can merge based on the documents' raw resume tokens and the 'postBatchResumeToken' field. If
+     * not, then the mongoD will need to produce the old {ts, uuid, docKey} $sortKey format instead.
+     * TODO SERVER-38539: this flag is no longer necessary in 4.4, since all change streams will be
+     * merged using raw resume tokens and PBRTs. This mechanism was chosen over FCV for two reasons:
+     * first, because this code is intended for backport to 4.0, where the same issue exists but FCV
+     * cannot be leveraged. Secondly, FCV can be changed at any point during runtime, but mongoS
+     * cannot dynamically switch from one $sortKey format to another mid-stream. The 'mergeByPBRT'
+     * flag allows the mongoS to dictate which $sortKey format will be used, and it will stay
+     * consistent for the entire duration of the stream.
+     */
+    bool mergeByPBRT() const {
+        return _mergeByPBRT;
     }
 
     bool shouldAllowDiskUse() const {
@@ -239,6 +256,10 @@ public:
         _needsMerge = needsMerge;
     }
 
+    void setMergeByPBRT(bool mergeByPBRT) {
+        _mergeByPBRT = mergeByPBRT;
+    }
+
     void setBypassDocumentValidation(bool shouldBypassDocumentValidation) {
         _bypassDocumentValidation = shouldBypassDocumentValidation;
     }
@@ -299,6 +320,7 @@ private:
     bool _allowDiskUse = false;
     bool _fromMongos = false;
     bool _needsMerge = false;
+    bool _mergeByPBRT = false;
     bool _bypassDocumentValidation = false;
 
     // A user-specified maxTimeMS limit, or a value of '0' if not specified.

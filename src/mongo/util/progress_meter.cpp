@@ -1,6 +1,3 @@
-// progress_meter.cpp
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -93,7 +90,11 @@ string ProgressMeter::toString() const {
     if (!_active)
         return "";
     stringstream buf;
-    buf << _name << ": " << _done << '/' << _total << ' ' << (_done * 100) / _total << '%';
+    if (_total) {
+        buf << _name << ": " << _done << '/' << _total << ' ' << (_done * 100) / _total << '%';
+    } else {
+        buf << _name << ": not started";
+    }
 
     if (!_units.empty()) {
         buf << " (" << _units << ")" << endl;

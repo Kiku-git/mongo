@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -37,6 +36,7 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/curop_failpoint_helpers.h"
 #include "mongo/db/cursor_manager.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/exec/queued_data_stage.h"
@@ -59,6 +59,9 @@ using std::vector;
 using stdx::make_unique;
 
 namespace {
+
+// Failpoint which causes to hang "listIndexes" cmd after acquiring the DB lock.
+MONGO_FAIL_POINT_DEFINE(hangBeforeListIndexes);
 
 /**
  * Lists the indexes for a given collection.
@@ -124,6 +127,7 @@ public:
              const string& dbname,
              const BSONObj& cmdObj,
              BSONObjBuilder& result) {
+        CommandHelpers::handleMarkKillOnClientDisconnect(opCtx);
         const long long defaultBatchSize = std::numeric_limits<long long>::max();
         long long batchSize;
         uassertStatusOK(
@@ -131,8 +135,8 @@ public:
 
         auto includeIndexBuilds = cmdObj["includeIndexBuilds"].trueValue();
 
+        NamespaceString nss;
         std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> exec;
-        NamespaceString cursorNss;
         BSONArrayBuilder firstBatch;
         {
             AutoGetCollectionForReadCommand ctx(opCtx,
@@ -145,7 +149,10 @@ public:
             const CollectionCatalogEntry* cce = collection->getCatalogEntry();
             invariant(cce);
 
-            const auto nss = ctx.getNss();
+            nss = ctx.getNss();
+
+            CurOpFailpointHelpers::waitWhileFailPointEnabled(
+                &hangBeforeListIndexes, opCtx, "hangBeforeListIndexes", []() {}, false, nss);
 
             vector<string> indexNames;
             writeConflictRetry(opCtx, "listIndexes", nss.ns(), [&] {
@@ -182,11 +189,8 @@ public:
                 root->pushBack(id);
             }
 
-            cursorNss = NamespaceString::makeListIndexesNSS(dbname, nss.coll());
-            invariant(nss == cursorNss.getTargetNSForListIndexes());
-
             exec = uassertStatusOK(PlanExecutor::make(
-                opCtx, std::move(ws), std::move(root), cursorNss, PlanExecutor::NO_YIELD));
+                opCtx, std::move(ws), std::move(root), nss, PlanExecutor::NO_YIELD));
 
             for (long long objCount = 0; objCount < batchSize; objCount++) {
                 BSONObj next;
@@ -206,7 +210,7 @@ public:
             }
 
             if (exec->isEOF()) {
-                appendCursorResponseObject(0LL, cursorNss.ns(), firstBatch.arr(), &result);
+                appendCursorResponseObject(0LL, nss.ns(), firstBatch.arr(), &result);
                 return true;
             }
 
@@ -215,16 +219,18 @@ public:
         }  // Drop collection lock. Global cursor registration must be done without holding any
            // locks.
 
-        const auto pinnedCursor = CursorManager::getGlobalCursorManager()->registerCursor(
+        const auto pinnedCursor = CursorManager::get(opCtx)->registerCursor(
             opCtx,
             {std::move(exec),
-             cursorNss,
+             nss,
              AuthorizationSession::get(opCtx->getClient())->getAuthenticatedUserNames(),
              repl::ReadConcernArgs::get(opCtx),
-             cmdObj});
+             cmdObj,
+             ClientCursorParams::LockPolicy::kLocksInternally,
+             {Privilege(ResourcePattern::forExactNamespace(nss), ActionType::listIndexes)}});
 
         appendCursorResponseObject(
-            pinnedCursor.getCursor()->cursorid(), cursorNss.ns(), firstBatch.arr(), &result);
+            pinnedCursor.getCursor()->cursorid(), nss.ns(), firstBatch.arr(), &result);
 
         return true;
     }

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -37,19 +36,14 @@
 #include "mongo/db/server_parameters.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/transport/service_entry_point_utils.h"
+#include "mongo/transport/service_executor_gen.h"
 #include "mongo/transport/service_executor_task_names.h"
-#include "mongo/transport/thread_idle_callback.h"
 #include "mongo/util/log.h"
 #include "mongo/util/processinfo.h"
 
 namespace mongo {
 namespace transport {
 namespace {
-
-// Tasks scheduled with MayRecurse may be called recursively if the recursion depth is below this
-// value.
-MONGO_EXPORT_SERVER_PARAMETER(synchronousServiceExecutorRecursionLimit, int, 8);
-
 constexpr auto kThreadsRunning = "threadsRunning"_sd;
 constexpr auto kExecutorLabel = "executor"_sd;
 constexpr auto kExecutorName = "passthrough"_sd;
@@ -99,9 +93,6 @@ Status ServiceExecutorSynchronous::schedule(Task task,
          * was greater than the number of available cores.
          */
         if (flags & ScheduleFlags::kMayYieldBeforeSchedule) {
-            if ((_localThreadIdleCounter++ & 0xf) == 0) {
-                markThreadIdle();
-            }
             if (_numRunningWorkerThreads.loadRelaxed() > _numHardwareCores) {
                 stdx::this_thread::yield();
             }

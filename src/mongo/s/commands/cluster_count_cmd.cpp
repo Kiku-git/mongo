@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -78,6 +77,7 @@ public:
                    const BSONObj& cmdObj,
                    std::string& errmsg,
                    BSONObjBuilder& result) override {
+        CommandHelpers::handleMarkKillOnClientDisconnect(opCtx);
         const NamespaceString nss(parseNs(dbname, cmdObj));
         uassert(ErrorCodes::InvalidNamespace,
                 str::stream() << "Invalid namespace specified '" << nss.ns() << "'",
@@ -274,10 +274,13 @@ public:
             }
 
             auto bodyBuilder = result->getBodyBuilder();
+            // An empty PrivilegeVector is acceptable because these privileges are only checked on
+            // getMore and explain will not open a cursor.
             return ClusterAggregate::retryOnViewError(opCtx,
                                                       aggRequestOnView.getValue(),
                                                       *ex.extraInfo<ResolvedView>(),
                                                       nss,
+                                                      PrivilegeVector(),
                                                       &bodyBuilder);
         }
 

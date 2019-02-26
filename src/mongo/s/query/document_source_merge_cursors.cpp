@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -63,6 +62,13 @@ std::size_t DocumentSourceMergeCursors::getNumRemotes() const {
     return _blockingResultsMerger->getNumRemotes();
 }
 
+BSONObj DocumentSourceMergeCursors::getHighWaterMark() {
+    if (!_blockingResultsMerger) {
+        populateMerger();
+    }
+    return _blockingResultsMerger->getHighWaterMark();
+}
+
 bool DocumentSourceMergeCursors::remotesExhausted() const {
     if (_armParams) {
         // We haven't started iteration yet.
@@ -74,7 +80,11 @@ bool DocumentSourceMergeCursors::remotesExhausted() const {
 void DocumentSourceMergeCursors::populateMerger() {
     invariant(!_blockingResultsMerger);
     invariant(_armParams);
-    _blockingResultsMerger.emplace(pExpCtx->opCtx, std::move(*_armParams), _executor);
+
+    _blockingResultsMerger.emplace(pExpCtx->opCtx,
+                                   std::move(*_armParams),
+                                   _executor,
+                                   pExpCtx->mongoProcessInterface->getResourceYielder());
     _armParams = boost::none;
     // '_blockingResultsMerger' now owns the cursors.
     _ownCursors = false;

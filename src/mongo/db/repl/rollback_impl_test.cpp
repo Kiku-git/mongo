@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -36,6 +35,7 @@
 #include "mongo/db/catalog/collection_mock.h"
 #include "mongo/db/catalog/drop_collection.h"
 #include "mongo/db/catalog/uuid_catalog.h"
+#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/repl/drop_pending_collection_reaper.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/oplog_interface_local.h"
@@ -44,6 +44,8 @@
 #include "mongo/db/repl/rollback_test_fixture.h"
 #include "mongo/db/s/shard_identity_rollback_notifier.h"
 #include "mongo/db/s/type_shard_identity.h"
+#include "mongo/db/server_transactions_metrics.h"
+#include "mongo/db/service_context.h"
 #include "mongo/s/catalog/type_config_version.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/util/assert_util.h"
@@ -60,7 +62,7 @@ NamespaceString nss("test.coll");
 std::string kGenericUUIDStr = "b4c66a44-c1ca-4d86-8d25-12e82fa2de5b";
 
 BSONObj makeInsertOplogEntry(long long time, BSONObj obj, StringData ns, UUID uuid) {
-    return BSON("ts" << Timestamp(time, time) << "h" << time << "t" << time << "op"
+    return BSON("ts" << Timestamp(time, time) << "t" << time << "op"
                      << "i"
                      << "o"
                      << obj
@@ -72,7 +74,7 @@ BSONObj makeInsertOplogEntry(long long time, BSONObj obj, StringData ns, UUID uu
 
 BSONObj makeUpdateOplogEntry(
     long long time, BSONObj query, BSONObj update, StringData ns, UUID uuid) {
-    return BSON("ts" << Timestamp(time, time) << "h" << time << "t" << time << "op"
+    return BSON("ts" << Timestamp(time, time) << "t" << time << "op"
                      << "u"
                      << "ns"
                      << ns
@@ -85,7 +87,7 @@ BSONObj makeUpdateOplogEntry(
 }
 
 BSONObj makeDeleteOplogEntry(long long time, BSONObj id, StringData ns, UUID uuid) {
-    return BSON("ts" << Timestamp(time, time) << "h" << time << "t" << time << "op"
+    return BSON("ts" << Timestamp(time, time) << "t" << time << "op"
                      << "d"
                      << "ns"
                      << ns
@@ -171,12 +173,11 @@ protected:
         ASSERT_OK(_storageInterface->createCollection(opCtx, nss, options));
 
         // Initialize a mock collection.
-        std::unique_ptr<Collection> coll =
-            std::make_unique<Collection>(std::make_unique<CollectionMock>(nss));
+        auto coll = std::make_unique<CollectionMock>(nss);
 
         // Register the UUID to that collection in the UUIDCatalog.
         UUIDCatalog::get(opCtx).registerUUIDCatalogEntry(uuid, coll.get());
-        return coll;
+        return std::move(coll);
     }
 
     /**
@@ -347,11 +348,11 @@ private:
 };
 
 /**
- * Helper functions to make simple oplog entries with timestamps, terms, and hashes.
+ * Helper functions to make simple oplog entries with timestamps and terms.
  */
-BSONObj makeOp(OpTime time, long long hash) {
+BSONObj makeOp(OpTime time) {
     auto kGenericUUID = unittest::assertGet(UUID::parse(kGenericUUIDStr));
-    return BSON("ts" << time.getTimestamp() << "h" << hash << "t" << time.getTerm() << "op"
+    return BSON("ts" << time.getTimestamp() << "t" << time.getTerm() << "op"
                      << "n"
                      << "o"
                      << BSONObj()
@@ -362,16 +363,16 @@ BSONObj makeOp(OpTime time, long long hash) {
 }
 
 BSONObj makeOp(int count) {
-    return makeOp(OpTime(Timestamp(count, count), count), count);
+    return makeOp(OpTime(Timestamp(count, count), count));
 }
 
 /**
- * Helper functions to make simple oplog entries with timestamps, terms, hashes, and wall clock
+ * Helper functions to make simple oplog entries with timestamps, terms, and wall clock
  * times.
  */
-auto makeOpWithWallClockTime(long count, long long hash, long wallClockMillis) {
+auto makeOpWithWallClockTime(long count, long wallClockMillis) {
     auto kGenericUUID = unittest::assertGet(UUID::parse(kGenericUUIDStr));
-    return BSON("ts" << Timestamp(count, count) << "h" << hash << "t" << (long long)count << "op"
+    return BSON("ts" << Timestamp(count, count) << "t" << (long long)count << "op"
                      << "n"
                      << "o"
                      << BSONObj()
@@ -392,8 +393,8 @@ OplogInterfaceMock::Operation makeOpAndRecordId(const BSONObj& op) {
     return std::make_pair(op, RecordId(++recordId));
 }
 
-OplogInterfaceMock::Operation makeOpAndRecordId(OpTime time, long long hash) {
-    return makeOpAndRecordId(makeOp(time, hash));
+OplogInterfaceMock::Operation makeOpAndRecordId(OpTime time) {
+    return makeOpAndRecordId(makeOp(time));
 }
 
 OplogInterfaceMock::Operation makeOpAndRecordId(int count) {
@@ -463,8 +464,8 @@ TEST_F(RollbackImplTest, RollbackReturnsNoMatchingDocumentWhenNoCommonPoint) {
 TEST_F(RollbackImplTest, RollbackSucceedsIfRollbackPeriodIsWithinTimeLimit) {
 
     // The default limit is 1 day, so we make the difference be just under a day.
-    auto commonPoint = makeOpAndRecordId(makeOpWithWallClockTime(1, 1, 5 * 1000));
-    auto topOfOplog = makeOpAndRecordId(makeOpWithWallClockTime(2, 2, 60 * 60 * 24 * 1000));
+    auto commonPoint = makeOpAndRecordId(makeOpWithWallClockTime(1, 5 * 1000));
+    auto topOfOplog = makeOpAndRecordId(makeOpWithWallClockTime(2, 60 * 60 * 24 * 1000));
 
     _remoteOplog->setOperations({commonPoint});
     ASSERT_OK(_insertOplogEntry(commonPoint.first));
@@ -479,8 +480,8 @@ TEST_F(RollbackImplTest, RollbackSucceedsIfRollbackPeriodIsWithinTimeLimit) {
 TEST_F(RollbackImplTest, RollbackFailsIfRollbackPeriodIsTooLong) {
 
     // The default limit is 1 day, so we make the difference be 2 days.
-    auto commonPoint = makeOpAndRecordId(makeOpWithWallClockTime(1, 1, 5 * 1000));
-    auto topOfOplog = makeOpAndRecordId(makeOpWithWallClockTime(2, 2, 2 * 60 * 60 * 24 * 1000));
+    auto commonPoint = makeOpAndRecordId(makeOpWithWallClockTime(1, 5 * 1000));
+    auto topOfOplog = makeOpAndRecordId(makeOpWithWallClockTime(2, 2 * 60 * 60 * 24 * 1000));
 
     _remoteOplog->setOperations({commonPoint});
     ASSERT_OK(_insertOplogEntry(commonPoint.first));
@@ -855,7 +856,7 @@ TEST_F(RollbackImplTest, RollbackDoesNotWriteRollbackFilesIfNoInsertsOrUpdatesAf
     const auto uuid = UUID::gen();
     const auto nss = NamespaceString("db.coll");
     const auto coll = _initializeCollection(_opCtx.get(), uuid, nss);
-    const auto oplogEntry = BSON("ts" << Timestamp(3, 3) << "h" << 3LL << "t" << 3LL << "op"
+    const auto oplogEntry = BSON("ts" << Timestamp(3, 3) << "t" << 3LL << "op"
                                       << "c"
                                       << "o"
                                       << BSON("create" << nss.coll())
@@ -1080,15 +1081,15 @@ TEST_F(RollbackImplTest, RollbackProperlySavesFilesWhenInsertsAndDropOfCollectio
     _insertDocAndGenerateOplogEntry(obj2, uuid, nss);
 
     // Create an oplog entry for the collection drop.
-    const auto oplogEntry = BSON(
-        "ts" << dropOpTime.getTimestamp() << "h" << 200LL << "t" << dropOpTime.getTerm() << "op"
-             << "c"
-             << "o"
-             << BSON("drop" << nss.coll())
-             << "ns"
-             << nss.ns()
-             << "ui"
-             << uuid);
+    const auto oplogEntry =
+        BSON("ts" << dropOpTime.getTimestamp() << "t" << dropOpTime.getTerm() << "op"
+                  << "c"
+                  << "o"
+                  << BSON("drop" << nss.coll())
+                  << "ns"
+                  << nss.ns()
+                  << "ui"
+                  << uuid);
     ASSERT_OK(_insertOplogEntry(oplogEntry));
 
     ASSERT_OK(_rollback->runRollback(_opCtx.get()));
@@ -1113,7 +1114,7 @@ TEST_F(RollbackImplTest, RollbackProperlySavesFilesWhenCreateCollAndInsertsAreRo
     const auto nss = NamespaceString("db.people");
     const auto uuid = UUID::gen();
     const auto coll = _initializeCollection(_opCtx.get(), uuid, nss);
-    const auto oplogEntry = BSON("ts" << Timestamp(3, 3) << "h" << 3LL << "t" << 3LL << "op"
+    const auto oplogEntry = BSON("ts" << Timestamp(3, 3) << "t" << 3LL << "op"
                                       << "c"
                                       << "o"
                                       << BSON("create" << nss.coll())
@@ -1289,12 +1290,13 @@ TEST_F(RollbackImplTest, CountChangesCancelOut) {
     _deleteDocAndGenerateOplogEntry(obj["_id"], uuid, nss, 3);
     _insertDocAndGenerateOplogEntry(BSON("_id" << 3), uuid, nss, 4);
 
-    // Test that we do nothing on drop oplog entries.
+    // Test that we read the collection count from drop entries.
     ASSERT_OK(_insertOplogEntry(makeCommandOp(Timestamp(5, 5),
-                                              UUID::gen(),
+                                              uuid,
                                               nss.getCommandNS().toString(),
                                               BSON("drop" << nss.coll()),
-                                              5)
+                                              5,
+                                              BSON("numRecords" << 1))
                                     .first));
 
     ASSERT_EQ(2ULL,
@@ -1367,6 +1369,35 @@ TEST_F(RollbackImplTest, ResetToZeroIfCountGoesNegative) {
     ASSERT_EQ(_storageInterface->getFinalCollectionCount(kGenericUUID), 0);
 }
 
+TEST_F(RollbackImplTest, RollbackCallsClearOpTimes) {
+    auto op = makeOpAndRecordId(1);
+    _remoteOplog->setOperations({op});
+    ASSERT_OK(_insertOplogEntry(op.first));
+    ASSERT_OK(_insertOplogEntry(makeOp(2)));
+    _storageInterface->setStableTimestamp(nullptr, Timestamp(1, 1));
+
+    auto txnMetrics = ServerTransactionsMetrics::get(getGlobalServiceContext());
+
+    // Insert arbitrary values for _oldestActiveOplogEntryOpTime, _oldestActiveOplogEntryOpTimes,
+    // and _oldestNonMajorityCommittedOpTimes. This simulates two active prepared transactions.
+    txnMetrics->addActiveOpTime(repl::OpTime(Timestamp(1, 2), 0));
+    txnMetrics->addActiveOpTime(repl::OpTime(Timestamp(1, 3), 0));
+
+    // All three variables should be populated at this time.
+    ASSERT(txnMetrics->getOldestActiveOpTime());
+    ASSERT_EQ(*txnMetrics->getOldestActiveOpTime(), repl::OpTime(Timestamp(1, 2), 0));
+    ASSERT_EQ(txnMetrics->getTotalActiveOpTimes(), 2U);
+    ASSERT(txnMetrics->getOldestNonMajorityCommittedOpTime());
+    ASSERT_EQ(*txnMetrics->getOldestNonMajorityCommittedOpTime(), repl::OpTime(Timestamp(1, 2), 0));
+
+    // Call runRollback to make sure these variables get cleared.
+    ASSERT_OK(_rollback->runRollback(_opCtx.get()));
+
+    ASSERT_FALSE(txnMetrics->getOldestActiveOpTime());
+    ASSERT_EQ(txnMetrics->getTotalActiveOpTimes(), 0U);
+    ASSERT_FALSE(txnMetrics->getOldestNonMajorityCommittedOpTime());
+}
+
 /**
  * Fixture to help test that rollback records the correct information in its RollbackObserverInfo
  * struct.
@@ -1402,7 +1433,6 @@ public:
 
         BSONObjBuilder bob;
         bob.append("ts", time);
-        bob.append("h", 1LL);
         bob.append("op", "i");
         collId.appendToBuilder(&bob, "ui");
         bob.append("ns", nss.ns());
@@ -1625,11 +1655,13 @@ TEST_F(RollbackImplObserverInfoTest, RollbackRecordsNamespacesOfApplyOpsOplogEnt
                                   2);
 
     auto dropNss = NamespaceString("test", "dropColl");
+    auto dropUuid = UUID::gen();
     auto dropOp = makeCommandOp(Timestamp(2, 2),
-                                UUID::gen(),
+                                dropUuid,
                                 dropNss.getCommandNS().toString(),
                                 BSON("drop" << dropNss.coll()),
                                 2);
+    _initializeCollection(_opCtx.get(), dropUuid, dropNss);
 
     auto collModNss = NamespaceString("test", "collModColl");
     auto collModOp = makeCommandOp(Timestamp(2, 2),

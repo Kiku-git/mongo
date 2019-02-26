@@ -591,6 +591,7 @@ var MongoRunner, _startMongod, startMongoProgram, runMongoProgram, startMongoPro
         _removeSetParameterIfBeforeVersion(opts, "writePeriodicNoops", "3.3.12");
         _removeSetParameterIfBeforeVersion(opts, "numInitialSyncAttempts", "3.3.12");
         _removeSetParameterIfBeforeVersion(opts, "numInitialSyncConnectAttempts", "3.3.12");
+        _removeSetParameterIfBeforeVersion(opts, "migrationLockAcquisitionMaxWaitMS", "4.1.7");
 
         if (!opts.logFile && opts.useLogFiles) {
             opts.logFile = opts.dbpath + "/mongod.log";
@@ -1104,12 +1105,20 @@ var MongoRunner, _startMongod, startMongoProgram, runMongoProgram, startMongoPro
             if (programName.endsWith('mongos')) {
                 // apply setParameters for mongos
                 if (jsTest.options().setParametersMongos) {
-                    var params = jsTest.options().setParametersMongos.split(",");
-                    if (params && params.length > 0) {
-                        params.forEach(function(p) {
-                            if (p)
-                                argArray.push(...['--setParameter', p]);
-                        });
+                    let params = jsTest.options().setParametersMongos;
+                    for (let paramName of Object.keys(params)) {
+                        // Only set the 'logComponentVerbosity' parameter if it has not already
+                        // been specified in the given argument array. This means that any
+                        // 'logComponentVerbosity' settings passed through via TestData will
+                        // always be overridden by settings passed directly to MongoRunner from
+                        // within the shell.
+                        if (paramName === "logComponentVerbosity" &&
+                            argArrayContains("logComponentVerbosity")) {
+                            continue;
+                        }
+                        const paramVal = params[paramName];
+                        const setParamStr = paramName + "=" + JSON.stringify(paramVal);
+                        argArray.push(...['--setParameter', setParamStr]);
                     }
                 }
             } else if (baseProgramName === 'mongod') {
@@ -1176,6 +1185,12 @@ var MongoRunner, _startMongod, startMongoProgram, runMongoProgram, startMongoPro
                         if (jsTest.options().storageEngineCacheSizeGB) {
                             argArray.push(...['--rocksdbCacheSizeGB',
                                               jsTest.options().storageEngineCacheSizeGB]);
+                        }
+                    } else if (jsTest.options().storageEngine === "inMemory") {
+                        if (jsTest.options().storageEngineCacheSizeGB &&
+                            !argArrayContains("--inMemorySizeGB")) {
+                            argArray.push(
+                                ...["--inMemorySizeGB", jsTest.options().storageEngineCacheSizeGB]);
                         }
                     }
                     // apply setParameters for mongod. The 'setParameters' field should be given as

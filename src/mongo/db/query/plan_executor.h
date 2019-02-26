@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -44,7 +43,6 @@ class BSONObj;
 class CappedInsertNotifier;
 struct CappedInsertNotifierData;
 class Collection;
-class CursorManager;
 class PlanExecutor;
 class PlanStage;
 class PlanYieldPolicy;
@@ -79,18 +77,17 @@ public:
         // We're EOF.  We won't return any more results (edge case exception: capped+tailable).
         IS_EOF,
 
-        // We were killed. This is a special failure case in which we cannot rely on the
-        // collection or database to still be valid.
+        // getNext() was asked for data it cannot provide, or the underlying PlanStage had an
+        // unrecoverable error, or the executor died, usually due to a concurrent catalog event
+        // such as a collection drop.
+        //
         // If the underlying PlanStage has any information on the error, it will be available in
         // the objOut parameter. Call WorkingSetCommon::toStatusString() to retrieve the error
         // details from the output BSON object.
-        DEAD,
-
-        // getNext was asked for data it cannot provide, or the underlying PlanStage had an
-        // unrecoverable error.
-        // If the underlying PlanStage has any information on the error, it will be available in
-        // the objOut parameter. Call WorkingSetCommon::toStatusString() to retrieve the error
-        // details from the output BSON object.
+        //
+        // The PlanExecutor is no longer capable of executing. The caller may extract stats from the
+        // underlying plan stages, but should not attempt to do anything else with the executor
+        // other than dispose() and destroy it.
         FAILURE,
     };
 
@@ -99,20 +96,27 @@ public:
      * (NO_YIELD).
      */
     enum YieldPolicy {
-        // Any call to getNext() may yield. In particular, the executor may be killed during any
-        // call to getNext().  If this occurs, getNext() will return DEAD. Additionally, this
-        // will handle all WriteConflictExceptions that occur while processing the query.
+        // Any call to getNext() may yield. In particular, the executor may die on any call to
+        // getNext() due to a required index or collection becoming invalid during yield. If this
+        // occurs, getNext() will produce an error during yield recovery and will return FAILURE.
+        // Additionally, this will handle all WriteConflictExceptions that occur while processing
+        // the query.
         YIELD_AUTO,
 
         // This will handle WriteConflictExceptions that occur while processing the query, but will
         // not yield locks. abandonSnapshot() will be called if a WriteConflictException occurs so
         // callers must be prepared to get a new snapshot. The caller must hold their locks
-        // continuously from construction to destruction, since a PlanExecutor with this policy will
-        // not be registered to receive kill notifications.
+        // continuously from construction to destruction. Callers which do not want auto-yielding,
+        // but may release their locks during query execution must use the YIELD_MANUAL policy.
         WRITE_CONFLICT_RETRY_ONLY,
 
         // Use this policy if you want to disable auto-yielding, but will release locks while using
         // the PlanExecutor. Any WriteConflictExceptions will be raised to the caller of getNext().
+        //
+        // With this policy, an explicit call must be made to saveState() before releasing locks,
+        // and an explicit call to restoreState() must be made after reacquiring locks.
+        // restoreState() will throw if the PlanExecutor is now invalid due to a catalog operation
+        // (e.g. collection drop) during yield.
         YIELD_MANUAL,
 
         // Can be used in one of the following scenarios:
@@ -126,22 +130,15 @@ public:
         INTERRUPT_ONLY,
 
         // Used for testing, this yield policy will cause the PlanExecutor to time out on the first
-        // yield, returning DEAD with an error object encoding a ErrorCodes::ExceededTimeLimit
+        // yield, returning FAILURE with an error object encoding a ErrorCodes::ExceededTimeLimit
         // message.
         ALWAYS_TIME_OUT,
 
         // Used for testing, this yield policy will cause the PlanExecutor to be marked as killed on
-        // the first yield, returning DEAD with an error object encoding a
+        // the first yield, returning FAILURE with an error object encoding a
         // ErrorCodes::QueryPlanKilled message.
         ALWAYS_MARK_KILLED,
     };
-
-    /**
-     * RegistrationToken is the type of key used to register this PlanExecutor with the
-     * CursorManager.
-     */
-    using RegistrationToken =
-        boost::optional<Partitioned<stdx::unordered_set<PlanExecutor*>>::PartitionId>;
 
     /**
      * This class will ensure a PlanExecutor is disposed before it is deleted.
@@ -154,8 +151,7 @@ public:
          */
         Deleter() = default;
 
-        inline Deleter(OperationContext* opCtx, CursorManager* cursorManager)
-            : _opCtx(opCtx), _cursorManager(cursorManager) {}
+        inline Deleter(OperationContext* opCtx) : _opCtx(opCtx) {}
 
         /**
          * If an owner of a std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> wants to assume
@@ -167,16 +163,15 @@ public:
         }
 
         /**
-         * If 'execPtr' hasn't already been disposed, will call dispose(). Also, if 'execPtr' has
-         * been registered with the CursorManager, will deregister it. If 'execPtr' is a yielding
-         * PlanExecutor, callers must hold a lock on the collection in at least MODE_IS.
+         * If 'execPtr' hasn't already been disposed, will call dispose(). If 'execPtr' is a
+         * yielding PlanExecutor, callers must hold a lock on the collection in at least MODE_IS.
          */
         inline void operator()(PlanExecutor* execPtr) {
             try {
                 // It is illegal to invoke operator() on a default constructed Deleter.
                 invariant(_opCtx);
                 if (!_dismissed) {
-                    execPtr->dispose(_opCtx, _cursorManager);
+                    execPtr->dispose(_opCtx);
                 }
                 delete execPtr;
             } catch (...) {
@@ -187,7 +182,6 @@ public:
 
     private:
         OperationContext* _opCtx = nullptr;
-        CursorManager* _cursorManager = nullptr;
 
         bool _dismissed = false;
     };
@@ -204,8 +198,8 @@ public:
     //   - On any call to restoreState().
     //   - While executing the plan inside executePlan().
     //
-    // The executor will also be automatically registered to receive notifications in the case of
-    // YIELD_AUTO or YIELD_MANUAL.
+    // If auto-yielding is enabled, a yield during make() may result in the PlanExecutor being
+    // killed, in which case this method will return a non-OK status.
     //
 
     /**
@@ -386,19 +380,17 @@ public:
     //
 
     /**
-     * If we're yielding locks, the database we're operating over or any collection we're relying on
-     * may be dropped. Plan executors are notified of such events by calling markAsKilled().
-     * Callers must specify the reason for why this executor is being killed. Subsequent calls to
-     * getNext() will return DEAD, and fill 'objOut' with an error reflecting 'killStatus'. If this
-     * method is called multiple times, only the first 'killStatus' will be retained. It is an error
-     * to call this method with Status::OK.
+     * Notifies a PlanExecutor that it should die. Callers must specify the reason for why this
+     * executor is being killed. Subsequent calls to getNext() will return FAILURE, and fill
+     * 'objOut'
+     * with an error reflecting 'killStatus'. If this method is called multiple times, only the
+     * first 'killStatus' will be retained. It is an error to call this method with Status::OK.
      */
     virtual void markAsKilled(Status killStatus) = 0;
 
     /**
      * Cleans up any state associated with this PlanExecutor. Must be called before deleting this
-     * PlanExecutor. It is illegal to use a PlanExecutor after calling dispose(). 'cursorManager'
-     * may be null.
+     * PlanExecutor. It is illegal to use a PlanExecutor after calling dispose().
      *
      * There are multiple cleanup scenarios:
      *  - This PlanExecutor will only ever use one OperationContext. In this case the
@@ -408,7 +400,7 @@ public:
      *    is the owner's responsibility to call dispose() with a valid OperationContext before
      *    deleting the PlanExecutor.
      */
-    virtual void dispose(OperationContext* opCtx, CursorManager* cursorManager) = 0;
+    virtual void dispose(OperationContext* opCtx) = 0;
 
     /**
      * Helper method to aid in displaying an ExecState for debug or other recreational purposes.
@@ -435,15 +427,6 @@ public:
      */
     virtual BSONObjSet getOutputSorts() const = 0;
 
-    /**
-     * Communicate to this PlanExecutor that it is no longer registered with the CursorManager as a
-     * 'non-cached PlanExecutor'.
-     */
-    virtual void unsetRegistered() = 0;
-    virtual RegistrationToken getRegistrationToken() const& = 0;
-    void getRegistrationToken() && = delete;
-    virtual void setRegistrationToken(RegistrationToken token) & = 0;
-
     virtual bool isMarkedAsKilled() const = 0;
     virtual Status getKillStatus() = 0;
 
@@ -454,7 +437,13 @@ public:
      * If the last oplog timestamp is being tracked for this PlanExecutor, return it.
      * Otherwise return a null timestamp.
      */
-    virtual Timestamp getLatestOplogTimestamp() = 0;
+    virtual Timestamp getLatestOplogTimestamp() const = 0;
+
+    /**
+     * If this PlanExecutor is tracking change stream resume tokens, return the most recent token
+     * for the batch that is currently being built. Otherwise, return an empty object.
+     */
+    virtual BSONObj getPostBatchResumeToken() const = 0;
 
     /**
      * Turns a BSONObj representing an error status produced by getNext() into a Status.

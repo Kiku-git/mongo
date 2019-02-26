@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -46,6 +45,7 @@ namespace mongo {
 
 class BSONObj;
 class BSONObjBuilder;
+class CommitQuorumOptions;
 class IndexDescriptor;
 class NamespaceString;
 class OperationContext;
@@ -73,7 +73,6 @@ class ReadConcernArgs;
 class ReplSetConfig;
 class ReplSetHeartbeatArgsV1;
 class ReplSetHeartbeatResponse;
-class ReplSetHtmlSummary;
 class ReplSetRequestVotesArgs;
 class ReplSetRequestVotesResponse;
 class UpdatePositionArgs;
@@ -215,8 +214,8 @@ public:
      * will not be able to receive writes to a database other than local (it will not be
      * treated as standalone node).
      *
-     * NOTE: This function can only be meaningfully called while the caller holds the global
-     * lock in some mode other than MODE_NONE.
+     * NOTE: This function can only be meaningfully called while the caller holds the
+     * ReplicationStateTransitionLock in some mode other than MODE_NONE.
      */
     virtual bool canAcceptWritesForDatabase(OperationContext* opCtx, StringData dbName) = 0;
 
@@ -250,6 +249,26 @@ public:
      */
     virtual Status checkIfWriteConcernCanBeSatisfied(
         const WriteConcernOptions& writeConcern) const = 0;
+
+    /**
+     * Checks if the 'commitQuorum' can be satisfied by all the members in the replica set; if it
+     * cannot be satisfied, then the 'UnsatisfiableCommitQuorum' error code is returned.
+     *
+     * Returns the 'NoReplicationEnabled' error code if this is called without replication enabled.
+     */
+    virtual Status checkIfCommitQuorumCanBeSatisfied(
+        const CommitQuorumOptions& commitQuorum) const = 0;
+
+    /**
+     * Checks if the 'commitQuorum' has been satisfied by the 'commitReadyMembers', if it has been
+     * satisfied, return true.
+     *
+     * Prior to checking if the 'commitQuorum' is satisfied by 'commitReadyMembers', it calls
+     * 'checkIfCommitQuorumCanBeSatisfied()' with all the replica set members.
+     */
+    virtual StatusWith<bool> checkIfCommitQuorumIsSatisfied(
+        const CommitQuorumOptions& commitQuorum,
+        const std::vector<HostAndPort>& commitReadyMembers) const = 0;
 
     /**
      * Returns Status::OK() if it is valid for this node to serve reads on the given collection
@@ -368,6 +387,19 @@ public:
     virtual Status waitUntilOpTimeForReadUntil(OperationContext* opCtx,
                                                const ReadConcernArgs& settings,
                                                boost::optional<Date_t> deadline) = 0;
+
+    /**
+     * Wait until the given optime is known to be majority committed.
+     *
+     * The given optime is expected to be an optime in this node's local oplog. This method cannot
+     * determine correctly whether an arbitrary optime is majority committed within a replica set.
+     * It is expected that the execution of this method is contained within the span of one user
+     * operation, and thus, should not span rollbacks.
+     *
+     * Returns whether the wait was successful. Will respect the deadline on the given
+     * OperationContext, if one has been set.
+     */
+    virtual Status awaitOpTimeCommitted(OperationContext* opCtx, OpTime opTime) = 0;
 
     /**
      * Retrieves and returns the current election id, which is a unique id that is local to
@@ -715,12 +747,6 @@ public:
     virtual bool getWriteConcernMajorityShouldJournal() = 0;
 
     /**
-     * Writes into 'output' all the information needed to generate a summary of the current
-     * replication state for use by the web interface.
-     */
-    virtual void summarizeAsHtml(ReplSetHtmlSummary* output) = 0;
-
-    /**
      * Returns the current term.
      */
     virtual long long getTerm() = 0;
@@ -775,8 +801,6 @@ public:
      */
     virtual WriteConcernOptions populateUnsetWriteConcernOptionsSyncMode(
         WriteConcernOptions wc) = 0;
-    virtual ReplSettings::IndexPrefetchConfig getIndexPrefetchConfig() const = 0;
-    virtual void setIndexPrefetchConfig(const ReplSettings::IndexPrefetchConfig cfg) = 0;
 
     virtual Status stepUpIfEligible(bool skipDryRun) = 0;
 
@@ -808,6 +832,13 @@ public:
      * Returns true if the current replica set config has at least one arbiter.
      */
     virtual bool setContainsArbiter() const = 0;
+
+    /**
+     * Instructs the ReplicationCoordinator to recalculate the stable timestamp and advance it for
+     * storage if needed.
+     */
+    virtual void attemptToAdvanceStableTimestamp() = 0;
+
 
 protected:
     ReplicationCoordinator();

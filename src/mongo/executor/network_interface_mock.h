@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -52,7 +51,6 @@ class BSONObj;
 
 namespace executor {
 
-using ResponseStatus = TaskExecutor::ResponseStatus;
 class NetworkConnectionHook;
 
 /**
@@ -84,16 +82,11 @@ public:
 
     NetworkInterfaceMock();
     virtual ~NetworkInterfaceMock();
-    virtual void appendConnectionStats(ConnectionPoolStats* stats) const;
-    virtual std::string getDiagnosticString();
-    Counters getCounters() const override {
-        return Counters();
-    }
 
     /**
      * Logs the contents of the queues for diagnostics.
      */
-    virtual void logQueues();
+    void logQueues();
 
     ////////////////////////////////////////////////////////////////////////////////
     //
@@ -101,20 +94,26 @@ public:
     //
     ////////////////////////////////////////////////////////////////////////////////
 
-    virtual void startup();
-    virtual void shutdown();
-    virtual bool inShutdown() const;
-    virtual void waitForWork();
-    virtual void waitForWorkUntil(Date_t when);
-    virtual void setConnectionHook(std::unique_ptr<NetworkConnectionHook> hook);
-    virtual void setEgressMetadataHook(std::unique_ptr<rpc::EgressMetadataHook> metadataHook);
-    virtual void signalWorkAvailable();
-    virtual Date_t now();
-    virtual std::string getHostName();
-    virtual Status startCommand(const TaskExecutor::CallbackHandle& cbHandle,
-                                RemoteCommandRequest& request,
-                                RemoteCommandCompletionFn&& onFinish,
-                                const transport::BatonHandle& baton = nullptr);
+    void appendConnectionStats(ConnectionPoolStats* stats) const override {}
+
+    std::string getDiagnosticString() override;
+
+    Counters getCounters() const override {
+        return Counters();
+    }
+
+    void startup() override;
+    void shutdown() override;
+    bool inShutdown() const override;
+    void waitForWork() override;
+    void waitForWorkUntil(Date_t when) override;
+    void signalWorkAvailable() override;
+    Date_t now() override;
+    std::string getHostName() override;
+    Status startCommand(const TaskExecutor::CallbackHandle& cbHandle,
+                        RemoteCommandRequest& request,
+                        RemoteCommandCompletionFn&& onFinish,
+                        const BatonHandle& baton = nullptr) override;
 
     /**
      * If the network operation is in the _unscheduled or _processing queues, moves the operation
@@ -122,20 +121,17 @@ public:
      * the _scheduled queue, does nothing. The latter simulates the case where cancelCommand() is
      * called after the task has already completed, but its callback has not yet been run.
      */
-    virtual void cancelCommand(const TaskExecutor::CallbackHandle& cbHandle,
-                               const transport::BatonHandle& baton = nullptr);
+    void cancelCommand(const TaskExecutor::CallbackHandle& cbHandle,
+                       const BatonHandle& baton = nullptr) override;
 
     /**
      * Not implemented.
      */
-    virtual Status setAlarm(Date_t when,
-                            unique_function<void()> action,
-                            const transport::BatonHandle& baton = nullptr);
+    Status setAlarm(Date_t when, unique_function<void()> action) override;
 
-    virtual bool onNetworkThread();
+    bool onNetworkThread() override;
 
     void dropConnections(const HostAndPort&) override {}
-
 
     ////////////////////////////////////////////////////////////////////////////////
     //
@@ -150,6 +146,10 @@ public:
      * RAII-style class for entering and exiting network.
      */
     class InNetworkGuard;
+
+    void setConnectionHook(std::unique_ptr<NetworkConnectionHook> hook);
+
+    void setEgressMetadataHook(std::unique_ptr<rpc::EgressMetadataHook> metadataHook);
 
     /**
      * Causes the currently running (non-executor) thread to assume the mantle of the network
@@ -199,7 +199,7 @@ public:
      */
     void scheduleResponse(NetworkOperationIterator noi,
                           Date_t when,
-                          const ResponseStatus& response);
+                          const TaskExecutor::ResponseStatus& response);
 
     /**
      * Schedules a successful "response" to "noi" at virtual time "when".
@@ -221,13 +221,12 @@ public:
      * "when" defaults to now().
      */
     RemoteCommandRequest scheduleErrorResponse(const Status& response);
-    RemoteCommandRequest scheduleErrorResponse(const ResponseStatus response);
+    RemoteCommandRequest scheduleErrorResponse(const TaskExecutor::ResponseStatus response);
     RemoteCommandRequest scheduleErrorResponse(NetworkOperationIterator noi,
                                                const Status& response);
     RemoteCommandRequest scheduleErrorResponse(NetworkOperationIterator noi,
                                                Date_t when,
                                                const Status& response);
-
 
     /**
      * Swallows "noi", causing the network interface to not respond to it until
@@ -249,6 +248,11 @@ public:
      * Will not return until the executor thread is blocked in waitForWorkUntil or waitForWork.
      */
     Date_t runUntil(Date_t until);
+
+    /**
+     * Runs the simulator forward until now() == until.
+     */
+    void advanceTime(Date_t newTime);
 
     /**
      * Processes all ready, scheduled network operations.
@@ -276,8 +280,8 @@ public:
      * CallbackCanceled error.
      */
     void _interruptWithResponse_inlock(const TaskExecutor::CallbackHandle& cbHandle,
-                                       const std::vector<NetworkOperationList*> queuesToCheck,
-                                       const ResponseStatus& response);
+                                       const std::vector<NetworkOperationList*>& queuesToCheck,
+                                       const TaskExecutor::ResponseStatus& response);
 
 private:
     /**
@@ -307,15 +311,6 @@ private:
      */
     void _startup_inlock();
 
-    /**
-     * Returns information about the state of this mock for diagnostic purposes.
-     */
-    std::string _getDiagnosticString_inlock() const;
-
-    /**
-     * Logs the contents of the queues for diagnostics.
-     */
-    void _logQueues_inlock() const;
     /**
      * Returns the current virtualized time.
      */
@@ -446,7 +441,7 @@ public:
     /**
      * Sets the response and thet virtual time at which it will be delivered.
      */
-    void setResponse(Date_t responseDate, const ResponseStatus& response);
+    void setResponse(Date_t responseDate, const TaskExecutor::ResponseStatus& response);
 
     /**
      * Predicate that returns true if cbHandle equals the executor's handle for this network
@@ -506,7 +501,7 @@ private:
     Date_t _responseDate;
     TaskExecutor::CallbackHandle _cbHandle;
     RemoteCommandRequest _request;
-    ResponseStatus _response;
+    TaskExecutor::ResponseStatus _response;
     RemoteCommandCompletionFn _onFinish;
 };
 

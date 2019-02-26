@@ -1,7 +1,3 @@
-/* connpool.cpp
- */
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -674,7 +670,7 @@ void ScopedDbConnection::clearPool() {
     globalConnPool.clear();
 }
 
-AtomicInt32 AScopedConnection::_numConnections;
+AtomicWord<int> AScopedConnection::_numConnections;
 
 MONGO_INITIALIZER(SetupDBClientBaseWithConnection)(InitializerContext*) {
     DBClientBase::withConnection_do_not_use = [](std::string host,

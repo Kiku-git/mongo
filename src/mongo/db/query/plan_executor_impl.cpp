@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -41,12 +40,13 @@
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/exec/cached_plan.h"
+#include "mongo/db/exec/change_stream_proxy.h"
 #include "mongo/db/exec/collection_scan.h"
 #include "mongo/db/exec/multi_plan.h"
-#include "mongo/db/exec/pipeline_proxy.h"
 #include "mongo/db/exec/plan_stage.h"
 #include "mongo/db/exec/plan_stats.h"
 #include "mongo/db/exec/subplan.h"
+#include "mongo/db/exec/trial_stage.h"
 #include "mongo/db/exec/working_set.h"
 #include "mongo/db/exec/working_set_common.h"
 #include "mongo/db/query/find_common.h"
@@ -203,7 +203,7 @@ StatusWith<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> PlanExecutorImpl::ma
                                          collection,
                                          std::move(nss),
                                          yieldPolicy);
-    PlanExecutor::Deleter planDeleter(opCtx, collection ? collection->getCursorManager() : nullptr);
+    PlanExecutor::Deleter planDeleter(opCtx);
     std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> exec(execImpl, std::move(planDeleter));
 
     // Perform plan selection, if necessary.
@@ -238,9 +238,6 @@ PlanExecutorImpl::PlanExecutorImpl(OperationContext* opCtx,
 
     if (collection) {
         _nss = collection->ns();
-        if (_yieldPolicy->canReleaseLocksDuringExecution()) {
-            _registrationToken = collection->getCursorManager()->registerExecutor(this);
-        }
     } else {
         invariant(_cq);
         _nss = _cq->getQueryRequest().nss();
@@ -273,6 +270,14 @@ Status PlanExecutorImpl::_pickBestPlan() {
         return cachedPlan->pickBestPlan(_yieldPolicy.get());
     }
 
+    // Finally, we might have an explicit TrialPhase. This specifies exactly two candidate plans,
+    // one of which is to be evaluated. If it fails the trial, then the backup plan is adopted.
+    foundStage = getStageByType(_root.get(), STAGE_TRIAL);
+    if (foundStage) {
+        TrialStage* trialStage = static_cast<TrialStage*>(foundStage);
+        return trialStage->pickBestPlan(_yieldPolicy.get());
+    }
+
     // Either we chose a plan, or no plan selection was required. In both cases,
     // our work has been successfully completed.
     return Status::OK();
@@ -288,8 +293,6 @@ string PlanExecutor::statestr(ExecState s) {
         return "ADVANCED";
     } else if (PlanExecutor::IS_EOF == s) {
         return "IS_EOF";
-    } else if (PlanExecutor::DEAD == s) {
-        return "DEAD";
     } else {
         verify(PlanExecutor::FAILURE == s);
         return "FAILURE";
@@ -450,7 +453,8 @@ std::shared_ptr<CappedInsertNotifier> PlanExecutorImpl::_getCappedInsertNotifier
     // We can only wait if we have a collection; otherwise we should retry immediately when
     // we hit EOF.
     dassert(_opCtx->lockState()->isCollectionLockedForMode(_nss.ns(), MODE_IS));
-    auto db = DatabaseHolder::getDatabaseHolder().get(_opCtx, _nss.db());
+    auto databaseHolder = DatabaseHolder::get(_opCtx);
+    auto db = databaseHolder->getDb(_opCtx, _nss.db());
     invariant(db);
     auto collection = db->getCollection(_opCtx, _nss);
     invariant(collection);
@@ -487,7 +491,7 @@ PlanExecutor::ExecState PlanExecutorImpl::_waitForInserts(CappedInsertNotifierDa
         *errorObj = Snapshotted<BSONObj>(SnapshotId(),
                                          WorkingSetCommon::buildMemberStatusObject(yieldResult));
     }
-    return DEAD;
+    return FAILURE;
 }
 
 PlanExecutor::ExecState PlanExecutorImpl::_getNextImpl(Snapshotted<BSONObj>* objOut,
@@ -507,7 +511,7 @@ PlanExecutor::ExecState PlanExecutorImpl::_getNextImpl(Snapshotted<BSONObj>* obj
             *objOut = Snapshotted<BSONObj>(SnapshotId(),
                                            WorkingSetCommon::buildMemberStatusObject(_killStatus));
         }
-        return PlanExecutor::DEAD;
+        return PlanExecutor::FAILURE;
     }
 
     if (!_stash.empty()) {
@@ -541,7 +545,7 @@ PlanExecutor::ExecState PlanExecutorImpl::_getNextImpl(Snapshotted<BSONObj>* obj
                     *objOut = Snapshotted<BSONObj>(
                         SnapshotId(), WorkingSetCommon::buildMemberStatusObject(yieldStatus));
                 }
-                return PlanExecutor::DEAD;
+                return PlanExecutor::FAILURE;
             }
         }
 
@@ -620,7 +624,7 @@ PlanExecutor::ExecState PlanExecutorImpl::_getNextImpl(Snapshotted<BSONObj>* obj
             }
             return waitResult;
         } else {
-            invariant(PlanStage::DEAD == code || PlanStage::FAILURE == code);
+            invariant(PlanStage::FAILURE == code);
 
             if (NULL != objOut) {
                 BSONObj statusObj;
@@ -629,7 +633,7 @@ PlanExecutor::ExecState PlanExecutorImpl::_getNextImpl(Snapshotted<BSONObj>* obj
                 *objOut = Snapshotted<BSONObj>(SnapshotId(), statusObj);
             }
 
-            return (PlanStage::DEAD == code) ? PlanExecutor::DEAD : PlanExecutor::FAILURE;
+            return PlanExecutor::FAILURE;
         }
     }
 }
@@ -647,20 +651,11 @@ void PlanExecutorImpl::markAsKilled(Status killStatus) {
     }
 }
 
-void PlanExecutorImpl::dispose(OperationContext* opCtx, CursorManager* cursorManager) {
+void PlanExecutorImpl::dispose(OperationContext* opCtx) {
     if (_currentState == kDisposed) {
         return;
     }
 
-    // If we are registered with the CursorManager we need to be sure to deregister ourselves.
-    // However, if we have been killed we should not attempt to deregister ourselves, since the
-    // caller of markAsKilled() will have done that already, and the CursorManager may no longer
-    // exist. Note that the caller's collection lock prevents us from being marked as killed during
-    // this method, since any interruption event requires a lock in at least MODE_IX.
-    if (cursorManager && _registrationToken && !isMarkedAsKilled()) {
-        dassert(opCtx->lockState()->isCollectionLockedForMode(_nss.ns(), MODE_IS));
-        cursorManager->deregisterExecutor(this);
-    }
     _root->dispose(opCtx);
     _currentState = kDisposed;
 }
@@ -673,7 +668,7 @@ Status PlanExecutorImpl::executePlan() {
         state = this->getNext(&obj, NULL);
     }
 
-    if (PlanExecutor::DEAD == state || PlanExecutor::FAILURE == state) {
+    if (PlanExecutor::FAILURE == state) {
         if (isMarkedAsKilled()) {
             return _killStatus;
         }
@@ -694,19 +689,6 @@ void PlanExecutorImpl::enqueue(const BSONObj& obj) {
     _stash.push(obj.getOwned());
 }
 
-void PlanExecutorImpl::unsetRegistered() {
-    _registrationToken.reset();
-}
-
-PlanExecutor::RegistrationToken PlanExecutorImpl::getRegistrationToken() const& {
-    return _registrationToken;
-}
-
-void PlanExecutorImpl::setRegistrationToken(RegistrationToken token)& {
-    invariant(!_registrationToken);
-    _registrationToken = token;
-}
-
 bool PlanExecutorImpl::isMarkedAsKilled() const {
     return !_killStatus.isOK();
 }
@@ -724,12 +706,18 @@ bool PlanExecutorImpl::isDetached() const {
     return _currentState == kDetached;
 }
 
-Timestamp PlanExecutorImpl::getLatestOplogTimestamp() {
-    if (auto pipelineProxy = getStageByType(_root.get(), STAGE_PIPELINE_PROXY))
-        return static_cast<PipelineProxyStage*>(pipelineProxy)->getLatestOplogTimestamp();
+Timestamp PlanExecutorImpl::getLatestOplogTimestamp() const {
+    if (auto changeStreamProxy = getStageByType(_root.get(), STAGE_CHANGE_STREAM_PROXY))
+        return static_cast<ChangeStreamProxyStage*>(changeStreamProxy)->getLatestOplogTimestamp();
     if (auto collectionScan = getStageByType(_root.get(), STAGE_COLLSCAN))
         return static_cast<CollectionScan*>(collectionScan)->getLatestOplogTimestamp();
     return Timestamp();
+}
+
+BSONObj PlanExecutorImpl::getPostBatchResumeToken() const {
+    if (auto changeStreamProxy = getStageByType(_root.get(), STAGE_CHANGE_STREAM_PROXY))
+        return static_cast<ChangeStreamProxyStage*>(changeStreamProxy)->getPostBatchResumeToken();
+    return {};
 }
 
 Status PlanExecutorImpl::getMemberObjectStatus(const BSONObj& memberObj) const {

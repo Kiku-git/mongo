@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -108,7 +107,7 @@ PlanStage::StageState OrStage::doWork(WorkingSetID* out) {
         } else {
             return PlanStage::NEED_TIME;
         }
-    } else if (PlanStage::FAILURE == childStatus || PlanStage::DEAD == childStatus) {
+    } else if (PlanStage::FAILURE == childStatus) {
         // The stage which produces a failure is responsible for allocating a working set member
         // with error details.
         invariant(WorkingSet::INVALID_ID != id);

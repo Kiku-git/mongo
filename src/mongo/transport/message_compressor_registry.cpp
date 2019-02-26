@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -37,6 +36,7 @@
 #include "mongo/transport/message_compressor_noop.h"
 #include "mongo/transport/message_compressor_snappy.h"
 #include "mongo/transport/message_compressor_zlib.h"
+#include "mongo/transport/message_compressor_zstd.h"
 #include "mongo/util/options_parser/option_section.h"
 
 #include <boost/algorithm/string/classification.hpp>
@@ -44,8 +44,7 @@
 
 namespace mongo {
 namespace {
-const auto kDisabledConfigValue = "disabled"_sd;
-const auto kDefaultConfigValue = "snappy,zlib"_sd;
+constexpr auto kDisabledConfigValue = "disabled"_sd;
 }  // namespace
 
 StringData getMessageCompressorName(MessageCompressor id) {
@@ -56,6 +55,8 @@ StringData getMessageCompressorName(MessageCompressor id) {
             return "snappy"_sd;
         case MessageCompressor::kZlib:
             return "zlib"_sd;
+        case MessageCompressor::kZstd:
+            return "zstd"_sd;
         default:
             fassert(40269, "Invalid message compressor ID");
     }
@@ -111,22 +112,6 @@ MessageCompressorBase* MessageCompressorRegistry::getCompressor(StringData name)
 
 void MessageCompressorRegistry::setSupportedCompressors(std::vector<std::string>&& names) {
     _compressorNames = std::move(names);
-}
-
-Status addMessageCompressionOptions(moe::OptionSection* options, bool forShell) {
-    auto& ret =
-        options
-            ->addOptionChaining("net.compression.compressors",
-                                "networkMessageCompressors",
-                                moe::String,
-                                "Comma-separated list of compressors to use for network messages")
-            .setImplicit(moe::Value(kDisabledConfigValue.toString()));
-    if (forShell) {
-        ret.setDefault(moe::Value(kDisabledConfigValue.toString())).hidden();
-    } else {
-        ret.setDefault(moe::Value(kDefaultConfigValue.toString()));
-    }
-    return Status::OK();
 }
 
 Status storeMessageCompressionOptions(const std::string& compressors) {

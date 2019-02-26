@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -34,48 +33,26 @@
 
 #include "mongo/db/catalog/database_holder_impl.h"
 
-#include "mongo/base/init.h"
 #include "mongo/db/audit.h"
 #include "mongo/db/background.h"
-#include "mongo/db/catalog/database.h"
+#include "mongo/db/catalog/collection_impl.h"
 #include "mongo/db/catalog/database_catalog_entry.h"
+#include "mongo/db/catalog/database_impl.h"
 #include "mongo/db/catalog/namespace_uuid_cache.h"
 #include "mongo/db/catalog/uuid_catalog.h"
-#include "mongo/db/client.h"
-#include "mongo/db/clientcursor.h"
+#include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/stats/top.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/util/log.h"
-#include "mongo/util/scopeguard.h"
 
 namespace mongo {
 namespace {
 
-const auto dbHolderStorage = ServiceContext::declareDecoration<DatabaseHolder>();
-
-}  // namespace
-
-MONGO_REGISTER_SHIM(DatabaseHolder::getDatabaseHolder)
-()->DatabaseHolder& {
-    return dbHolderStorage(getGlobalServiceContext());
-}
-
-MONGO_REGISTER_SHIM(DatabaseHolder::makeImpl)
-(PrivateTo<DatabaseHolder>)->std::unique_ptr<DatabaseHolder::Impl> {
-    return std::make_unique<DatabaseHolderImpl>();
-}
-
-using std::set;
-using std::size_t;
-using std::string;
-using std::stringstream;
-
-namespace {
-
 StringData _todb(StringData ns) {
-    size_t i = ns.find('.');
+    std::size_t i = ns.find('.');
     if (i == std::string::npos) {
         uassert(13074, "db name can't be empty", ns.size());
         return ns;
@@ -94,7 +71,7 @@ StringData _todb(StringData ns) {
 }  // namespace
 
 
-Database* DatabaseHolderImpl::get(OperationContext* opCtx, StringData ns) const {
+Database* DatabaseHolderImpl::getDb(OperationContext* opCtx, StringData ns) const {
     const StringData db = _todb(ns);
     invariant(opCtx->lockState()->isDbLockedForMode(db, MODE_IS));
 
@@ -138,7 +115,7 @@ Database* DatabaseHolderImpl::openDb(OperationContext* opCtx, StringData ns, boo
         return db;
 
     // We've inserted a nullptr entry for dbname: make sure to remove it on unsuccessful exit.
-    auto removeDbGuard = MakeGuard([this, &lk, dbname] {
+    auto removeDbGuard = makeGuard([this, &lk, dbname] {
         if (!lk.owns_lock())
             lk.lock();
         _dbs.erase(dbname);
@@ -164,15 +141,16 @@ Database* DatabaseHolderImpl::openDb(OperationContext* opCtx, StringData ns, boo
     DatabaseCatalogEntry* entry = storageEngine->getDatabaseCatalogEntry(opCtx, dbname);
 
     if (!entry->exists()) {
-        audit::logCreateDatabase(&cc(), dbname);
+        audit::logCreateDatabase(opCtx->getClient(), dbname);
         if (justCreated)
             *justCreated = true;
     }
 
-    auto newDb = stdx::make_unique<Database>(opCtx, dbname, entry);
+    auto newDb = stdx::make_unique<DatabaseImpl>(dbname, entry, ++_epoch);
+    newDb->init(opCtx);
 
     // Finally replace our nullptr entry with the new Database pointer.
-    removeDbGuard.Dismiss();
+    removeDbGuard.dismiss();
     lk.lock();
     auto it = _dbs.find(dbname);
     invariant(it != _dbs.end() && it->second == nullptr);
@@ -180,6 +158,34 @@ Database* DatabaseHolderImpl::openDb(OperationContext* opCtx, StringData ns, boo
     invariant(_getNamesWithConflictingCasing_inlock(dbname.toString()).empty());
 
     return it->second;
+}
+
+void DatabaseHolderImpl::dropDb(OperationContext* opCtx, Database* db) {
+    invariant(db);
+
+    // Store the name so we have if for after the db object is deleted
+    auto name = db->name();
+
+    LOG(1) << "dropDatabase " << name;
+
+    invariant(opCtx->lockState()->isDbLockedForMode(name, MODE_X));
+
+    BackgroundOperation::assertNoBgOpInProgForDb(name);
+
+    audit::logDropDatabase(opCtx->getClient(), name);
+
+    auto const serviceContext = opCtx->getServiceContext();
+
+    for (auto&& coll : *db) {
+        Top::get(serviceContext).collectionDropped(coll->ns().ns(), true);
+    }
+
+    close(opCtx, name);
+
+    auto const storageEngine = serviceContext->getStorageEngine();
+    writeConflictRetry(opCtx, "dropDatabase", name, [&] {
+        storageEngine->dropDatabase(opCtx, name).transitional_ignore();
+    });
 }
 
 namespace {
@@ -191,7 +197,7 @@ void evictDatabaseFromUUIDCatalog(OperationContext* opCtx, Database* db) {
 }
 }  // namespace
 
-void DatabaseHolderImpl::close(OperationContext* opCtx, StringData ns, const std::string& reason) {
+void DatabaseHolderImpl::close(OperationContext* opCtx, StringData ns) {
     invariant(opCtx->lockState()->isW());
 
     const StringData dbName = _todb(ns);
@@ -207,7 +213,7 @@ void DatabaseHolderImpl::close(OperationContext* opCtx, StringData ns, const std
     repl::oplogCheckCloseDatabase(opCtx, db);
     evictDatabaseFromUUIDCatalog(opCtx, db);
 
-    db->close(opCtx, reason);
+    db->close(opCtx);
     delete db;
     db = nullptr;
 
@@ -219,26 +225,24 @@ void DatabaseHolderImpl::close(OperationContext* opCtx, StringData ns, const std
         .transitional_ignore();
 }
 
-void DatabaseHolderImpl::closeAll(OperationContext* opCtx, const std::string& reason) {
+void DatabaseHolderImpl::closeAll(OperationContext* opCtx) {
     invariant(opCtx->lockState()->isW());
 
     stdx::lock_guard<SimpleMutex> lk(_m);
 
-    set<string> dbs;
+    std::set<std::string> dbs;
     for (DBs::const_iterator i = _dbs.begin(); i != _dbs.end(); ++i) {
         BackgroundOperation::assertNoBgOpInProgForDb(i->first);
         dbs.insert(i->first);
     }
 
-    for (set<string>::iterator i = dbs.begin(); i != dbs.end(); ++i) {
-        string name = *i;
-
+    for (const auto& name : dbs) {
         LOG(2) << "DatabaseHolder::closeAll name:" << name;
 
         Database* db = _dbs[name];
         repl::oplogCheckCloseDatabase(opCtx, db);
         evictDatabaseFromUUIDCatalog(opCtx, db);
-        db->close(opCtx, reason);
+        db->close(opCtx);
         delete db;
 
         _dbs.erase(name);
@@ -249,4 +253,15 @@ void DatabaseHolderImpl::closeAll(OperationContext* opCtx, const std::string& re
             .transitional_ignore();
     }
 }
+
+std::unique_ptr<Collection> DatabaseHolderImpl::makeCollection(
+    OperationContext* const opCtx,
+    const StringData fullNS,
+    OptionalCollectionUUID uuid,
+    CollectionCatalogEntry* const details,
+    RecordStore* const recordStore,
+    DatabaseCatalogEntry* const dbce) {
+    return std::make_unique<CollectionImpl>(opCtx, fullNS, uuid, details, recordStore, dbce);
+}
+
 }  // namespace mongo

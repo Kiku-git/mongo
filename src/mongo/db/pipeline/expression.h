@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -312,11 +311,11 @@ public:
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         BSONElement bsonExpr,
         const VariablesParseState& vps) {
-        boost::intrusive_ptr<ExpressionNaryBase> expr = new SubClass(expCtx);
+        auto expr = make_intrusive<SubClass>(expCtx);
         ExpressionVector args = parseArguments(expCtx, bsonExpr, vps);
         expr->validateArguments(args);
         expr->vpOperand = args;
-        return expr;
+        return std::move(expr);
     }
 
 protected:
@@ -435,7 +434,7 @@ public:
     explicit ExpressionSingleNumericArg(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionFixedArity<SubClass, 1>(expCtx) {}
 
-    virtual ~ExpressionSingleNumericArg() {}
+    virtual ~ExpressionSingleNumericArg() = default;
 
     Value evaluate(const Document& root) const final {
         Value arg = this->vpOperand[0]->evaluate(root);
@@ -451,6 +450,49 @@ public:
     }
 
     virtual Value evaluateNumericArg(const Value& numericArg) const = 0;
+};
+
+/**
+ * Inherit from this class if your expression takes exactly two numeric arguments.
+ */
+template <typename SubClass>
+class ExpressionTwoNumericArgs : public ExpressionFixedArity<SubClass, 2> {
+public:
+    explicit ExpressionTwoNumericArgs(const boost::intrusive_ptr<ExpressionContext>& expCtx)
+        : ExpressionFixedArity<SubClass, 2>(expCtx) {}
+
+    virtual ~ExpressionTwoNumericArgs() = default;
+
+    /**
+     * Evaluate performs the type checking necessary to make sure that both arguments are numeric,
+     * then calls the evaluateNumericArgs on the two numeric args:
+     * 1. If either input is nullish, it returns null.
+     * 2. If either input is not numeric, it throws an error.
+     * 3. Call evaluateNumericArgs on the two numeric args.
+     */
+    Value evaluate(const Document& root) const final {
+        Value arg1 = this->vpOperand[0]->evaluate(root);
+        if (arg1.nullish())
+            return Value(BSONNULL);
+        uassert(51044,
+                str::stream() << this->getOpName() << " only supports numeric types, not "
+                              << typeName(arg1.getType()),
+                arg1.numeric());
+        Value arg2 = this->vpOperand[1]->evaluate(root);
+        if (arg2.nullish())
+            return Value(BSONNULL);
+        uassert(51045,
+                str::stream() << this->getOpName() << " only supports numeric types, not "
+                              << typeName(arg2.getType()),
+                arg2.numeric());
+
+        return evaluateNumericArgs(arg1, arg2);
+    }
+
+    /**
+     *  Evaluate the expression on exactly two numeric arguments.
+     */
+    virtual Value evaluateNumericArgs(const Value& numericArg1, const Value& numericArg2) const = 0;
 };
 
 /**
@@ -554,10 +596,10 @@ public:
      * off the timezone if not specified.
      */
     Value serialize(bool explain) const final {
+        auto timezone = _timeZone ? _timeZone->serialize(explain) : Value();
         return Value(Document{
             {_opName,
-             Document{{"date", _date->serialize(explain)},
-                      {"timezone", _timeZone ? _timeZone->serialize(explain) : Value()}}}});
+             Document{{"date", _date->serialize(explain)}, {"timezone", std::move(timezone)}}}});
     }
 
     boost::intrusive_ptr<Expression> optimize() final {
@@ -664,7 +706,6 @@ public:
     Value evaluateNumericArg(const Value& numericArg) const final;
     const char* getOpName() const final;
 };
-
 
 class ExpressionAdd final : public ExpressionVariadic<ExpressionAdd> {
 public:
@@ -1714,6 +1755,14 @@ public:
     const char* getOpName() const final;
 };
 
+class ExpressionRound final : public ExpressionRangedArity<ExpressionRound, 1, 2> {
+public:
+    explicit ExpressionRound(const boost::intrusive_ptr<ExpressionContext>& expCtx)
+        : ExpressionRangedArity<ExpressionRound, 1, 2>(expCtx) {}
+
+    Value evaluate(const Document& root) const final;
+    const char* getOpName() const final;
+};
 
 class ExpressionSplit final : public ExpressionFixedArity<ExpressionSplit, 2> {
 public:
@@ -1908,12 +1957,12 @@ private:
 };
 
 
-class ExpressionTrunc final : public ExpressionSingleNumericArg<ExpressionTrunc> {
+class ExpressionTrunc final : public ExpressionRangedArity<ExpressionTrunc, 1, 2> {
 public:
     explicit ExpressionTrunc(const boost::intrusive_ptr<ExpressionContext>& expCtx)
-        : ExpressionSingleNumericArg<ExpressionTrunc>(expCtx) {}
+        : ExpressionRangedArity<ExpressionTrunc, 1, 2>(expCtx) {}
 
-    Value evaluateNumericArg(const Value& numericArg) const final;
+    Value evaluate(const Document& root) const final;
     const char* getOpName() const final;
 };
 
@@ -2008,11 +2057,6 @@ private:
 
 class ExpressionConvert final : public Expression {
 public:
-    /**
-     * Constant double representation of 2^63.
-     */
-    static const double kLongLongMaxPlusOneAsDouble;
-
     /**
      * Creates a $convert expression converting from 'input' to the type given by 'toType'. Leaves
      * 'onNull' and 'onError' unspecified.

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -113,7 +112,7 @@ const ResourceId resourceIdGlobal = ResourceId(RESOURCE_GLOBAL, ResourceId::SING
 const Milliseconds MaxWaitTime = Milliseconds(500);
 
 // Dispenses unique LockerId identifiers
-AtomicUInt64 idCounter(0);
+AtomicWord<unsigned long long> idCounter(0);
 
 // Partitioned global lock statistics, so we don't hit the same bucket
 PartitionedInstanceWideLockStats globalStats;
@@ -169,6 +168,14 @@ bool LockerImpl::isReadLocked() const {
     return isLockHeldForMode(resourceIdGlobal, MODE_IS);
 }
 
+bool LockerImpl::isRSTLExclusive() const {
+    return getLockMode(resourceIdReplicationStateTransitionLock) == MODE_X;
+}
+
+bool LockerImpl::isRSTLLocked() const {
+    return getLockMode(resourceIdReplicationStateTransitionLock) != MODE_NONE;
+}
+
 void LockerImpl::dump() const {
     StringBuilder ss;
     ss << "Locker id " << _id << " status: ";
@@ -209,10 +216,16 @@ LockResult CondVarLockGrantNotification::wait(Milliseconds timeout) {
 LockResult CondVarLockGrantNotification::wait(OperationContext* opCtx, Milliseconds timeout) {
     invariant(opCtx);
     stdx::unique_lock<stdx::mutex> lock(_mutex);
-    return opCtx->waitForConditionOrInterruptFor(
-               _cond, lock, timeout, [this] { return _result != LOCK_INVALID; })
-        ? _result
-        : LOCK_TIMEOUT;
+    if (opCtx->waitForConditionOrInterruptFor(
+            _cond, lock, timeout, [this] { return _result != LOCK_INVALID; })) {
+        // Because waitForConditionOrInterruptFor evaluates the predicate before checking for
+        // interrupt, it is possible that a killed operation can acquire a lock if the request is
+        // granted quickly. For that reason, it is necessary to check if the operation has been
+        // killed at least once before accepting the lock grant.
+        opCtx->checkForInterrupt();
+        return _result;
+    }
+    return LOCK_TIMEOUT;
 }
 
 void CondVarLockGrantNotification::notify(ResourceId resId, LockResult result) {
@@ -277,14 +290,12 @@ Locker::ClientState LockerImpl::getClientState() const {
     return state;
 }
 
-LockResult LockerImpl::lockGlobal(OperationContext* opCtx, LockMode mode) {
+void LockerImpl::lockGlobal(OperationContext* opCtx, LockMode mode) {
     LockResult result = _lockGlobalBegin(opCtx, mode, Date_t::max());
 
     if (result == LOCK_WAITING) {
-        result = lockGlobalComplete(opCtx, Date_t::max());
+        lockGlobalComplete(opCtx, Date_t::max());
     }
-
-    return result;
 }
 
 void LockerImpl::reacquireTicket(OperationContext* opCtx) {
@@ -300,48 +311,55 @@ void LockerImpl::reacquireTicket(OperationContext* opCtx) {
     if (clientState != kInactive)
         return;
 
-    auto acquireTicketResult = _acquireTicket(opCtx, _modeForTicket, Date_t::max());
-    uassert(ErrorCodes::LockTimeout,
-            str::stream() << "Unable to acquire ticket with mode '" << _modeForTicket
-                          << "' within a max lock request timeout of '"
-                          << _maxLockTimeout.get()
-                          << "' milliseconds.",
-            acquireTicketResult == LOCK_OK || !_maxLockTimeout);
-    // If no deadline is specified we should always get a ticket.
-    invariant(acquireTicketResult == LOCK_OK);
+    if (!_maxLockTimeout || _uninterruptibleLocksRequested) {
+        invariant(_acquireTicket(opCtx, _modeForTicket, Date_t::max()));
+    } else {
+        uassert(ErrorCodes::LockTimeout,
+                str::stream() << "Unable to acquire ticket with mode '" << _modeForTicket
+                              << "' within a max lock request timeout of '"
+                              << *_maxLockTimeout
+                              << "' milliseconds.",
+                _acquireTicket(opCtx, _modeForTicket, Date_t::now() + *_maxLockTimeout));
+    }
 }
 
-LockResult LockerImpl::_acquireTicket(OperationContext* opCtx, LockMode mode, Date_t deadline) {
+bool LockerImpl::_acquireTicket(OperationContext* opCtx, LockMode mode, Date_t deadline) {
     const bool reader = isSharedLockMode(mode);
     auto holder = shouldAcquireTicket() ? ticketHolders[mode] : nullptr;
     if (holder) {
         _clientState.store(reader ? kQueuedReader : kQueuedWriter);
 
-        if (_maxLockTimeout && !_uninterruptibleLocksRequested) {
-            deadline = std::min(deadline, Date_t::now() + _maxLockTimeout.get());
-        }
-
         // If the ticket wait is interrupted, restore the state of the client.
-        auto restoreStateOnErrorGuard = MakeGuard([&] { _clientState.store(kInactive); });
+        auto restoreStateOnErrorGuard = makeGuard([&] { _clientState.store(kInactive); });
 
         OperationContext* interruptible = _uninterruptibleLocksRequested ? nullptr : opCtx;
         if (deadline == Date_t::max()) {
             holder->waitForTicket(interruptible);
         } else if (!holder->waitForTicketUntil(interruptible, deadline)) {
-            return LOCK_TIMEOUT;
+            return false;
         }
-        restoreStateOnErrorGuard.Dismiss();
+        restoreStateOnErrorGuard.dismiss();
     }
     _clientState.store(reader ? kActiveReader : kActiveWriter);
-    return LOCK_OK;
+    return true;
 }
 
 LockResult LockerImpl::_lockGlobalBegin(OperationContext* opCtx, LockMode mode, Date_t deadline) {
     dassert(isLocked() == (_modeForTicket != MODE_NONE));
     if (_modeForTicket == MODE_NONE) {
-        auto acquireTicketResult = _acquireTicket(opCtx, mode, deadline);
-        if (acquireTicketResult != LOCK_OK) {
-            return acquireTicketResult;
+        if (_uninterruptibleLocksRequested) {
+            // Ignore deadline and _maxLockTimeout.
+            invariant(_acquireTicket(opCtx, mode, Date_t::max()));
+        } else {
+            auto beforeAcquire = Date_t::now();
+            deadline = std::min(deadline,
+                                _maxLockTimeout ? beforeAcquire + *_maxLockTimeout : Date_t::max());
+            uassert(ErrorCodes::LockTimeout,
+                    str::stream() << "Unable to acquire ticket with mode '" << _modeForTicket
+                                  << "' within a max lock request timeout of '"
+                                  << Date_t::now() - beforeAcquire
+                                  << "' milliseconds.",
+                    _acquireTicket(opCtx, mode, deadline));
         }
         _modeForTicket = mode;
     }
@@ -354,16 +372,12 @@ LockResult LockerImpl::_lockGlobalBegin(OperationContext* opCtx, LockMode mode, 
         }
     }
     const LockResult result = lockBegin(opCtx, resourceIdGlobal, actualLockMode);
-    if (result == LOCK_OK)
-        return LOCK_OK;
-
-    invariant(result == LOCK_WAITING);
-
+    invariant(result == LOCK_OK || result == LOCK_WAITING);
     return result;
 }
 
-LockResult LockerImpl::lockGlobalComplete(OperationContext* opCtx, Date_t deadline) {
-    return lockComplete(opCtx, resourceIdGlobal, getLockMode(resourceIdGlobal), deadline);
+void LockerImpl::lockGlobalComplete(OperationContext* opCtx, Date_t deadline) {
+    lockComplete(opCtx, resourceIdGlobal, getLockMode(resourceIdGlobal), deadline);
 }
 
 bool LockerImpl::unlockGlobal() {
@@ -416,20 +430,51 @@ void LockerImpl::endWriteUnitOfWork() {
     }
 }
 
-LockResult LockerImpl::lock(OperationContext* opCtx,
-                            ResourceId resId,
-                            LockMode mode,
-                            Date_t deadline) {
+bool LockerImpl::releaseWriteUnitOfWork(LockSnapshot* stateOut) {
+    // Only the global WUOW can be released.
+    invariant(_wuowNestingLevel == 1);
+    --_wuowNestingLevel;
+    invariant(!isGlobalLockedRecursively());
+
+    // All locks should be pending to unlock.
+    invariant(_requests.size() == _numResourcesToUnlockAtEndUnitOfWork);
+    for (auto it = _requests.begin(); it; it.next()) {
+        // No converted lock so we don't need to unlock more than once.
+        invariant(it->unlockPending == 1);
+    }
+    _numResourcesToUnlockAtEndUnitOfWork = 0;
+
+    return saveLockStateAndUnlock(stateOut);
+}
+
+void LockerImpl::restoreWriteUnitOfWork(OperationContext* opCtx,
+                                        const LockSnapshot& stateToRestore) {
+    if (stateToRestore.globalMode != MODE_NONE) {
+        restoreLockState(opCtx, stateToRestore);
+    }
+
+    invariant(_numResourcesToUnlockAtEndUnitOfWork == 0);
+    for (auto it = _requests.begin(); it; it.next()) {
+        invariant(_shouldDelayUnlock(it.key(), (it->mode)));
+        invariant(it->unlockPending == 0);
+        it->unlockPending++;
+    }
+    _numResourcesToUnlockAtEndUnitOfWork = static_cast<unsigned>(_requests.size());
+
+    beginWriteUnitOfWork();
+}
+
+void LockerImpl::lock(OperationContext* opCtx, ResourceId resId, LockMode mode, Date_t deadline) {
 
     const LockResult result = lockBegin(opCtx, resId, mode);
 
     // Fast, uncontended path
     if (result == LOCK_OK)
-        return LOCK_OK;
+        return;
 
     invariant(result == LOCK_WAITING);
 
-    return lockComplete(opCtx, resId, mode, deadline);
+    lockComplete(opCtx, resId, mode, deadline);
 }
 
 void LockerImpl::downgrade(ResourceId resId, LockMode newMode) {
@@ -439,6 +484,11 @@ void LockerImpl::downgrade(ResourceId resId, LockMode newMode) {
 
 bool LockerImpl::unlock(ResourceId resId) {
     LockRequestsMap::Iterator it = _requests.find(resId);
+
+    // Don't attempt to unlock twice. This can happen when an interrupted global lock is destructed.
+    if (it.finished())
+        return false;
+
     if (inAWriteUnitOfWork() && _shouldDelayUnlock(it.key(), (it->mode))) {
         if (!it->unlockPending) {
             _numResourcesToUnlockAtEndUnitOfWork++;
@@ -451,10 +501,27 @@ bool LockerImpl::unlock(ResourceId resId) {
         return false;
     }
 
-    // Don't attempt to unlock twice. This can happen when an interrupted global lock is destructed.
-    if (it.finished())
-        return false;
     return _unlockImpl(&it);
+}
+
+bool LockerImpl::unlockRSTLforPrepare() {
+    auto rstlRequest = _requests.find(resourceIdReplicationStateTransitionLock);
+
+    // Don't attempt to unlock twice. This can happen when an interrupted global lock is destructed.
+    if (!rstlRequest)
+        return false;
+
+    // If the RSTL is 'unlockPending' and we are fully unlocking it, then we do not want to
+    // attempt to unlock the RSTL when the WUOW ends, since it will already be unlocked.
+    if (rstlRequest->unlockPending) {
+        _numResourcesToUnlockAtEndUnitOfWork--;
+    }
+
+    // Reset the recursiveCount to 1 so that we fully unlock the RSTL. Since it will be fully
+    // unlocked, any future unlocks will be noops anyways.
+    rstlRequest->recursiveCount = 1;
+
+    return _unlockImpl(&rstlRequest);
 }
 
 LockMode LockerImpl::getLockMode(ResourceId resId) const {
@@ -594,10 +661,12 @@ bool LockerImpl::saveLockStateAndUnlock(Locker::LockSnapshot* stateOut) {
         return false;
     }
 
-    // If the global lock has been acquired more than once, we're probably somewhere in a
+    // If the global lock or RSTL has been acquired more than once, we're probably somewhere in a
     // DBDirectClient call.  It's not safe to release and reacquire locks -- the context using
     // the DBDirectClient is probably not prepared for lock release.
-    if (globalRequest->recursiveCount > 1) {
+    LockRequestsMap::Iterator rstlRequest =
+        _requests.find(resourceIdReplicationStateTransitionLock);
+    if (globalRequest->recursiveCount > 1 || (rstlRequest && rstlRequest->recursiveCount > 1)) {
         return false;
     }
 
@@ -614,7 +683,8 @@ bool LockerImpl::saveLockStateAndUnlock(Locker::LockSnapshot* stateOut) {
 
         // We should never have to save and restore metadata locks.
         invariant(RESOURCE_DATABASE == resId.getType() || RESOURCE_COLLECTION == resId.getType() ||
-                  (RESOURCE_GLOBAL == resId.getType() && isSharedLockMode(it->mode)));
+                  (RESOURCE_GLOBAL == resId.getType() && isSharedLockMode(it->mode)) ||
+                  (resourceIdReplicationStateTransitionLock == resId && it->mode == MODE_IX));
 
         // And, stuff the info into the out parameter.
         OneLock info;
@@ -639,15 +709,22 @@ void LockerImpl::restoreLockState(OperationContext* opCtx, const Locker::LockSna
     invariant(_modeForTicket == MODE_NONE);
 
     std::vector<OneLock>::const_iterator it = state.locks.begin();
-    // If we locked the PBWM, it must be locked before the resourceIdGlobal resource.
+    // If we locked the PBWM, it must be locked before the resourceIdGlobal and
+    // resourceIdReplicationStateTransitionLock resources.
     if (it != state.locks.end() && it->resourceId == resourceIdParallelBatchWriterMode) {
-        invariant(LOCK_OK == lock(opCtx, it->resourceId, it->mode));
+        lock(opCtx, it->resourceId, it->mode);
         it++;
     }
 
-    invariant(LOCK_OK == lockGlobal(opCtx, state.globalMode));
+    // If we locked the RSTL, it must be locked before the resourceIdGlobal resource.
+    if (it != state.locks.end() && it->resourceId == resourceIdReplicationStateTransitionLock) {
+        lock(opCtx, it->resourceId, it->mode);
+        it++;
+    }
+
+    lockGlobal(opCtx, state.globalMode);
     for (; it != state.locks.end(); it++) {
-        invariant(LOCK_OK == lock(it->resourceId, it->mode));
+        lock(opCtx, it->resourceId, it->mode);
     }
     invariant(_modeForTicket != MODE_NONE);
 }
@@ -728,26 +805,23 @@ LockResult LockerImpl::lockBegin(OperationContext* opCtx, ResourceId resId, Lock
     return result;
 }
 
-LockResult LockerImpl::lockComplete(OperationContext* opCtx,
-                                    ResourceId resId,
-                                    LockMode mode,
-                                    Date_t deadline) {
+void LockerImpl::lockComplete(OperationContext* opCtx,
+                              ResourceId resId,
+                              LockMode mode,
+                              Date_t deadline) {
 
     LockResult result;
     Milliseconds timeout;
     if (deadline == Date_t::max()) {
         timeout = Milliseconds::max();
-    } else if (deadline == Date_t::min()) {
+    } else if (deadline <= Date_t()) {
         timeout = Milliseconds(0);
     } else {
         timeout = deadline - Date_t::now();
     }
-
-    // If _maxLockTimeout is set and lower than the given timeout, override it.
-    // TODO: there should be an invariant against the simultaneous usage of
-    // _uninterruptibleLocksRequested and _maxLockTimeout (SERVER-34951).
-    if (_maxLockTimeout && _uninterruptibleLocksRequested == 0) {
-        timeout = std::min(timeout, _maxLockTimeout.get());
+    timeout = std::min(timeout, _maxLockTimeout ? *_maxLockTimeout : Milliseconds::max());
+    if (_uninterruptibleLocksRequested) {
+        timeout = Milliseconds::max();
     }
 
     // Don't go sleeping without bound in order to be able to report long waits.
@@ -756,7 +830,7 @@ LockResult LockerImpl::lockComplete(OperationContext* opCtx,
     uint64_t startOfCurrentWaitTime = startOfTotalWaitTime;
 
     // Clean up the state on any failed lock attempts.
-    auto unlockOnErrorGuard = MakeGuard([&] {
+    auto unlockOnErrorGuard = makeGuard([&] {
         LockRequestsMap::Iterator it = _requests.find(resId);
         _unlockImpl(&it);
     });
@@ -794,28 +868,24 @@ LockResult LockerImpl::lockComplete(OperationContext* opCtx,
         waitTime = (totalBlockTime < timeout) ? std::min(timeout - totalBlockTime, MaxWaitTime)
                                               : Milliseconds(0);
 
-        if (waitTime == Milliseconds(0)) {
-            // If the caller provided the max deadline then presumably they are not expecting nor
-            // checking for lock acquisition failure. In that case, to prevent the caller from
-            // continuing under the assumption of a successful lock acquisition, we'll throw.
-            if (_maxLockTimeout && deadline == Date_t::max()) {
-                uasserted(ErrorCodes::LockTimeout,
-                          str::stream() << "Unable to acquire lock '" << resId.toString()
-                                        << "' within a max lock request timeout of '"
-                                        << _maxLockTimeout.get()
-                                        << "' milliseconds.");
-            }
-            break;
-        }
+        uassert(ErrorCodes::LockTimeout,
+                str::stream() << "Unable to acquire lock '" << resId.toString() << "' within "
+                              << timeout
+                              << "' milliseconds.",
+                waitTime > Milliseconds(0));
     }
 
-    // Note: in case of the _notify object returning LOCK_TIMEOUT, it is possible to find that the
-    // lock was still granted after all, but we don't try to take advantage of that and will return
-    // a timeout.
-    if (result == LOCK_OK) {
-        unlockOnErrorGuard.Dismiss();
-    }
-    return result;
+    invariant(result == LOCK_OK);
+    unlockOnErrorGuard.dismiss();
+}
+
+LockResult LockerImpl::lockRSTLBegin(OperationContext* opCtx) {
+    invariant(!opCtx->lockState()->isLocked());
+    return lockBegin(opCtx, resourceIdReplicationStateTransitionLock, MODE_X);
+}
+
+void LockerImpl::lockRSTLComplete(OperationContext* opCtx, Date_t deadline) {
+    lockComplete(opCtx, resourceIdReplicationStateTransitionLock, MODE_X, deadline);
 }
 
 void LockerImpl::releaseTicket() {
@@ -904,5 +974,7 @@ const ResourceId resourceIdOplog = ResourceId(RESOURCE_COLLECTION, StringData("l
 const ResourceId resourceIdAdminDB = ResourceId(RESOURCE_DATABASE, StringData("admin"));
 const ResourceId resourceIdParallelBatchWriterMode =
     ResourceId(RESOURCE_GLOBAL, ResourceId::SINGLETON_PARALLEL_BATCH_WRITER_MODE);
+const ResourceId resourceIdReplicationStateTransitionLock =
+    ResourceId(RESOURCE_GLOBAL, ResourceId::SINGLETON_REPLICATION_STATE_TRANSITION_LOCK);
 
 }  // namespace mongo

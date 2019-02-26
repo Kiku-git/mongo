@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Public Domain 2014-2018 MongoDB, Inc.
+# Public Domain 2014-2019 MongoDB, Inc.
 # Public Domain 2008-2014 WiredTiger, Inc.
 #
 # This is free and unencumbered software released into the public domain.
@@ -105,9 +105,6 @@ class test_prepare_lookaside01(wttest.WiredTigerTestCase):
             sessions[j].close()
 
     def test_prepare_lookaside(self):
-        if not wiredtiger.timestamp_build():
-            self.skipTest('requires a timestamp build')
-
         # Create a small table.
         uri = "table:test_prepare_lookaside01"
         nrows = 100

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -54,12 +53,6 @@ namespace moe = mongo::optionenvironment;
 
 namespace {
 boost::filesystem::path defaultRoot;
-
-MONGO_GENERAL_STARTUP_OPTIONS_REGISTER(TempDirOptions)(InitializerContext* context) {
-    moe::startupOptions.addOptionChaining(
-        "tempPath", "tempPath", moe::String, "directory to place mongo::TempDir subdirectories");
-    return Status::OK();
-}
 
 MONGO_INITIALIZER(SetTempDirDefaultRoot)(InitializerContext* context) {
     if (moe::startupOptionsParsed.count("tempPath")) {

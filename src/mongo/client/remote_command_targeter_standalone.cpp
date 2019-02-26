@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -44,7 +43,7 @@ ConnectionString RemoteCommandTargeterStandalone::connectionString() {
     return ConnectionString(_hostAndPort);
 }
 
-Future<HostAndPort> RemoteCommandTargeterStandalone::findHostWithMaxWait(
+SharedSemiFuture<HostAndPort> RemoteCommandTargeterStandalone::findHostWithMaxWait(
     const ReadPreferenceSetting& readPref, Milliseconds maxWait) {
     return _hostAndPort;
 }

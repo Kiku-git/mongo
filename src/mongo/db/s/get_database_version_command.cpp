@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -80,7 +79,10 @@ public:
             BSONObj versionObj;
             AutoGetDb autoDb(opCtx, _targetDb(), MODE_IS);
             if (auto db = autoDb.getDb()) {
-                if (auto dbVersion = DatabaseShardingState::get(db).getDbVersion(opCtx)) {
+                auto& dss = DatabaseShardingState::get(db);
+                auto dssLock = DatabaseShardingState::DSSLock::lock(opCtx, &dss);
+
+                if (auto dbVersion = dss.getDbVersion(opCtx, dssLock)) {
                     versionObj = dbVersion->toBSON();
                 }
             }

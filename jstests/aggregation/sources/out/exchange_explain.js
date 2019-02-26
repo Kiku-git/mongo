@@ -112,7 +112,7 @@ load('jstests/aggregation/extras/utils.js');
     explain = runExplainQuery(outCollRange);
 
     // Make sure there is no exchange.
-    assert.eq(explain.mergeType, "primaryShard", tojson(explain));
+    assert.eq(explain.mergeType, "anyShard", tojson(explain));
     assert(explain.hasOwnProperty("splitPipeline"), tojson(explain));
     assert(!explain.splitPipeline.hasOwnProperty("exchange"), tojson(explain));
 
@@ -127,6 +127,35 @@ load('jstests/aggregation/extras/utils.js');
                        }
                     }],
                     50905);
+
+    // SERVER-38349 Make sure mongos rejects specifying exchange directly.
+    assert.commandFailedWithCode(mongosDB.runCommand({
+        aggregate: inColl.getName(),
+        pipeline: [],
+        cursor: {},
+        exchange: {
+            policy: "keyRange",
+            bufferSize: NumberInt(1024),
+            boundaries: [{_id: 0}],
+            consumers: NumberInt(2),
+            consumerIds: [NumberInt(0), NumberInt(1)]
+        }
+    }),
+                                 51028);
+
+    assert.commandFailedWithCode(mongosDB.runCommand({
+        aggregate: inColl.getName(),
+        pipeline: [{$out: {to: outCollRange.getName(), mode: "replaceDocuments"}}],
+        cursor: {},
+        exchange: {
+            policy: "keyRange",
+            bufferSize: NumberInt(1024),
+            boundaries: [{_id: 0}],
+            consumers: NumberInt(2),
+            consumerIds: [NumberInt(0), NumberInt(1)]
+        }
+    }),
+                                 51028);
 
     st.stop();
 }());

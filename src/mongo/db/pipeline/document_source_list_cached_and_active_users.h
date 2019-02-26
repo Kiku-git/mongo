@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -101,6 +100,10 @@ public:
         constraints.isIndependentOfAnyCollection = true;
         constraints.requiresInputDocSource = false;
         return constraints;
+    }
+
+    boost::optional<MergingLogic> mergingLogic() final {
+        return boost::none;
     }
 
     static boost::intrusive_ptr<DocumentSource> createFromBson(

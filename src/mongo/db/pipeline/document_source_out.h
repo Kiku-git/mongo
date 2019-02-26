@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -33,6 +32,7 @@
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_out_gen.h"
 #include "mongo/db/write_concern_options.h"
+#include "mongo/s/chunk_version.h"
 
 namespace mongo {
 
@@ -64,7 +64,7 @@ public:
 /**
  * Abstract class for the $out aggregation stage.
  */
-class DocumentSourceOut : public DocumentSource, public NeedsMergerDocumentSource {
+class DocumentSourceOut : public DocumentSource {
 public:
     /**
      * A "lite parsed" $out stage is similar to other stages involving foreign collections except in
@@ -94,11 +94,17 @@ public:
         bool _allowShardedOutNss;
     };
 
+    /**
+     * Builds a new $out stage which will spill all documents into 'outputNs' as inserts. If
+     * 'targetCollectionVersion' is provided then processing will stop with an error if the
+     * collection's epoch changes during the course of execution. This is used as a mechanism to
+     * prevent the shard key from changing.
+     */
     DocumentSourceOut(NamespaceString outputNs,
                       const boost::intrusive_ptr<ExpressionContext>& expCtx,
                       WriteModeEnum mode,
                       std::set<FieldPath> uniqueKey,
-                      boost::optional<OID> targetEpoch);
+                      boost::optional<ChunkVersion> targetCollectionVersion);
 
     virtual ~DocumentSourceOut() = default;
 
@@ -114,12 +120,22 @@ public:
     }
 
     StageConstraints constraints(Pipeline::SplitState pipeState) const final {
+        // A $out to an unsharded collection should merge on the primary shard to perform local
+        // writes. A $out to a sharded collection has no requirement, since each shard can perform
+        // its own portion of the write. We use 'kAnyShard' to direct it to execute on one of the
+        // shards in case some of the writes happen to end up being local.
+        //
+        // Note that this decision is inherently racy and subject to become stale. This is okay
+        // because either choice will work correctly, we are simply applying a heuristic
+        // optimization.
+        auto hostTypeRequirement = HostTypeRequirement::kPrimaryShard;
+        if (pExpCtx->mongoProcessInterface->isSharded(pExpCtx->opCtx, _outputNs) &&
+            _mode != WriteModeEnum::kModeReplaceCollection) {
+            hostTypeRequirement = HostTypeRequirement::kAnyShard;
+        }
         return {StreamType::kStreaming,
                 PositionRequirement::kLast,
-                // A $out to an unsharded collection should merge on the primary shard to perform
-                // local writes. A $out to a sharded collection has no requirement, since each shard
-                // can perform its own portion of the write.
-                HostTypeRequirement::kPrimaryShard,
+                hostTypeRequirement,
                 DiskUseRequirement::kWritesPersistentData,
                 FacetRequirement::kNotAllowed,
                 TransactionRequirement::kNotAllowed};
@@ -133,12 +149,21 @@ public:
         return _mode;
     }
 
-    boost::intrusive_ptr<DocumentSource> getShardSource() final {
-        return nullptr;
+    boost::optional<MergingLogic> mergingLogic() final {
+        // It should always be faster to avoid splitting the pipeline if the output collection is
+        // sharded. If we avoid splitting the pipeline then each shard can perform the writes to the
+        // target collection in parallel.
+        //
+        // Note that this decision is inherently racy and subject to become stale. This is okay
+        // because either choice will work correctly, we are simply applying a heuristic
+        // optimization.
+        if (pExpCtx->mongoProcessInterface->isSharded(pExpCtx->opCtx, _outputNs)) {
+            return boost::none;
+        }
+        // {shardsStage, mergingStage, sortPattern}
+        return MergingLogic{nullptr, this, boost::none};
     }
-    MergingLogic mergingLogic() final {
-        return {this};
-    }
+
     virtual bool canRunInParallelBeforeOut(
         const std::set<std::string>& nameOfShardKeyFieldsUponEntryToStage) const final {
         // If someone is asking the question, this must be the $out stage in question, so yes!
@@ -195,7 +220,7 @@ public:
         LocalReadConcernBlock readLocal(pExpCtx->opCtx);
 
         pExpCtx->mongoProcessInterface->insert(
-            pExpCtx, getWriteNs(), std::move(batch.objects), _writeConcern, _targetEpoch);
+            pExpCtx, getWriteNs(), std::move(batch.objects), _writeConcern, _targetEpoch());
     };
 
     /**
@@ -211,7 +236,7 @@ public:
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         WriteModeEnum,
         std::set<FieldPath> uniqueKey = std::set<FieldPath>{"_id"},
-        boost::optional<OID> targetEpoch = boost::none);
+        boost::optional<ChunkVersion> targetCollectionVersion = boost::none);
 
     /**
      * Parses a $out stage from the user-supplied BSON.
@@ -228,9 +253,37 @@ protected:
     WriteConcernOptions _writeConcern;
 
     const NamespaceString _outputNs;
-    boost::optional<OID> _targetEpoch;
+    boost::optional<ChunkVersion> _targetCollectionVersion;
+
+    boost::optional<OID> _targetEpoch() {
+        return _targetCollectionVersion ? boost::optional<OID>(_targetCollectionVersion->epoch())
+                                        : boost::none;
+    }
 
 private:
+    /**
+     * If 'spec' does not specify a uniqueKey, uses the sharding catalog to pick a default key of
+     * the shard key + _id. Returns a pair of the uniqueKey (either from the spec or generated), and
+     * an optional ChunkVersion, populated with the version stored in the sharding catalog when we
+     * asked for the shard key.
+     */
+    static std::pair<std::set<FieldPath>, boost::optional<ChunkVersion>> resolveUniqueKeyOnMongoS(
+        const boost::intrusive_ptr<ExpressionContext>&,
+        const DocumentSourceOutSpec& spec,
+        const NamespaceString& outputNs);
+
+    /**
+     * Ensures that 'spec' contains a uniqueKey which has a supporting index - either because the
+     * uniqueKey was sent from mongos or because there is a corresponding unique index. Returns the
+     * target ChunkVersion already attached to 'spec', but verifies that this node's cached routing
+     * table agrees on the epoch for that version before returning. Throws a StaleConfigException if
+     * not.
+     */
+    static std::pair<std::set<FieldPath>, boost::optional<ChunkVersion>> resolveUniqueKeyOnMongoD(
+        const boost::intrusive_ptr<ExpressionContext>&,
+        const DocumentSourceOutSpec& spec,
+        const NamespaceString& outputNs);
+
     bool _initialized = false;
     bool _done = false;
 

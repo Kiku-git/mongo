@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -129,7 +128,8 @@ MultiPlanStage* getMultiPlanStage(PlanStage* root) {
  * there is no PPS that is root.
  */
 PipelineProxyStage* getPipelineProxyStage(PlanStage* root) {
-    if (root->stageType() == STAGE_PIPELINE_PROXY) {
+    if (root->stageType() == STAGE_PIPELINE_PROXY ||
+        root->stageType() == STAGE_CHANGE_STREAM_PROXY) {
         return static_cast<PipelineProxyStage*>(root);
     }
 
@@ -511,7 +511,9 @@ void Explain::statsToBSON(const PlanStageStats& stats,
     } else if (STAGE_LIMIT == stats.stageType) {
         LimitStats* spec = static_cast<LimitStats*>(stats.specific.get());
         bob->appendNumber("limitAmount", spec->limit);
-    } else if (STAGE_PROJECTION == stats.stageType) {
+    } else if (STAGE_PROJECTION_DEFAULT == stats.stageType ||
+               STAGE_PROJECTION_COVERED == stats.stageType ||
+               STAGE_PROJECTION_SIMPLE == stats.stageType) {
         ProjectionStats* spec = static_cast<ProjectionStats*>(stats.specific.get());
         bob->append("transformBy", spec->projObj);
     } else if (STAGE_RECORD_STORE_FAST_COUNT == stats.stageType) {
@@ -894,7 +896,8 @@ std::string Explain::getPlanSummary(const PlanExecutor* exec) {
 
 // static
 std::string Explain::getPlanSummary(const PlanStage* root) {
-    if (root->stageType() == STAGE_PIPELINE_PROXY) {
+    if (root->stageType() == STAGE_PIPELINE_PROXY ||
+        root->stageType() == STAGE_CHANGE_STREAM_PROXY) {
         auto pipelineProxy = static_cast<const PipelineProxyStage*>(root);
         return pipelineProxy->getPlanSummaryStr();
     }
@@ -928,7 +931,8 @@ void Explain::getSummaryStats(const PlanExecutor& exec, PlanSummaryStats* statsO
 
     PlanStage* root = exec.getRootStage();
 
-    if (root->stageType() == STAGE_PIPELINE_PROXY) {
+    if (root->stageType() == STAGE_PIPELINE_PROXY ||
+        root->stageType() == STAGE_CHANGE_STREAM_PROXY) {
         auto pipelineProxy = static_cast<PipelineProxyStage*>(root);
         pipelineProxy->getPlanSummaryStats(statsOut);
         return;

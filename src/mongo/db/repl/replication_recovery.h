@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -70,6 +69,13 @@ public:
                           boost::optional<Timestamp> stableTimestamp) override;
 
 private:
+    /**
+     * Reconstruct prepared transactions by iterating over the transactions table to see which
+     * transactions should be in the prepared state, getting the corresponding oplog entry and
+     * applying the operations.
+     */
+    void _reconstructPreparedTransactions(OperationContext* opCtx);
+
     /**
      * After truncating the oplog, completes recovery if we're recovering from a stable timestamp
      * or a stable checkpoint.

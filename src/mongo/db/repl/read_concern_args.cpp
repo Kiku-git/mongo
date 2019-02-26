@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -114,6 +113,10 @@ bool ReadConcernArgs::hasLevel() const {
     return _level.is_initialized();
 }
 
+bool ReadConcernArgs::hasOriginalLevel() const {
+    return _originalLevel.is_initialized();
+}
+
 boost::optional<OpTime> ReadConcernArgs::getArgsOpTime() const {
     return _opTime;
 }
@@ -194,6 +197,7 @@ Status ReadConcernArgs::initialize(const BSONElement& readConcernElem) {
                                             << " must be either 'local', 'majority', "
                                                "'linearizable', 'available', or 'snapshot'");
             }
+            _originalLevel = _level;
         } else {
             return Status(ErrorCodes::InvalidOptions,
                           str::stream() << "Unrecognized option in " << kReadConcernFieldName
@@ -272,6 +276,11 @@ ReadConcernArgs::MajorityReadMechanism ReadConcernArgs::getMajorityReadMechanism
     return _majorityReadMechanism;
 }
 
+bool ReadConcernArgs::isSpeculativeMajority() const {
+    return _level && *_level == ReadConcernLevel::kMajorityReadConcern &&
+        _majorityReadMechanism == MajorityReadMechanism::kSpeculative;
+}
+
 Status ReadConcernArgs::upconvertReadConcernLevelToSnapshot() {
     if (_level && *_level != ReadConcernLevel::kSnapshotReadConcern &&
         *_level != ReadConcernLevel::kMajorityReadConcern &&
@@ -288,7 +297,7 @@ Status ReadConcernArgs::upconvertReadConcernLevelToSnapshot() {
                                     << "' is provided");
     }
 
-    _originalLevel = _level ? *_level : ReadConcernLevel::kLocalReadConcern;
+    _originalLevel = _level;
     _level = ReadConcernLevel::kSnapshotReadConcern;
     return Status::OK();
 }

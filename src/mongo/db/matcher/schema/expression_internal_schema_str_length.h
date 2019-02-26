@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -61,7 +60,7 @@ public:
 
     void debugString(StringBuilder& debug, int level) const final;
 
-    void serialize(BSONObjBuilder* out) const final;
+    BSONObj getSerializedRightHandSide() const final;
 
     bool equivalent(const MatchExpression* other) const final;
 

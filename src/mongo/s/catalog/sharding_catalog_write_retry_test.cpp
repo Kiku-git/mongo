@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -80,7 +79,7 @@ const HostAndPort kTestHosts[] = {
     HostAndPort("TestHost1:12345"), HostAndPort("TestHost2:12345"), HostAndPort("TestHost3:12345")};
 
 Status getMockDuplicateKeyError() {
-    return {DuplicateKeyErrorInfo(BSON("mock" << 1)), "Mock duplicate key error"};
+    return {DuplicateKeyErrorInfo(BSON("mock" << 1), BSON("" << 1)), "Mock duplicate key error"};
 }
 
 TEST_F(InsertRetryTest, RetryOnInterruptedAndNetworkErrorSuccess) {

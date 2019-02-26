@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -70,7 +69,7 @@ public:
     }
 
     const std::string& getIdent() const override {
-        MONGO_UNREACHABLE;
+        return _ident;
     }
 
     virtual void setCappedCallback(CappedCallback*) {}
@@ -182,6 +181,7 @@ private:
     CollectionOptions _options;
     long long _numInserts;
     BSONObj _dummy;
+    std::string _ident;
 };
 
 class DevNullSortedDataBuilderInterface : public SortedDataBuilderInterface {
@@ -215,7 +215,7 @@ public:
                          const RecordId& loc,
                          bool dupsAllowed) {}
 
-    virtual Status dupKeyCheck(OperationContext* opCtx, const BSONObj& key, const RecordId& loc) {
+    virtual Status dupKeyCheck(OperationContext* opCtx, const BSONObj& key) {
         return Status::OK();
     }
 
@@ -258,6 +258,11 @@ std::unique_ptr<RecordStore> DevNullKVEngine::getRecordStore(OperationContext* o
     return stdx::make_unique<DevNullRecordStore>(ns, options);
 }
 
+std::unique_ptr<RecordStore> DevNullKVEngine::makeTemporaryRecordStore(OperationContext* opCtx,
+                                                                       StringData ident) {
+    return stdx::make_unique<DevNullRecordStore>("", CollectionOptions());
+}
+
 SortedDataInterface* DevNullKVEngine::getSortedDataInterface(OperationContext* opCtx,
                                                              StringData ident,
                                                              const IndexDescriptor* desc) {
@@ -276,6 +281,11 @@ void DevNullKVEngine::setCachePressureForTest(int pressure) {
 StatusWith<std::vector<std::string>> DevNullKVEngine::beginNonBlockingBackup(
     OperationContext* opCtx) {
     std::vector<std::string> filesToCopy = {"filename.wt"};
+    return filesToCopy;
+}
+
+StatusWith<std::vector<std::string>> DevNullKVEngine::extendBackupCursor(OperationContext* opCtx) {
+    std::vector<std::string> filesToCopy = {"journal/WiredTigerLog.999"};
     return filesToCopy;
 }
 

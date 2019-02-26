@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -122,6 +121,11 @@ const uint64_t kUInt64TooPreciseForFloat = kInt32TooPreciseForFloat;
 const uint64_t kUInt64TooPreciseForDouble = kInt64TooPreciseForDouble;
 
 }  // namespace
+
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4756)  // warning C4756: overflow in constant arithmetic
+#endif
 
 TEST(RepresentAs, Int32ToDouble) {
     ASSERT(*(representAs<double>(kInt32Zero)) == 0);
@@ -291,5 +295,9 @@ TEST(RepresentAs, Identity) {
     ASSERT(*(representAs<uint32_t>(kUInt32Max)) == kUInt32Max);
     ASSERT(*(representAs<uint64_t>(kUInt64Max)) == kUInt64Max);
 }
+
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 
 }  // namespace mongo

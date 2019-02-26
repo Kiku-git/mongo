@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -28,7 +27,9 @@
  *    it in the license file.
  */
 
-#include "mongo/db/transaction_coordinator_factory.h"
+#include "mongo/platform/basic.h"
+
+#include "mongo/db/s/transaction_coordinator_factory.h"
 
 namespace mongo {
 MONGO_REGISTER_SHIM(createTransactionCoordinator)

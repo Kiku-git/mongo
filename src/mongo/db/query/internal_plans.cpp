@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -40,7 +39,7 @@
 #include "mongo/db/exec/fetch.h"
 #include "mongo/db/exec/idhack.h"
 #include "mongo/db/exec/index_scan.h"
-#include "mongo/db/exec/update.h"
+#include "mongo/db/exec/update_stage.h"
 #include "mongo/db/query/get_executor.h"
 #include "mongo/stdx/memory.h"
 
@@ -78,7 +77,7 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> InternalPlanner::collection
 std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> InternalPlanner::deleteWithCollectionScan(
     OperationContext* opCtx,
     Collection* collection,
-    const DeleteStageParams& params,
+    std::unique_ptr<DeleteStageParams> params,
     PlanExecutor::YieldPolicy yieldPolicy,
     Direction direction,
     const RecordId& startLoc) {
@@ -87,7 +86,8 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> InternalPlanner::deleteWith
 
     auto root = _collectionScan(opCtx, ws.get(), collection, direction, startLoc);
 
-    root = stdx::make_unique<DeleteStage>(opCtx, params, ws.get(), collection, root.release());
+    root = stdx::make_unique<DeleteStage>(
+        opCtx, std::move(params), ws.get(), collection, root.release());
 
     auto executor =
         PlanExecutor::make(opCtx, std::move(ws), std::move(root), collection, yieldPolicy);
@@ -127,7 +127,7 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> InternalPlanner::indexScan(
 std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> InternalPlanner::deleteWithIndexScan(
     OperationContext* opCtx,
     Collection* collection,
-    const DeleteStageParams& params,
+    std::unique_ptr<DeleteStageParams> params,
     const IndexDescriptor* descriptor,
     const BSONObj& startKey,
     const BSONObj& endKey,
@@ -147,7 +147,8 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> InternalPlanner::deleteWith
                                                  direction,
                                                  InternalPlanner::IXSCAN_FETCH);
 
-    root = stdx::make_unique<DeleteStage>(opCtx, params, ws.get(), collection, root.release());
+    root = stdx::make_unique<DeleteStage>(
+        opCtx, std::move(params), ws.get(), collection, root.release());
 
     auto executor =
         PlanExecutor::make(opCtx, std::move(ws), std::move(root), collection, yieldPolicy);
@@ -165,7 +166,7 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> InternalPlanner::updateWith
     invariant(collection);
     auto ws = stdx::make_unique<WorkingSet>();
 
-    auto idHackStage = stdx::make_unique<IDHackStage>(opCtx, collection, key, ws.get(), descriptor);
+    auto idHackStage = stdx::make_unique<IDHackStage>(opCtx, key, ws.get(), descriptor);
     auto root =
         stdx::make_unique<UpdateStage>(opCtx, params, ws.get(), collection, idHackStage.release());
 
@@ -207,7 +208,7 @@ std::unique_ptr<PlanStage> InternalPlanner::_indexScan(OperationContext* opCtx,
     invariant(collection);
     invariant(descriptor);
 
-    IndexScanParams params(opCtx, *descriptor);
+    IndexScanParams params(opCtx, descriptor);
     params.direction = direction;
     params.bounds.isSimpleRange = true;
     params.bounds.startKey = startKey;

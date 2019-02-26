@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Public Domain 2014-2018 MongoDB, Inc.
+# Public Domain 2014-2019 MongoDB, Inc.
 # Public Domain 2008-2014 WiredTiger, Inc.
 #
 # This is free and unencumbered software released into the public domain.
@@ -103,9 +103,6 @@ class test_prepare01(wttest.WiredTigerTestCase):
     # Loop through a set of inserts, periodically committing; before each
     # commit, verify the number of visible records matches the expected value.
     def test_visibility(self):
-        if not wiredtiger.timestamp_build():
-            self.skipTest('requires a timestamp build')
-
         self.session.create(self.uri,
             'key_format=' + self.key_format +
             ',value_format=' + self.value_format)
@@ -151,9 +148,6 @@ class test_read_committed_default(wttest.WiredTigerTestCase):
         return count
 
     def test_read_committed_default(self):
-        if not wiredtiger.timestamp_build():
-            self.skipTest('requires a timestamp build')
-
         self.session.create(self.uri, 'key_format=S,value_format=S')
         cursor = self.session.open_cursor(self.uri, None)
         self.session.begin_transaction()

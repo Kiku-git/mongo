@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -283,7 +282,7 @@ Status Balancer::moveSingleChunk(OperationContext* opCtx,
 
 void Balancer::report(OperationContext* opCtx, BSONObjBuilder* builder) {
     auto balancerConfig = Grid::get(opCtx)->getBalancerConfiguration();
-    balancerConfig->refreshAndCheck(opCtx).transitional_ignore();
+    balancerConfig->refreshAndCheck(opCtx).ignore();
 
     const auto mode = balancerConfig->getBalancerMode();
 
@@ -386,7 +385,7 @@ void Balancer::_mainThread() {
 
                     ShardingLogging::get(opCtx.get())
                         ->logAction(opCtx.get(), "balancer.round", "", roundDetails.toBSON())
-                        .transitional_ignore();
+                        .ignore();
                 }
 
                 LOG(1) << "*** End of balancing round";
@@ -395,7 +394,7 @@ void Balancer::_mainThread() {
             _endRound(opCtx.get(),
                       _balancedLastTime ? kShortBalanceRoundInterval
                                         : kBalanceRoundDefaultInterval);
-        } catch (const std::exception& e) {
+        } catch (const DBException& e) {
             log() << "caught exception while doing balance: " << e.what();
 
             // Just to match the opening statement if in log level 1
@@ -406,7 +405,7 @@ void Balancer::_mainThread() {
 
             ShardingLogging::get(opCtx.get())
                 ->logAction(opCtx.get(), "balancer.round", "", roundDetails.toBSON())
-                .transitional_ignore();
+                .ignore();
 
             // Sleep a fair amount before retrying because of the error
             _endRound(opCtx.get(), kBalanceRoundDefaultInterval);
@@ -659,6 +658,11 @@ void Balancer::_splitOrMarkJumbo(OperationContext* opCtx,
                   << causedBy(redact(status.getStatus()));
         }
     }
+}
+
+void Balancer::notifyPersistedBalancerSettingsChanged() {
+    stdx::unique_lock<stdx::mutex> lock(_mutex);
+    _condVar.notify_all();
 }
 
 }  // namespace mongo

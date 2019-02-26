@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2018 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -141,7 +141,7 @@ __debug_item_key(WT_DBG *ds, const char *tag, const void *data_arg, size_t size)
 	return (ds->f(ds, "\t%s%s{%s}\n",
 	    tag == NULL ? "" : tag, tag == NULL ? "" : " ",
 	    __wt_buf_set_printable_format(
-	    ds->session, data_arg, size, ds->key_format, ds->t1)));
+	    session, data_arg, size, ds->key_format, ds->t1)));
 }
 
 /*
@@ -170,7 +170,7 @@ __debug_item_value(
 	return (ds->f(ds, "\t%s%s{%s}\n",
 	    tag == NULL ? "" : tag, tag == NULL ? "" : " ",
 	    __wt_buf_set_printable_format(
-	    ds->session, data_arg, size, ds->value_format, ds->t1)));
+	    session, data_arg, size, ds->value_format, ds->t1)));
 }
 
 /*
@@ -521,19 +521,15 @@ static int
 __debug_dsk_cell(WT_DBG *ds, const WT_PAGE_HEADER *dsk)
 {
 	WT_BTREE *btree;
-	WT_CELL *cell;
-	WT_CELL_UNPACK *unpack, _unpack;
-	uint32_t i;
+	WT_CELL_UNPACK unpack;
 
 	WT_ASSERT(ds->session, S2BT_SAFE(ds->session) != NULL);
 
 	btree = S2BT(ds->session);
-	unpack = &_unpack;
 
-	WT_CELL_FOREACH(btree, dsk, cell, unpack, i) {
-		__wt_cell_unpack(cell, unpack);
-		WT_RET(__debug_cell(ds, dsk, unpack));
-	}
+	WT_CELL_FOREACH_BEGIN(ds->session, btree, dsk, unpack, false) {
+		WT_RET(__debug_cell(ds, dsk, &unpack));
+	} WT_CELL_FOREACH_END;
 	return (0);
 }
 
@@ -1001,7 +997,7 @@ __debug_page_col_var(WT_DBG *ds, WT_REF *ref)
 			unpack = NULL;
 			rle = 1;
 		} else {
-			__wt_cell_unpack(cell, unpack);
+			__wt_cell_unpack(ds->session, page, cell, unpack);
 			rle = __wt_cell_rle(unpack);
 		}
 		WT_RET(__wt_snprintf(
@@ -1085,7 +1081,7 @@ __debug_page_row_leaf(WT_DBG *ds, WT_PAGE *page)
 		WT_ERR(__wt_row_leaf_key(session, page, rip, key, false));
 		WT_ERR(__debug_item_key(ds, "K", key->data, key->size));
 
-		__wt_row_leaf_value_cell(page, rip, NULL, unpack);
+		__wt_row_leaf_value_cell(session, page, rip, NULL, unpack);
 		WT_ERR(__debug_cell_data(
 		    ds, page, WT_PAGE_ROW_LEAF, "V", unpack));
 
@@ -1173,6 +1169,8 @@ __debug_modify(WT_DBG *ds, WT_UPDATE *upd)
 static int
 __debug_update(WT_DBG *ds, WT_UPDATE *upd, bool hexbyte)
 {
+	char ts_string[WT_TS_INT_STRING_SIZE];
+
 	for (; upd != NULL; upd = upd->next) {
 		switch (upd->type) {
 		case WT_UPDATE_INVALID:
@@ -1203,19 +1201,15 @@ __debug_update(WT_DBG *ds, WT_UPDATE *upd, bool hexbyte)
 			break;
 		}
 		if (upd->txnid == WT_TXN_ABORTED)
-			WT_RET(ds->f(ds, "\t" "txn aborted"));
+			WT_RET(ds->f(ds, "\t" "txn id aborted"));
 		else
 			WT_RET(ds->f(ds, "\t" "txn id %" PRIu64, upd->txnid));
-
-#ifdef HAVE_TIMESTAMPS
-		if (!__wt_timestamp_iszero(
-		    WT_TIMESTAMP_NULL(&upd->timestamp))) {
-			char hex_timestamp[2 * WT_TIMESTAMP_SIZE + 1];
-			WT_RET(__wt_timestamp_to_hex_string(
-			    ds->session, hex_timestamp, &upd->timestamp));
-			WT_RET(ds->f(ds, ", stamp %s", hex_timestamp));
-		}
-#endif
+		__wt_timestamp_to_string(
+		    upd->start_ts, ts_string, sizeof(ts_string));
+		WT_RET(ds->f(ds, ", start_ts %s", ts_string));
+		__wt_timestamp_to_string(
+		    upd->stop_ts, ts_string, sizeof(ts_string));
+		WT_RET(ds->f(ds, ", stop_ts %s", ts_string));
 		WT_RET(ds->f(ds, "\n"));
 	}
 	return (0);
@@ -1262,7 +1256,7 @@ __debug_ref(WT_DBG *ds, WT_REF *ref)
 		break;
 	}
 
-	__wt_ref_info(ref, &addr, &addr_size, NULL);
+	__wt_ref_info(session, ref, &addr, &addr_size, NULL);
 	return (ds->f(ds, "\t" "%p %s %s\n", (void *)ref,
 	    state, __wt_addr_string(session, addr, addr_size, ds->t1)));
 }
@@ -1277,7 +1271,7 @@ __debug_cell(WT_DBG *ds, const WT_PAGE_HEADER *dsk, WT_CELL_UNPACK *unpack)
 	WT_DECL_ITEM(buf);
 	WT_DECL_RET;
 	WT_SESSION_IMPL *session;
-	const char *type;
+	char ts_string[3][WT_TS_INT_STRING_SIZE];
 
 	session = ds->session;
 
@@ -1315,29 +1309,48 @@ __debug_cell(WT_DBG *ds, const WT_PAGE_HEADER *dsk, WT_CELL_UNPACK *unpack)
 		break;
 	}
 
+	/* Dump timestamps. */
+	switch (unpack->raw) {
+	case WT_CELL_ADDR_DEL:
+	case WT_CELL_ADDR_INT:
+	case WT_CELL_ADDR_LEAF:
+	case WT_CELL_ADDR_LEAF_NO:
+		__wt_timestamp_to_string(unpack->oldest_start_ts,
+		    ts_string[0], sizeof(ts_string[0]));
+		__wt_timestamp_to_string(unpack->newest_start_ts,
+		    ts_string[1], sizeof(ts_string[1]));
+		__wt_timestamp_to_string(unpack->newest_stop_ts,
+		    ts_string[2], sizeof(ts_string[2]));
+		WT_RET(ds->f(ds,
+		    ", ts %s,%s,%s", ts_string[0], ts_string[1], ts_string[2]));
+		break;
+	case WT_CELL_DEL:
+	case WT_CELL_VALUE:
+	case WT_CELL_VALUE_COPY:
+	case WT_CELL_VALUE_OVFL:
+	case WT_CELL_VALUE_OVFL_RM:
+	case WT_CELL_VALUE_SHORT:
+		__wt_timestamp_to_string(unpack->start_ts,
+		    ts_string[0], sizeof(ts_string[0]));
+		__wt_timestamp_to_string(unpack->stop_ts,
+		    ts_string[1], sizeof(ts_string[1]));
+		WT_RET(ds->f(ds, ", ts %s-%s", ts_string[0], ts_string[1]));
+		break;
+	}
+
 	/* Dump addresses. */
 	switch (unpack->raw) {
 	case WT_CELL_ADDR_DEL:
-		type = "addr/del";
-		goto addr;
 	case WT_CELL_ADDR_INT:
-		type = "addr/int";
-		goto addr;
 	case WT_CELL_ADDR_LEAF:
-		type = "addr/leaf";
-		goto addr;
 	case WT_CELL_ADDR_LEAF_NO:
-		type = "addr/leaf-no";
-		goto addr;
 	case WT_CELL_KEY_OVFL:
 	case WT_CELL_KEY_OVFL_RM:
 	case WT_CELL_VALUE_OVFL:
 	case WT_CELL_VALUE_OVFL_RM:
-		type = "ovfl";
-addr:		WT_RET(__wt_scr_alloc(session, 128, &buf));
-		ret = ds->f(ds, ", %s %s", type,
-		    __wt_addr_string(
-		    session, unpack->data, unpack->size, buf));
+		WT_RET(__wt_scr_alloc(session, 128, &buf));
+		ret = ds->f(ds, ", %s",
+		    __wt_addr_string(session, unpack->data, unpack->size, buf));
 		__wt_scr_free(session, &buf);
 		WT_RET(ret);
 		break;
@@ -1368,6 +1381,12 @@ __debug_cell_data(WT_DBG *ds,
 	 */
 	if (unpack == NULL)
 		return (__debug_item(ds, tag, "deleted", strlen("deleted")));
+
+	/*
+	 * Row-store references to empty cells return a NULL on-page reference.
+	 */
+	if (unpack->cell == NULL)
+		return (__debug_item(ds, tag, "", 0));
 
 	switch (unpack->raw) {
 	case WT_CELL_ADDR_DEL:

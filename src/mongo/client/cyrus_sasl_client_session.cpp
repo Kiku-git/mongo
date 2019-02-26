@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -222,7 +221,7 @@ int saslClientGetPassword(sasl_conn_t* conn,
 }  // namespace
 
 CyrusSaslClientSession::CyrusSaslClientSession()
-    : SaslClientSession(), _saslConnection(NULL), _step(0), _done(false) {
+    : SaslClientSession(), _saslConnection(NULL), _step(0), _success(false) {
     const sasl_callback_t callbackTemplate[maxCallbacks] = {
         {SASL_CB_AUTHNAME, SaslCallbackFn(saslClientGetSimple), this},
         {SASL_CB_USER, SaslCallbackFn(saslClientGetSimple), this},
@@ -299,7 +298,7 @@ Status CyrusSaslClientSession::step(StringData inputData, std::string* outputDat
     ++_step;
     switch (result) {
         case SASL_OK:
-            _done = true;
+            _success = true;
         // Fall through
         case SASL_CONTINUE:
             *outputData = std::string(output, outputSize);

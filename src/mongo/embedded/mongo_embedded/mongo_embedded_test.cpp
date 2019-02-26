@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -240,9 +239,10 @@ TEST_F(MongodbCAPITest, CreateIndex) {
     auto inputOpMsg = mongo::OpMsgRequest::fromDBAndBody("index_db", inputObj);
     auto output = performRpc(client, inputOpMsg);
 
-    ASSERT(output.hasField("ok"));
-    ASSERT(output.getField("ok").numberDouble() == 1.0);
-    ASSERT(output.getIntField("numIndexesAfter") == output.getIntField("numIndexesBefore") + 1);
+    ASSERT(output.hasField("ok")) << output;
+    ASSERT(output.getField("ok").numberDouble() == 1.0) << output;
+    ASSERT(output.getIntField("numIndexesAfter") == output.getIntField("numIndexesBefore") + 1)
+        << output;
 }
 
 TEST_F(MongodbCAPITest, CreateBackgroundIndex) {
@@ -267,8 +267,8 @@ TEST_F(MongodbCAPITest, CreateBackgroundIndex) {
     auto inputOpMsg = mongo::OpMsgRequest::fromDBAndBody("background_index_db", inputObj);
     auto output = performRpc(client, inputOpMsg);
 
-    ASSERT(output.hasField("ok"));
-    ASSERT(output.getField("ok").numberDouble() != 1.0);
+    ASSERT(output.hasField("ok")) << output;
+    ASSERT(output.getField("ok").numberDouble() != 1.0) << output;
 }
 
 TEST_F(MongodbCAPITest, CreateTTLIndex) {
@@ -293,8 +293,8 @@ TEST_F(MongodbCAPITest, CreateTTLIndex) {
     auto inputOpMsg = mongo::OpMsgRequest::fromDBAndBody("ttl_index_db", inputObj);
     auto output = performRpc(client, inputOpMsg);
 
-    ASSERT(output.hasField("ok"));
-    ASSERT(output.getField("ok").numberDouble() != 1.0);
+    ASSERT(output.hasField("ok")) << output;
+    ASSERT(output.getField("ok").numberDouble() != 1.0) << output;
 }
 
 TEST_F(MongodbCAPITest, TrimMemory) {
@@ -575,7 +575,6 @@ TEST_F(MongodbCAPITest, RunListCommands) {
         "getLastError",
         "getMore",
         "getParameter",
-        "getPrevError",
         "insert",
         "isMaster",
         "killCursors",
@@ -608,6 +607,7 @@ TEST_F(MongodbCAPITest, RunListCommands) {
         "sleep",
         "startSession",
         "trimMemory",
+        "twoPhaseCreateIndexes",
         "update",
         "validate",
     };

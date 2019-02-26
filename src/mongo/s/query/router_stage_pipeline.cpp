@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -55,7 +54,7 @@ StatusWith<ClusterQueryResult> RouterStagePipeline::next(RouterExecStage::ExecCo
 
     // Pipeline::getNext will return a boost::optional<Document> or boost::none if EOF.
     if (auto result = _mergePipeline->getNext()) {
-        return {result->toBson()};
+        return _validateAndConvertToBSON(*result);
     }
 
     // If we reach this point, we have hit EOF.
@@ -85,6 +84,55 @@ std::size_t RouterStagePipeline::getNumRemotes() const {
         return _mergeCursorsStage->getNumRemotes();
     }
     return 0;
+}
+
+BSONObj RouterStagePipeline::getPostBatchResumeToken() const {
+    auto pbrt = _mergeCursorsStage ? _mergeCursorsStage->getHighWaterMark() : BSONObj();
+    return pbrt.isEmpty() ? pbrt : _setPostBatchResumeTokenUUID(pbrt);
+}
+
+BSONObj RouterStagePipeline::_setPostBatchResumeTokenUUID(BSONObj pbrt) const {
+    // If the PBRT does not match the sort key of the latest document, it is a high water mark.
+    const bool isHighWaterMark = !pbrt.binaryEqual(_latestSortKey);
+
+    // If this stream is on a single collection and the token is a high water mark, then it may have
+    // come from a shard that does not have the collection. If so, we must fill in the correct UUID.
+    if (isHighWaterMark && _mergePipeline->getContext()->uuid) {
+        auto tokenData = ResumeToken::parse(pbrt).getData();
+        // Check whether the UUID is missing before regenerating the token.
+        if (!tokenData.uuid) {
+            invariant(tokenData.tokenType == ResumeTokenData::kHighWaterMarkToken);
+            tokenData.uuid = _mergePipeline->getContext()->uuid;
+            pbrt = ResumeToken(tokenData).toDocument().toBson();
+        }
+    }
+    return pbrt;
+}
+
+BSONObj RouterStagePipeline::_validateAndConvertToBSON(const Document& event) {
+    // If this is not a change stream pipeline, we have nothing to do except return the BSONObj.
+    if (!_mergePipeline->getContext()->isTailableAwaitData()) {
+        return event.toBson();
+    }
+    // Confirm that the document _id field matches the original resume token in the sort key field.
+    auto eventBSON = event.toBson();
+    auto resumeToken = event.getSortKeyMetaField();
+    auto idField = eventBSON.getObjectField("_id");
+    invariant(!resumeToken.isEmpty());
+    uassert(ErrorCodes::ChangeStreamFatalError,
+            str::stream() << "Encountered an event whose _id field, which contains the resume "
+                             "token, was modified by the pipeline. Modifying the _id field of an "
+                             "event makes it impossible to resume the stream from that point. Only "
+                             "transformations that retain the unmodified _id field are allowed. "
+                             "Expected: "
+                          << BSON("_id" << resumeToken)
+                          << " but found: "
+                          << (eventBSON["_id"] ? BSON("_id" << eventBSON["_id"]) : BSONObj()),
+            idField.binaryEqual(resumeToken));
+
+    // Record the latest resume token for later comparison, then return the event in BSONObj form.
+    _latestSortKey = resumeToken;
+    return eventBSON;
 }
 
 bool RouterStagePipeline::remotesExhausted() {

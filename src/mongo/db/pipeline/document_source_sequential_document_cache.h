@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -64,11 +63,24 @@ public:
         return constraints;
     }
 
+    boost::optional<MergingLogic> mergingLogic() final {
+        return boost::none;
+    }
+
     GetNextResult getNext() final;
 
     static boost::intrusive_ptr<DocumentSourceSequentialDocumentCache> create(
         const boost::intrusive_ptr<ExpressionContext>& pExpCtx, SequentialDocumentCache* cache) {
         return new DocumentSourceSequentialDocumentCache(pExpCtx, cache);
+    }
+
+    /**
+     * Transitions the SequentialDocumentCache object's state to CacheStatus::kAbandoned. Once
+     * abandoned it is expected that the cache will not be used for subsequent operations.
+     */
+    void abandonCache() {
+        invariant(_cache);
+        _cache->abandon();
     }
 
 protected:

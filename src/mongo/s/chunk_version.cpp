@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -49,7 +48,11 @@ StatusWith<ChunkVersion> ChunkVersion::parseWithField(const BSONObj& obj, String
                 str::stream() << "Invalid type " << versionElem.type()
                               << " for shardVersion element. Expected an array"};
 
-    BSONObjIterator it(versionElem.Obj());
+    return fromBSON(versionElem.Obj());
+}
+
+StatusWith<ChunkVersion> ChunkVersion::fromBSON(const BSONObj& obj) {
+    BSONObjIterator it(obj);
     if (!it.more())
         return {ErrorCodes::BadValue, "Unexpected empty version array"};
 

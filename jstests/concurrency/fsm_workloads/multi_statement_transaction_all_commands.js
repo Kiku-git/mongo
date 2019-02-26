@@ -3,7 +3,7 @@
 /**
  * Runs findAndModify, update, delete, find, and getMore within a transaction.
  *
- * @tags: [uses_transactions]
+ * @tags: [uses_transactions, state_functions_share_transaction]
  */
 load('jstests/concurrency/fsm_workload_helpers/cleanup_txns.js');
 var $config = (function() {
@@ -153,7 +153,7 @@ var $config = (function() {
         };
     }
 
-    function setup(db, collName) {
+    function setup(db, collName, cluster) {
         assertWhenOwnColl.commandWorked(db.runCommand({create: collName}));
         const bulk = db[collName].initializeUnorderedBulkOp();
 
@@ -164,6 +164,12 @@ var $config = (function() {
         const res = bulk.execute({w: 'majority'});
         assertWhenOwnColl.commandWorked(res);
         assertWhenOwnColl.eq(this.numDocs, res.nInserted);
+
+        if (cluster.isSharded()) {
+            // Advance each router's cluster time to be >= the time of the writes, so the first
+            // global snapshots chosen by each is guaranteed to include the inserted documents.
+            cluster.synchronizeMongosClusterTimes();
+        }
     }
 
     function teardown(db, collName, cluster) {
@@ -204,7 +210,7 @@ var $config = (function() {
 
     return {
         threadCount: 5,
-        iterations: 10,
+        iterations: 20,
         states: states,
         transitions: transitions,
         data: {

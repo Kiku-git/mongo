@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -87,8 +86,8 @@ void ComparisonMatchExpressionBase::debugString(StringBuilder& debug, int level)
     debug << "\n";
 }
 
-void ComparisonMatchExpressionBase::serialize(BSONObjBuilder* out) const {
-    out->append(path(), BSON(name() << _rhs));
+BSONObj ComparisonMatchExpressionBase::getSerializedRightHandSide() const {
+    return BSON(name() << _rhs);
 }
 
 ComparisonMatchExpression::ComparisonMatchExpression(MatchType type,
@@ -290,15 +289,15 @@ void RegexMatchExpression::debugString(StringBuilder& debug, int level) const {
     debug << "\n";
 }
 
-void RegexMatchExpression::serialize(BSONObjBuilder* out) const {
-    BSONObjBuilder regexBuilder(out->subobjStart(path()));
+BSONObj RegexMatchExpression::getSerializedRightHandSide() const {
+    BSONObjBuilder regexBuilder;
     regexBuilder.append("$regex", _regex);
 
     if (!_flags.empty()) {
         regexBuilder.append("$options", _flags);
     }
 
-    regexBuilder.doneFast();
+    return regexBuilder.obj();
 }
 
 void RegexMatchExpression::serializeToBSONTypeRegex(BSONObjBuilder* out) const {
@@ -333,8 +332,8 @@ void ModMatchExpression::debugString(StringBuilder& debug, int level) const {
     debug << "\n";
 }
 
-void ModMatchExpression::serialize(BSONObjBuilder* out) const {
-    out->append(path(), BSON("$mod" << BSON_ARRAY(_divisor << _remainder)));
+BSONObj ModMatchExpression::getSerializedRightHandSide() const {
+    return BSON("$mod" << BSON_ARRAY(_divisor << _remainder));
 }
 
 bool ModMatchExpression::equivalent(const MatchExpression* other) const {
@@ -367,8 +366,8 @@ void ExistsMatchExpression::debugString(StringBuilder& debug, int level) const {
     debug << "\n";
 }
 
-void ExistsMatchExpression::serialize(BSONObjBuilder* out) const {
-    out->append(path(), BSON("$exists" << true));
+BSONObj ExistsMatchExpression::getSerializedRightHandSide() const {
+    return BSON("$exists" << true);
 }
 
 bool ExistsMatchExpression::equivalent(const MatchExpression* other) const {
@@ -440,8 +439,8 @@ void InMatchExpression::debugString(StringBuilder& debug, int level) const {
     debug << "\n";
 }
 
-void InMatchExpression::serialize(BSONObjBuilder* out) const {
-    BSONObjBuilder inBob(out->subobjStart(path()));
+BSONObj InMatchExpression::getSerializedRightHandSide() const {
+    BSONObjBuilder inBob;
     BSONArrayBuilder arrBob(inBob.subarrayStart("$in"));
     for (auto&& _equality : _equalitySet) {
         arrBob.append(_equality);
@@ -452,7 +451,7 @@ void InMatchExpression::serialize(BSONObjBuilder* out) const {
         arrBob.append(regexBob.obj().firstElement());
     }
     arrBob.doneFast();
-    inBob.doneFast();
+    return inBob.obj();
 }
 
 bool InMatchExpression::equivalent(const MatchExpression* other) const {
@@ -509,7 +508,10 @@ void InMatchExpression::_doSetCollator(const CollatorInterface* collator) {
     }
 
     // We need to re-compute '_equalitySet', since our set comparator has changed.
-    _equalitySet = _eltCmp.makeBSONEltFlatSet(_originalEqualityVector);
+    _equalitySet = _eltCmp.makeBSONEltFlatSetFromSortedUniqueRange(
+        _originalEqualityVector.begin(),
+        std::unique(
+            _originalEqualityVector.begin(), _originalEqualityVector.end(), _eltCmp.makeEqualTo()));
 }
 
 Status InMatchExpression::setEqualities(std::vector<BSONElement> equalities) {
@@ -538,7 +540,10 @@ Status InMatchExpression::setEqualities(std::vector<BSONElement> equalities) {
             _originalEqualityVector.begin(), _originalEqualityVector.end(), _eltCmp.makeLessThan());
     }
 
-    _equalitySet = _eltCmp.makeBSONEltFlatSet(_originalEqualityVector);
+    _equalitySet = _eltCmp.makeBSONEltFlatSetFromSortedUniqueRange(
+        _originalEqualityVector.begin(),
+        std::unique(
+            _originalEqualityVector.begin(), _originalEqualityVector.end(), _eltCmp.makeEqualTo()));
 
     return Status::OK();
 }
@@ -720,7 +725,7 @@ bool BitTestMatchExpression::matchesSingleElement(const BSONElement& e,
         // integer are treated as 0. We use 'kLongLongMaxAsDouble' because if we just did
         // eDouble > 2^63-1, it would be compared against 2^63. eDouble=2^63 would not get caught
         // that way.
-        if (eDouble >= MatchExpressionParser::kLongLongMaxPlusOneAsDouble ||
+        if (eDouble >= BSONElement::kLongLongMaxPlusOneAsDouble ||
             eDouble < std::numeric_limits<long long>::min()) {
             return false;
         }
@@ -773,7 +778,7 @@ void BitTestMatchExpression::debugString(StringBuilder& debug, int level) const 
     }
 }
 
-void BitTestMatchExpression::serialize(BSONObjBuilder* out) const {
+BSONObj BitTestMatchExpression::getSerializedRightHandSide() const {
     std::string opString = "";
 
     switch (matchType()) {
@@ -799,7 +804,7 @@ void BitTestMatchExpression::serialize(BSONObjBuilder* out) const {
     }
     arrBob.doneFast();
 
-    out->append(path(), BSON(opString << arrBob.arr()));
+    return BSON(opString << arrBob.arr());
 }
 
 bool BitTestMatchExpression::equivalent(const MatchExpression* other) const {

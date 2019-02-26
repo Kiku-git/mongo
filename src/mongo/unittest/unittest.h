@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -252,7 +251,6 @@
 #define _TEST_TYPE_NAME(CASE_NAME, TEST_NAME) UnitTest__##CASE_NAME##__##TEST_NAME
 
 namespace mongo {
-
 namespace unittest {
 
 class Result;
@@ -264,6 +262,7 @@ void setupTestLogger();
  * different target from the global log domain.
  */
 mongo::logger::LogstreamBuilder log();
+mongo::logger::LogstreamBuilder warning();
 
 /**
  * Type representing the function composing a test.
@@ -305,6 +304,16 @@ public:
     virtual ~Test();
 
     void run();
+
+    /**
+     * Called on the test object before running the test.
+     */
+    virtual void setUp() {}
+
+    /**
+     * Called on the test object after running the test.
+     */
+    virtual void tearDown() {}
 
 protected:
     /**
@@ -362,16 +371,6 @@ protected:
      * Prints the captured log lines.
      */
     void printCapturedLogLines() const;
-
-    /**
-     * Called on the test object before running the test.
-     */
-    virtual void setUp();
-
-    /**
-     * Called on the test object after running the test.
-     */
-    virtual void tearDown();
 
 private:
     /**
@@ -463,6 +462,23 @@ struct SuiteInstance {
         new T(u);
     }
 };
+
+template <typename T>
+Test::RegistrationAgent<T>::RegistrationAgent(const std::string& suiteName,
+                                              const std::string& testName)
+    : _suiteName(suiteName), _testName(testName) {
+    Suite::getSuite(suiteName)->add<T>(testName);
+}
+
+template <typename T>
+std::string Test::RegistrationAgent<T>::getSuiteName() const {
+    return _suiteName;
+}
+
+template <typename T>
+std::string Test::RegistrationAgent<T>::getTestName() const {
+    return _testName;
+}
 
 /**
  * Exception thrown when a test assertion fails.
@@ -619,12 +635,5 @@ T assertGet(StatusWith<T>&& swt) {
  */
 std::vector<std::string> getAllSuiteNames();
 
-
-inline bool alwaysTrue() {
-    return true;
-}
-
 }  // namespace unittest
 }  // namespace mongo
-
-#include "mongo/unittest/unittest-inl.h"

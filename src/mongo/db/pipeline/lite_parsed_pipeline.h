@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -30,6 +29,7 @@
 
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -52,7 +52,7 @@ public:
      * May throw a AssertionException if there is an invalid stage specification, although full
      * validation happens later, during Pipeline construction.
      */
-    LiteParsedPipeline(const AggregationRequest& request) {
+    LiteParsedPipeline(const AggregationRequest& request) : _nss(request.getNamespaceString()) {
         _stageSpecs.reserve(request.getPipeline().size());
 
         for (auto&& rawStage : request.getPipeline()) {
@@ -103,6 +103,18 @@ public:
     }
 
     /**
+     * Returns true if this pipeline's UUID and collation should be resolved. For the latter, this
+     * means adopting the collection's default collation, unless a custom collation was specified.
+     */
+    bool shouldResolveUUIDAndCollation() const {
+        // Collectionless aggregations do not have a UUID or default collation.
+        return !_nss.isCollectionlessAggregateNS() &&
+            std::all_of(_stageSpecs.begin(), _stageSpecs.end(), [](auto&& spec) {
+                return spec->shouldResolveUUIDAndCollation();
+            });
+    }
+
+    /**
      * Returns false if the pipeline has any stage which must be run locally on mongos.
      */
     bool allowedToForwardFromMongos() const {
@@ -135,23 +147,24 @@ public:
      * that each stage is compatible, and throws a UserException if not.
      */
     void assertSupportsReadConcern(OperationContext* opCtx,
-                                   boost::optional<ExplainOptions::Verbosity> explain) const {
-        auto readConcern = repl::ReadConcernArgs::get(opCtx);
+                                   boost::optional<ExplainOptions::Verbosity> explain,
+                                   bool enableMajorityReadConcern) const;
 
-        uassert(ErrorCodes::InvalidOptions,
-                str::stream() << "Explain for the aggregate command cannot run with a readConcern "
-                              << "other than 'local', or in a multi-document transaction. Current "
-                              << "readConcern: "
-                              << readConcern.toString(),
-                !explain || readConcern.getLevel() == repl::ReadConcernLevel::kLocalReadConcern);
-
-        for (auto&& spec : _stageSpecs) {
-            spec->assertSupportsReadConcern(readConcern);
-        }
-    }
+    /**
+     * Perform checks that verify that the LitePipe is valid. Note that this function must be called
+     * before forwarding an aggregation command on an unsharded collection, in order to verify that
+     * the involved namespaces are allowed to be sharded. Returns true if any involved namespace is
+     * sharded.
+     */
+    bool verifyIsSupported(
+        OperationContext* opCtx,
+        const std::function<bool(OperationContext*, const NamespaceString&)> isSharded,
+        const boost::optional<ExplainOptions::Verbosity> explain,
+        bool enableMajorityReadConcern) const;
 
 private:
     std::vector<std::unique_ptr<LiteParsedDocumentSource>> _stageSpecs;
+    NamespaceString _nss;
 };
 
 }  // namespace mongo

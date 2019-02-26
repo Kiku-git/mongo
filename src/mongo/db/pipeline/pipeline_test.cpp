@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -40,7 +39,10 @@
 #include "mongo/db/pipeline/document.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_change_stream.h"
+#include "mongo/db/pipeline/document_source_facet.h"
+#include "mongo/db/pipeline/document_source_graph_lookup.h"
 #include "mongo/db/pipeline/document_source_internal_split_pipeline.h"
+#include "mongo/db/pipeline/document_source_lookup.h"
 #include "mongo/db/pipeline/document_source_lookup_change_post_image.h"
 #include "mongo/db/pipeline/document_source_match.h"
 #include "mongo/db/pipeline/document_source_mock.h"
@@ -731,10 +733,15 @@ TEST(PipelineOptimizationTest, MatchWithNorOnlySplitsIndependentChildren) {
         "[{$unwind: {path: '$a'}}, "
         "{$match: {$nor: [{$and: [{a: {$eq: 1}}, {b: {$eq: 1}}]}, {b: {$eq: 2}} ]}}]";
     string outputPipe =
-        "[{$match: {$nor: [{b: {$eq: 2}}]}}, "
-        "{$unwind: {path: '$a'}}, "
-        "{$match: {$nor: [{$and: [{a: {$eq: 1}}, {b: {$eq: 1}}]}]}}]";
-    assertPipelineOptimizesTo(inputPipe, outputPipe);
+        R"(
+        [{$match: {b: {$not: {$eq: 2}}}},
+         {$unwind: {path: '$a'}},
+         {$match: {$nor: [{$and: [{a: {$eq: 1}}, {b: {$eq: 1}}]}]}}])";
+    string serializedPipe = R"(
+        [{$match: {$nor: [{b: {$eq: 2}}]}},
+         {$unwind: {path: '$a'}},
+         {$match: {$nor: [{$and: [{a: {$eq: 1}}, {b: {$eq: 1}}]}]}}])";
+    assertPipelineOptimizesAndSerializesTo(inputPipe, outputPipe, serializedPipe);
 }
 
 TEST(PipelineOptimizationTest, MatchWithOrDoesNotSplit) {
@@ -992,10 +999,15 @@ TEST(PipelineOptimizationTest, NorCanSplitAcrossProjectWithRename) {
         "[{$project: {_id: false, x: true, y: '$z'}},"
         "{$match: {$nor: [{w: {$eq: 1}}, {y: {$eq: 1}}]}}]";
     string outputPipe =
-        "[{$match: {$nor: [{z: {$eq: 1}}]}},"
-        "{$project: {_id: false, x: true, y: '$z'}},"
-        "{$match: {$nor: [{w: {$eq: 1}}]}}]";
-    assertPipelineOptimizesTo(inputPipe, outputPipe);
+        R"([{$match: {z : {$not: {$eq: 1}}}},
+             {$project: {_id: false, x: true, y: "$z"}},
+             {$match: {w: {$not: {$eq: 1}}}}])";
+    string serializedPipe = R"(
+        [{$match: {$nor: [ {z : {$eq: 1}}]}},
+         {$project: {_id: false, x: true, y: "$z"}},
+         {$match: {$nor: [ {w: {$eq: 1}}]}}]
+        )";
+    assertPipelineOptimizesAndSerializesTo(inputPipe, outputPipe, serializedPipe);
 }
 
 TEST(PipelineOptimizationTest, MatchCanMoveAcrossSeveralRenames) {
@@ -1010,7 +1022,13 @@ TEST(PipelineOptimizationTest, MatchCanMoveAcrossSeveralRenames) {
         "{$match: {z: {$eq: 2}}},"
         "{$addFields: {b: '$c'}},"
         "{$project: {_id: true, z: true, a: '$b'}}]";
-    assertPipelineOptimizesTo(inputPipe, outputPipe);
+    string serializedPipe = R"(
+        [{$match: {d : {$eq: 1}}},
+         {$project: {_id: false, c: "$d"}},
+         {$match: {z : {$eq: 2}}},
+         {$addFields: {b: "$c"}},
+         {$project: {_id: true, z: true, a: "$b"}}])";
+    assertPipelineOptimizesAndSerializesTo(inputPipe, outputPipe, serializedPipe);
 }
 
 TEST(PipelineOptimizationTest, RenameShouldNotBeAppliedToDependentMatch) {
@@ -1574,6 +1592,7 @@ TEST(PipelineOptimizationTest, ChangeStreamLookupSwapsWithIndependentMatch) {
 
     intrusive_ptr<ExpressionContext> expCtx(new ExpressionContextForTest(kTestNss));
     expCtx->opCtx = opCtx.get();
+    expCtx->uuid = UUID::gen();
     setMockReplicationCoordinatorOnOpCtx(expCtx->opCtx);
 
     auto spec = BSON("$changeStream" << BSON("fullDocument"
@@ -1599,6 +1618,7 @@ TEST(PipelineOptimizationTest, ChangeStreamLookupDoesNotSwapWithMatchOnPostImage
 
     intrusive_ptr<ExpressionContext> expCtx(new ExpressionContextForTest(kTestNss));
     expCtx->opCtx = opCtx.get();
+    expCtx->uuid = UUID::gen();
     setMockReplicationCoordinatorOnOpCtx(expCtx->opCtx);
 
     auto spec = BSON("$changeStream" << BSON("fullDocument"
@@ -3031,6 +3051,158 @@ TEST(PipelineRenameTracking, CanHandleBackAndForthRename) {
     auto nameMap = *renames;
     ASSERT_EQ(nameMap.size(), 1UL);
     ASSERT_EQ(nameMap["a"], "a");
+}
+
+TEST(InvolvedNamespacesTest, NoInvolvedNamespacesForMatchSortProject) {
+    boost::intrusive_ptr<ExpressionContext> expCtx(new ExpressionContextForTest());
+    auto pipeline = unittest::assertGet(
+        Pipeline::create({DocumentSourceMock::create(),
+                          DocumentSourceMatch::create(BSON("x" << 1), expCtx),
+                          DocumentSourceSort::create(expCtx, BSON("y" << -1)),
+                          DocumentSourceProject::create(BSON("x" << 1 << "y" << 1), expCtx)},
+                         expCtx));
+    auto involvedNssSet = pipeline->getInvolvedCollections();
+    ASSERT(involvedNssSet.empty());
+}
+
+TEST(InvolvedNamespacesTest, IncludesLookupNamespace) {
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    const NamespaceString lookupNss{"test", "foo"};
+    const NamespaceString resolvedNss{"test", "bar"};
+    expCtx->setResolvedNamespace(lookupNss, {resolvedNss, vector<BSONObj>{}});
+    auto lookupSpec =
+        fromjson("{$lookup: {from: 'foo', as: 'x', localField: 'foo_id', foreignField: '_id'}}");
+    auto pipeline = unittest::assertGet(
+        Pipeline::create({DocumentSourceMock::create(),
+                          DocumentSourceLookUp::createFromBson(lookupSpec.firstElement(), expCtx)},
+                         expCtx));
+
+    auto involvedNssSet = pipeline->getInvolvedCollections();
+    ASSERT_EQ(involvedNssSet.size(), 1UL);
+    ASSERT(involvedNssSet.find(resolvedNss) != involvedNssSet.end());
+}
+
+TEST(InvolvedNamespacesTest, IncludesGraphLookupNamespace) {
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    const NamespaceString lookupNss{"test", "foo"};
+    const NamespaceString resolvedNss{"test", "bar"};
+    expCtx->setResolvedNamespace(lookupNss, {resolvedNss, vector<BSONObj>{}});
+    auto graphLookupSpec = fromjson(
+        "{$graphLookup: {"
+        "  from: 'foo',"
+        "  as: 'x',"
+        "  connectFromField: 'x',"
+        "  connectToField: 'y',"
+        "  startWith: '$start'"
+        "}}");
+    auto pipeline = unittest::assertGet(Pipeline::create(
+        {DocumentSourceMock::create(),
+         DocumentSourceGraphLookUp::createFromBson(graphLookupSpec.firstElement(), expCtx)},
+        expCtx));
+
+    auto involvedNssSet = pipeline->getInvolvedCollections();
+    ASSERT_EQ(involvedNssSet.size(), 1UL);
+    ASSERT(involvedNssSet.find(resolvedNss) != involvedNssSet.end());
+}
+
+TEST(InvolvedNamespacesTest, IncludesLookupSubpipelineNamespaces) {
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    const NamespaceString outerLookupNss{"test", "foo_outer"};
+    const NamespaceString outerResolvedNss{"test", "bar_outer"};
+    const NamespaceString innerLookupNss{"test", "foo_inner"};
+    const NamespaceString innerResolvedNss{"test", "bar_inner"};
+    expCtx->setResolvedNamespace(outerLookupNss, {outerResolvedNss, vector<BSONObj>{}});
+    expCtx->setResolvedNamespace(innerLookupNss, {innerResolvedNss, vector<BSONObj>{}});
+    auto lookupSpec = fromjson(
+        "{$lookup: {"
+        "  from: 'foo_outer', "
+        "  as: 'x', "
+        "  pipeline: [{$lookup: {from: 'foo_inner', as: 'y', pipeline: []}}]"
+        "}}");
+    auto pipeline = unittest::assertGet(
+        Pipeline::create({DocumentSourceMock::create(),
+                          DocumentSourceLookUp::createFromBson(lookupSpec.firstElement(), expCtx)},
+                         expCtx));
+
+    auto involvedNssSet = pipeline->getInvolvedCollections();
+    ASSERT_EQ(involvedNssSet.size(), 2UL);
+    ASSERT(involvedNssSet.find(outerResolvedNss) != involvedNssSet.end());
+    ASSERT(involvedNssSet.find(innerResolvedNss) != involvedNssSet.end());
+}
+
+TEST(InvolvedNamespacesTest, IncludesGraphLookupSubPipeline) {
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    const NamespaceString outerLookupNss{"test", "foo_outer"};
+    const NamespaceString outerResolvedNss{"test", "bar_outer"};
+    const NamespaceString innerLookupNss{"test", "foo_inner"};
+    const NamespaceString innerResolvedNss{"test", "bar_inner"};
+    expCtx->setResolvedNamespace(outerLookupNss, {outerResolvedNss, vector<BSONObj>{}});
+    expCtx->setResolvedNamespace(
+        outerLookupNss,
+        {outerResolvedNss,
+         vector<BSONObj>{fromjson("{$lookup: {from: 'foo_inner', as: 'x', pipeline: []}}")}});
+    expCtx->setResolvedNamespace(innerLookupNss, {innerResolvedNss, vector<BSONObj>{}});
+    auto graphLookupSpec = fromjson(
+        "{$graphLookup: {"
+        "  from: 'foo_outer', "
+        "  as: 'x', "
+        "  connectFromField: 'x',"
+        "  connectToField: 'y',"
+        "  startWith: '$start'"
+        "}}");
+    auto pipeline = unittest::assertGet(Pipeline::create(
+        {DocumentSourceMock::create(),
+         DocumentSourceGraphLookUp::createFromBson(graphLookupSpec.firstElement(), expCtx)},
+        expCtx));
+
+    auto involvedNssSet = pipeline->getInvolvedCollections();
+    ASSERT_EQ(involvedNssSet.size(), 2UL);
+    ASSERT(involvedNssSet.find(outerResolvedNss) != involvedNssSet.end());
+    ASSERT(involvedNssSet.find(innerResolvedNss) != involvedNssSet.end());
+}
+
+TEST(InvolvedNamespacesTest, IncludesAllCollectionsWhenResolvingViews) {
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    const NamespaceString normalCollectionNss{"test", "collection"};
+    const NamespaceString lookupNss{"test", "foo"};
+    const NamespaceString resolvedNss{"test", "bar"};
+    const NamespaceString nssIncludedInResolvedView{"test", "extra_backer_of_bar"};
+    expCtx->setResolvedNamespace(
+        lookupNss,
+        {resolvedNss,
+         vector<BSONObj>{
+             fromjson("{$lookup: {from: 'extra_backer_of_bar', as: 'x', pipeline: []}}")}});
+    expCtx->setResolvedNamespace(nssIncludedInResolvedView,
+                                 {nssIncludedInResolvedView, vector<BSONObj>{}});
+    expCtx->setResolvedNamespace(normalCollectionNss, {normalCollectionNss, vector<BSONObj>{}});
+    auto facetSpec = fromjson(
+        "{$facet: {"
+        "  pipe_1: ["
+        "    {$lookup: {"
+        "      from: 'foo',"
+        "      as: 'x',"
+        "      localField: 'foo_id',"
+        "      foreignField: '_id'"
+        "    }}"
+        "  ],"
+        "  pipe_2: ["
+        "    {$lookup: {"
+        "       from: 'collection',"
+        "       as: 'z',"
+        "       pipeline: []"
+        "    }}"
+        "  ]"
+        "}}");
+    auto pipeline = unittest::assertGet(
+        Pipeline::create({DocumentSourceMock::create(),
+                          DocumentSourceFacet::createFromBson(facetSpec.firstElement(), expCtx)},
+                         expCtx));
+
+    auto involvedNssSet = pipeline->getInvolvedCollections();
+    ASSERT_EQ(involvedNssSet.size(), 3UL);
+    ASSERT(involvedNssSet.find(resolvedNss) != involvedNssSet.end());
+    ASSERT(involvedNssSet.find(nssIncludedInResolvedView) != involvedNssSet.end());
+    ASSERT(involvedNssSet.find(normalCollectionNss) != involvedNssSet.end());
 }
 
 }  // namespace

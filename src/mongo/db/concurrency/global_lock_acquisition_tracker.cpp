@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -37,11 +36,15 @@ namespace mongo {
 const OperationContext::Decoration<GlobalLockAcquisitionTracker> GlobalLockAcquisitionTracker::get =
     OperationContext::declareDecoration<GlobalLockAcquisitionTracker>();
 
-bool GlobalLockAcquisitionTracker::getGlobalExclusiveLockTaken() const {
-    return _globalExclusiveLockTaken;
+bool GlobalLockAcquisitionTracker::getGlobalWriteLocked() const {
+    return _globalLockMode & ((1 << MODE_IX) | (1 << MODE_X));
 }
 
-void GlobalLockAcquisitionTracker::setGlobalExclusiveLockTaken() {
-    _globalExclusiveLockTaken = true;
+bool GlobalLockAcquisitionTracker::getGlobalSharedLockTaken() const {
+    return _globalLockMode & (1 << MODE_S);
+}
+
+void GlobalLockAcquisitionTracker::setGlobalLockModeBit(LockMode mode) {
+    _globalLockMode |= (1 << mode);
 }
 }  // namespace mongo

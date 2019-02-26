@@ -97,10 +97,8 @@ env.Library(
         ],
     LIBDEPS= ['$BUILD_DIR/mongo/base',
               '$BUILD_DIR/mongo/db/service_context'],
-    LIBDEPS_DEPENDENTS=[
-        '$BUILD_DIR/mongo/mongodmain',
-    ],
     PROGDEPS_DEPENDENTS=[
+        '$BUILD_DIR/mongo/mongod',
         '$BUILD_DIR/mongo/mongos',
         ],
     )
@@ -114,8 +112,8 @@ env.Library(
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/service_context',
     ],
-    LIBDEPS_DEPENDENTS=[
-        '$BUILD_DIR/mongo/mongodmain',
+    PROGDEPS_DEPENDENTS=[
+        '$BUILD_DIR/mongo/mongod',
     ],
 )
 
@@ -164,12 +162,14 @@ env.Library(
 env.Library(
     target='record_store_test_harness',
     source=[
+        'record_store_test_capped_delete.cpp',
         'record_store_test_capped_visibility.cpp',
         'record_store_test_datafor.cpp',
         'record_store_test_datasize.cpp',
         'record_store_test_deleterecord.cpp',
         'record_store_test_harness.cpp',
         'record_store_test_insertrecord.cpp',
+        'record_store_test_oplog.cpp',
         'record_store_test_randomiter.cpp',
         'record_store_test_recorditer.cpp',
         'record_store_test_recordstore.cpp',
@@ -251,6 +251,7 @@ env.Library(
     LIBDEPS_PRIVATE=[
         "$BUILD_DIR/mongo/base",
         "$BUILD_DIR/mongo/db/storage/storage_options",
+        '$BUILD_DIR/mongo/util/fail_point',
     ],
 )
 
@@ -340,4 +341,16 @@ env.Benchmark(
         'key_string',
         '$BUILD_DIR/mongo/base',
     ],
+)
+
+env.Library(
+    target='remove_saver',
+    source=[
+        'remove_saver.cpp',
+    ],
+    LIBDEPS=[
+        'encryption_hooks',
+        'storage_options',
+        '$BUILD_DIR/mongo/base',
+    ]
 )

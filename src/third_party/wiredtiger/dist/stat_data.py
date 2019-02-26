@@ -52,6 +52,10 @@ class CacheWalkStat(Stat):
     def __init__(self, name, desc, flags=''):
         flags += ',cache_walk'
         Stat.__init__(self, name, CacheWalkStat.prefix, desc, flags)
+class CapacityStat(Stat):
+    prefix = 'capacity'
+    def __init__(self, name, desc, flags=''):
+        Stat.__init__(self, name, CapacityStat.prefix, desc, flags)
 class CompressStat(Stat):
     prefix = 'compression'
     def __init__(self, name, desc, flags=''):
@@ -84,6 +88,10 @@ class LSMStat(Stat):
     prefix = 'LSM'
     def __init__(self, name, desc, flags=''):
         Stat.__init__(self, name, LSMStat.prefix, desc, flags)
+class SessionStat(Stat):
+    prefix = 'session'
+    def __init__(self, name, desc, flags=''):
+        Stat.__init__(self, name, SessionStat.prefix, desc, flags)
 class PerfHistStat(Stat):
     prefix = 'perf'
     def __init__(self, name, desc, flags=''):
@@ -92,10 +100,10 @@ class RecStat(Stat):
     prefix = 'reconciliation'
     def __init__(self, name, desc, flags=''):
         Stat.__init__(self, name, RecStat.prefix, desc, flags)
-class SessionStat(Stat):
+class SessionOpStat(Stat):
     prefix = 'session'
     def __init__(self, name, desc, flags=''):
-        Stat.__init__(self, name, SessionStat.prefix, desc, flags)
+        Stat.__init__(self, name, SessionOpStat.prefix, desc, flags)
 class ThreadStat(Stat):
     prefix = 'thread-state'
     def __init__(self, name, desc, flags=''):
@@ -115,7 +123,7 @@ class YieldStat(Stat):
 # list of prefix tags that comprise that group.
 ##########################################
 groups = {}
-groups['cursor'] = [CursorStat.prefix, SessionStat.prefix]
+groups['cursor'] = [CursorStat.prefix, SessionOpStat.prefix]
 groups['evict'] = [
     BlockStat.prefix,
     CacheStat.prefix,
@@ -130,10 +138,11 @@ groups['memory'] = [
     ConnStat.prefix,
     RecStat.prefix]
 groups['system'] = [
+    CapacityStat.prefix,
     ConnStat.prefix,
     DhandleStat.prefix,
     PerfHistStat.prefix,
-    SessionStat.prefix,
+    SessionOpStat.prefix,
     ThreadStat.prefix
 ]
 
@@ -191,6 +200,7 @@ connection_stats = [
     # Cache and eviction statistics
     ##########################################
     CacheStat('cache_bytes_dirty', 'tracked dirty bytes in the cache', 'no_clear,no_scale,size'),
+    CacheStat('cache_bytes_dirty_total', 'bytes dirty in the cache cumulative', 'no_clear,no_scale,size'),
     CacheStat('cache_bytes_image', 'bytes belonging to page images in the cache', 'no_clear,no_scale,size'),
     CacheStat('cache_bytes_internal', 'tracked bytes belonging to internal pages in the cache', 'no_clear,no_scale,size'),
     CacheStat('cache_bytes_inuse', 'bytes currently in the cache', 'no_clear,no_scale,size'),
@@ -289,24 +299,50 @@ connection_stats = [
     CacheStat('cache_write_restore', 'pages written requiring in-memory restoration'),
 
     ##########################################
+    # Capacity statistics
+    ##########################################
+    CapacityStat('capacity_bytes_ckpt', 'bytes written for checkpoint'),
+    CapacityStat('capacity_bytes_evict', 'bytes written for eviction'),
+    CapacityStat('capacity_bytes_log', 'bytes written for log'),
+    CapacityStat('capacity_bytes_read', 'bytes read'),
+    CapacityStat('capacity_bytes_written', 'bytes written total'),
+    CapacityStat('capacity_threshold', 'threshold to call fsync'),
+    CapacityStat('capacity_time_ckpt', 'time waiting during checkpoint (usecs)'),
+    CapacityStat('capacity_time_evict', 'time waiting during eviction (usecs)'),
+    CapacityStat('capacity_time_log', 'time waiting during logging (usecs)'),
+    CapacityStat('capacity_time_read', 'time waiting during read (usecs)'),
+    CapacityStat('capacity_time_total', 'time waiting due to total capacity (usecs)'),
+    CapacityStat('fsync_all_fh', 'background fsync file handles synced'),
+    CapacityStat('fsync_all_fh_total', 'background fsync file handles considered'),
+    CapacityStat('fsync_all_time', 'background fsync time (msecs)', 'no_clear,no_scale'),
+
+    ##########################################
     # Cursor operations
     ##########################################
-    CursorStat('cursors_cached', 'cursors currently cached', 'no_clear,no_scale'),
+    CursorStat('cursor_open_count', 'open cursor count', 'no_clear,no_scale'),
+    CursorStat('cursor_cached_count', 'cached cursor count', 'no_clear,no_scale'),
     CursorStat('cursor_cache', 'cursor close calls that result in cache'),
     CursorStat('cursor_create', 'cursor create calls'),
     CursorStat('cursor_insert', 'cursor insert calls'),
+    CursorStat('cursor_insert_bulk', 'cursor bulk loaded cursor insert calls'),
+    CursorStat('cursor_insert_bytes', 'cursor insert key and value bytes', 'size'),
     CursorStat('cursor_modify', 'cursor modify calls'),
+    CursorStat('cursor_modify_bytes', 'cursor modify key and value bytes affected', 'size'),
+    CursorStat('cursor_modify_bytes_touch', 'cursor modify value bytes modified', 'size'),
     CursorStat('cursor_next', 'cursor next calls'),
     CursorStat('cursor_prev', 'cursor prev calls'),
     CursorStat('cursor_remove', 'cursor remove calls'),
+    CursorStat('cursor_remove_bytes', 'cursor remove key bytes removed', 'size'),
     CursorStat('cursor_reopen', 'cursors reused from cache'),
     CursorStat('cursor_reserve', 'cursor reserve calls'),
     CursorStat('cursor_reset', 'cursor reset calls'),
     CursorStat('cursor_restart', 'cursor operation restarted'),
     CursorStat('cursor_search', 'cursor search calls'),
     CursorStat('cursor_search_near', 'cursor search near calls'),
-    CursorStat('cursor_truncate', 'truncate calls'),
+    CursorStat('cursor_truncate', 'cursor truncate calls'),
     CursorStat('cursor_update', 'cursor update calls'),
+    CursorStat('cursor_update_bytes', 'cursor update key and value bytes', 'size'),
+    CursorStat('cursor_update_bytes_changed', 'cursor update value size change', 'size'),
 
     ##########################################
     # Cursor sweep
@@ -320,6 +356,7 @@ connection_stats = [
     # Dhandle statistics
     ##########################################
     DhandleStat('dh_conn_handle_count', 'connection data handles currently active', 'no_clear,no_scale'),
+    DhandleStat('dh_conn_handle_size', 'connection data handle size', 'no_clear,no_scale,size'),
     DhandleStat('dh_session_handles', 'session dhandles swept'),
     DhandleStat('dh_session_sweeps', 'session sweep attempts'),
     DhandleStat('dh_sweep_close', 'connection sweep dhandles closed'),
@@ -464,28 +501,27 @@ connection_stats = [
     ##########################################
     # Session operations
     ##########################################
-    SessionStat('session_cursor_open', 'open cursor count', 'no_clear,no_scale'),
-    SessionStat('session_open', 'open session count', 'no_clear,no_scale'),
-    SessionStat('session_query_ts', 'session query timestamp calls'),
-    SessionStat('session_table_alter_fail', 'table alter failed calls', 'no_clear,no_scale'),
-    SessionStat('session_table_alter_skip', 'table alter unchanged and skipped', 'no_clear,no_scale'),
-    SessionStat('session_table_alter_success', 'table alter successful calls', 'no_clear,no_scale'),
-    SessionStat('session_table_compact_fail', 'table compact failed calls', 'no_clear,no_scale'),
-    SessionStat('session_table_compact_success', 'table compact successful calls', 'no_clear,no_scale'),
-    SessionStat('session_table_create_fail', 'table create failed calls', 'no_clear,no_scale'),
-    SessionStat('session_table_create_success', 'table create successful calls', 'no_clear,no_scale'),
-    SessionStat('session_table_drop_fail', 'table drop failed calls', 'no_clear,no_scale'),
-    SessionStat('session_table_drop_success', 'table drop successful calls', 'no_clear,no_scale'),
-    SessionStat('session_table_rebalance_fail', 'table rebalance failed calls', 'no_clear,no_scale'),
-    SessionStat('session_table_rebalance_success', 'table rebalance successful calls', 'no_clear,no_scale'),
-    SessionStat('session_table_rename_fail', 'table rename failed calls', 'no_clear,no_scale'),
-    SessionStat('session_table_rename_success', 'table rename successful calls', 'no_clear,no_scale'),
-    SessionStat('session_table_salvage_fail', 'table salvage failed calls', 'no_clear,no_scale'),
-    SessionStat('session_table_salvage_success', 'table salvage successful calls', 'no_clear,no_scale'),
-    SessionStat('session_table_truncate_fail', 'table truncate failed calls', 'no_clear,no_scale'),
-    SessionStat('session_table_truncate_success', 'table truncate successful calls', 'no_clear,no_scale'),
-    SessionStat('session_table_verify_fail', 'table verify failed calls', 'no_clear,no_scale'),
-    SessionStat('session_table_verify_success', 'table verify successful calls', 'no_clear,no_scale'),
+    SessionOpStat('session_open', 'open session count', 'no_clear,no_scale'),
+    SessionOpStat('session_query_ts', 'session query timestamp calls'),
+    SessionOpStat('session_table_alter_fail', 'table alter failed calls', 'no_clear,no_scale'),
+    SessionOpStat('session_table_alter_skip', 'table alter unchanged and skipped', 'no_clear,no_scale'),
+    SessionOpStat('session_table_alter_success', 'table alter successful calls', 'no_clear,no_scale'),
+    SessionOpStat('session_table_compact_fail', 'table compact failed calls', 'no_clear,no_scale'),
+    SessionOpStat('session_table_compact_success', 'table compact successful calls', 'no_clear,no_scale'),
+    SessionOpStat('session_table_create_fail', 'table create failed calls', 'no_clear,no_scale'),
+    SessionOpStat('session_table_create_success', 'table create successful calls', 'no_clear,no_scale'),
+    SessionOpStat('session_table_drop_fail', 'table drop failed calls', 'no_clear,no_scale'),
+    SessionOpStat('session_table_drop_success', 'table drop successful calls', 'no_clear,no_scale'),
+    SessionOpStat('session_table_rebalance_fail', 'table rebalance failed calls', 'no_clear,no_scale'),
+    SessionOpStat('session_table_rebalance_success', 'table rebalance successful calls', 'no_clear,no_scale'),
+    SessionOpStat('session_table_rename_fail', 'table rename failed calls', 'no_clear,no_scale'),
+    SessionOpStat('session_table_rename_success', 'table rename successful calls', 'no_clear,no_scale'),
+    SessionOpStat('session_table_salvage_fail', 'table salvage failed calls', 'no_clear,no_scale'),
+    SessionOpStat('session_table_salvage_success', 'table salvage successful calls', 'no_clear,no_scale'),
+    SessionOpStat('session_table_truncate_fail', 'table truncate failed calls', 'no_clear,no_scale'),
+    SessionOpStat('session_table_truncate_success', 'table truncate successful calls', 'no_clear,no_scale'),
+    SessionOpStat('session_table_verify_fail', 'table verify failed calls', 'no_clear,no_scale'),
+    SessionOpStat('session_table_verify_success', 'table verify successful calls', 'no_clear,no_scale'),
 
     ##########################################
     # Thread Count statistics
@@ -611,6 +647,7 @@ dsrc_stats = [
     BtreeStat('btree_maxleafpage', 'maximum leaf page size', 'max_aggregate,no_scale,size'),
     BtreeStat('btree_maxleafvalue', 'maximum leaf page value size', 'max_aggregate,no_scale,size'),
     BtreeStat('btree_overflow', 'overflow pages', 'no_scale,tree_walk'),
+    BtreeStat('btree_row_empty_values', 'row-store empty values', 'no_scale,tree_walk'),
     BtreeStat('btree_row_internal', 'row-store internal pages', 'no_scale,tree_walk'),
     BtreeStat('btree_row_leaf', 'row-store leaf pages', 'no_scale,tree_walk'),
 
@@ -618,6 +655,7 @@ dsrc_stats = [
     # Cache and eviction statistics
     ##########################################
     CacheStat('cache_bytes_dirty', 'tracked dirty bytes in the cache', 'no_clear,no_scale,size'),
+    CacheStat('cache_bytes_dirty_total', 'bytes dirty in the cache cumulative', 'no_clear,no_scale,size'),
     CacheStat('cache_bytes_inuse', 'bytes currently in the cache', 'no_clear,no_scale,size'),
     CacheStat('cache_bytes_read', 'bytes read into cache', 'size'),
     CacheStat('cache_bytes_write', 'bytes written from cache', 'size'),
@@ -684,9 +722,6 @@ dsrc_stats = [
     ##########################################
     # Compression statistics
     ##########################################
-    CompressStat('compress_raw_fail', 'raw compression call failed, no additional data available'),
-    CompressStat('compress_raw_fail_temporary', 'raw compression call failed, additional data available'),
-    CompressStat('compress_raw_ok', 'raw compression call succeeded'),
     CompressStat('compress_read', 'compressed pages read'),
     CompressStat('compress_write', 'compressed pages written'),
     CompressStat('compress_write_fail', 'page written failed to compress'),
@@ -695,25 +730,29 @@ dsrc_stats = [
     ##########################################
     # Cursor operations
     ##########################################
+    CursorStat('cursor_open_count', 'open cursor count', 'no_clear,no_scale'),
     CursorStat('cursor_cache', 'close calls that result in cache'),
     CursorStat('cursor_create', 'create calls'),
     CursorStat('cursor_insert', 'insert calls'),
-    CursorStat('cursor_insert_bulk', 'bulk-loaded cursor-insert calls'),
-    CursorStat('cursor_insert_bytes', 'cursor-insert key and value bytes inserted', 'size'),
-    CursorStat('cursor_modify', 'modify calls'),
+    CursorStat('cursor_insert_bulk', 'bulk loaded cursor insert calls'),
+    CursorStat('cursor_insert_bytes', 'insert key and value bytes', 'size'),
+    CursorStat('cursor_modify', 'modify'),
+    CursorStat('cursor_modify_bytes', 'modify key and value bytes affected', 'size'),
+    CursorStat('cursor_modify_bytes_touch', 'modify value bytes modified', 'size'),
     CursorStat('cursor_next', 'next calls'),
     CursorStat('cursor_prev', 'prev calls'),
     CursorStat('cursor_remove', 'remove calls'),
-    CursorStat('cursor_remove_bytes', 'cursor-remove key bytes removed', 'size'),
-    CursorStat('cursor_reopen', 'cursors reused from cache'),
+    CursorStat('cursor_remove_bytes', 'remove key bytes removed', 'size'),
+    CursorStat('cursor_reopen', 'cache cursors reuse count'),
     CursorStat('cursor_reserve', 'reserve calls'),
     CursorStat('cursor_reset', 'reset calls'),
-    CursorStat('cursor_restart', 'cursor operation restarted'),
+    CursorStat('cursor_restart', 'operation restarted'),
     CursorStat('cursor_search', 'search calls'),
     CursorStat('cursor_search_near', 'search near calls'),
     CursorStat('cursor_truncate', 'truncate calls'),
     CursorStat('cursor_update', 'update calls'),
-    CursorStat('cursor_update_bytes', 'cursor-update value bytes updated', 'size'),
+    CursorStat('cursor_update_bytes', 'update key and value bytes', 'size'),
+    CursorStat('cursor_update_bytes_changed', 'update value size change', 'size'),
 
     ##########################################
     # LSM statistics
@@ -752,9 +791,7 @@ dsrc_stats = [
     ##########################################
     # Session operations
     ##########################################
-    SessionStat('session_compact', 'object compaction'),
-    SessionStat('session_cursors_cached', 'cached cursor count', 'no_clear,no_scale'),
-    SessionStat('session_cursor_open', 'open cursor count', 'no_clear,no_scale'),
+    SessionOpStat('session_compact', 'object compaction'),
 
     ##########################################
     # Transaction statistics
@@ -776,3 +813,18 @@ join_stats = [
 ]
 
 join_stats = sorted(join_stats, key=attrgetter('desc'))
+
+##########################################
+# Session statistics
+##########################################
+session_stats = [
+    SessionStat('bytes_read', 'bytes read into cache'),
+    SessionStat('bytes_write', 'bytes written from cache'),
+    SessionStat('cache_time', 'time waiting for cache (usecs)'),
+    SessionStat('lock_dhandle_wait', 'dhandle lock wait time (usecs)'),
+    SessionStat('lock_schema_wait', 'schema lock wait time (usecs)'),
+    SessionStat('read_time', 'page read from disk to cache time (usecs)'),
+    SessionStat('write_time', 'page write from cache to disk time (usecs)'),
+]
+
+session_stats = sorted(session_stats, key=attrgetter('desc'))

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -195,7 +194,7 @@ Status buildDupKeyErrorStatus(const BSONObj& key,
     }
 
     sb << builder.obj();
-    return Status(DuplicateKeyErrorInfo(keyPattern), sb.str());
+    return Status(DuplicateKeyErrorInfo(keyPattern, key), sb.str());
 }
 
 }  // namespace mongo

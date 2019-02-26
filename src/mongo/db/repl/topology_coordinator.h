@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -44,6 +43,7 @@
 #include "mongo/util/time_support.h"
 
 namespace mongo {
+class CommitQuorumOptions;
 class Timestamp;
 
 namespace repl {
@@ -307,8 +307,9 @@ public:
     StatusWith<BSONObj> prepareReplSetUpdatePositionCommand(
         OpTime currentCommittedSnapshotOpTime) const;
 
-    // produce a reply to an ismaster request.  It is only valid to call this if we are a
-    // replset.
+    // Produce a reply to an ismaster request.  It is only valid to call this if we are a
+    // replset.  Drivers interpret the isMaster fields according to the Server Discovery and
+    // Monitoring Spec, see the "Parsing an isMaster response" section.
     void fillIsMasterForReplSet(IsMasterResponse* response);
 
     // Produce member data for the serverStatus command and diagnostic logging.
@@ -594,12 +595,6 @@ public:
     rpc::OplogQueryMetadata prepareOplogQueryMetadata(int rbid) const;
 
     /**
-     * Writes into 'output' all the information needed to generate a summary of the current
-     * replication state for use by the web interface.
-     */
-    void summarizeAsHtml(ReplSetHtmlSummary* output);
-
-    /**
      * Prepares a ReplSetRequestVotesResponse.
      */
     void processReplSetRequestVotes(const ReplSetRequestVotesArgs& args,
@@ -663,6 +658,23 @@ public:
      * we last restarted, then its value will be boost::none.
      */
     std::map<int, boost::optional<OpTime>> latestKnownOpTimeSinceHeartbeatRestartPerMember() const;
+
+    /**
+     * Checks if the 'commitQuorum' can be satisifed by 'members'. Returns true if it can be
+     * satisfied.
+     *
+     * 'members' must be part of the replica set configuration.
+     */
+    bool checkIfCommitQuorumCanBeSatisfied(const CommitQuorumOptions& commitQuorum,
+                                           const std::vector<MemberConfig>& members) const;
+
+    /**
+     * Returns 'true' if the 'commitQuorum' is satisifed by the 'commitReadyMembers'.
+     *
+     * 'commitReadyMembers' must be part of the replica set configuration.
+     */
+    bool checkIfCommitQuorumIsSatisfied(const CommitQuorumOptions& commitQuorum,
+                                        const std::vector<HostAndPort>& commitReadyMembers) const;
 
     ////////////////////////////////////////////////////////////
     //

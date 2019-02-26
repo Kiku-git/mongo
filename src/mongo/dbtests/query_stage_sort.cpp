@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -395,7 +394,6 @@ public:
             PlanStage::StageState status = ss->work(&id);
             if (PlanStage::ADVANCED != status) {
                 ASSERT_NE(status, PlanStage::FAILURE);
-                ASSERT_NE(status, PlanStage::DEAD);
                 continue;
             }
             WorkingSetMember* member = exec->getWorkingSet()->get(id);
@@ -489,7 +487,6 @@ public:
             PlanStage::StageState status = ss->work(&id);
             if (PlanStage::ADVANCED != status) {
                 ASSERT_NE(status, PlanStage::FAILURE);
-                ASSERT_NE(status, PlanStage::DEAD);
                 continue;
             }
             WorkingSetMember* member = exec->getWorkingSet()->get(id);

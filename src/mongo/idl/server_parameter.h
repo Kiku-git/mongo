@@ -38,77 +38,22 @@
 #include <functional>
 #include <string>
 
+#include "mongo/base/init.h"
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/server_parameters.h"
 
+#define MONGO_SERVER_PARAMETER_REGISTER(name) \
+    MONGO_INITIALIZER_GENERAL(                \
+        name, ("BeginServerParameterRegistration"), ("EndServerParameterRegistration"))
+
 namespace mongo {
-
-/**
- * Specialization of ServerParameter used by IDL generator.
- */
-class IDLServerParameter : public ServerParameter {
-public:
-    IDLServerParameter(StringData name, ServerParameterType paramType);
-
-    /**
-     * Define a callback for populating a BSONObj with the current setting.
-     */
-    using appendBSON_t = void(OperationContext*, BSONObjBuilder*, StringData);
-    void setAppendBSON(std::function<appendBSON_t> appendBSON) {
-        _appendBSON = std::move(appendBSON);
-    }
-
-    /**
-     * Encode the setting into BSON object.
-     *
-     * Typically invoked by {getParameter:...} to produce a dictionary
-     * of SCP settings.
-     */
-    void append(OperationContext* opCtx, BSONObjBuilder& b, const std::string& name) final;
-
-    /**
-     * Define a callback for setting the value from a BSONElement.
-     */
-    using fromBSON_t = Status(const BSONElement&);
-    void setFromBSON(std::function<fromBSON_t> fromBSON) {
-        _fromBSON = std::move(fromBSON);
-    }
-
-    /**
-     * Update the underlying value using a BSONElement.
-     *
-     * Allows setting non-basic values (e.g. vector<string>)
-     * via the {setParameter: ...} call.
-     */
-    Status set(const BSONElement& newValueElement) final;
-
-    /**
-     * Define a callback for setting the value from a string.
-     */
-    using fromString_t = Status(StringData);
-    void setFromString(std::function<fromString_t> fromString) {
-        _fromString = std::move(fromString);
-    }
-
-    /**
-     * Update the underlying value from a string.
-     *
-     * Typically invoked from commandline --setParameter usage.
-     */
-    Status setFromString(const std::string& str) final;
-
-protected:
-    std::function<appendBSON_t> _appendBSON;
-    std::function<fromBSON_t> _fromBSON;
-    std::function<fromString_t> _fromString;
-};
 
 /**
  * Proxy instance for deprecated aliases of set parameters.
  */
-class IDLServerParameterDeprecatedAlias : ServerParameter {
+class IDLServerParameterDeprecatedAlias : public ServerParameter {
 public:
     IDLServerParameterDeprecatedAlias(StringData name, ServerParameter* sp);
 

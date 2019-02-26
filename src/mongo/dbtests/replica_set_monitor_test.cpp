@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -33,6 +32,7 @@
 #include <set>
 #include <vector>
 
+#include "mongo/base/init.h"
 #include "mongo/client/connpool.h"
 #include "mongo/client/dbclient_rs.h"
 #include "mongo/client/replica_set_monitor.h"
@@ -50,6 +50,11 @@ using std::set;
 using std::string;
 using std::unique_ptr;
 using unittest::assertGet;
+
+MONGO_INITIALIZER(DisableReplicaSetMonitorRefreshRetries)(InitializerContext*) {
+    ReplicaSetMonitor::disableRefreshRetries_forTest();
+    return Status::OK();
+}
 
 // TODO: Port these existing tests here: replmonitor_bad_seed.js, repl_monitor_refresh.js
 
@@ -98,7 +103,7 @@ TEST_F(ReplicaSetMonitorTest, SeedWithPriOnlySecDown) {
     replSet->kill(replSet->getPrimary());
 
     // Trigger calls to Node::getConnWithRefresh
-    monitor->startOrContinueRefresh().refreshAll();
+    monitor->runScanForMockReplicaSet();
     monitor.reset();
 }
 
@@ -155,7 +160,7 @@ TEST(ReplicaSetMonitorTest, PrimaryRemovedFromSetStress) {
     for (size_t idxToRemove = 0; idxToRemove < NODE_COUNT; idxToRemove++) {
         replSet.setConfig(origConfig);
         // Make sure the monitor sees the change
-        replMonitor->startOrContinueRefresh().refreshAll();
+        replMonitor->runScanForMockReplicaSet();
 
         string hostToRemove;
         {
@@ -170,14 +175,14 @@ TEST(ReplicaSetMonitorTest, PrimaryRemovedFromSetStress) {
 
         replSet.setPrimary(hostToRemove);
         // Make sure the monitor sees the new primary
-        replMonitor->startOrContinueRefresh().refreshAll();
+        replMonitor->runScanForMockReplicaSet();
 
         repl::ReplSetConfig newConfig =
             _getConfigWithMemberRemoved(origConfig, HostAndPort(hostToRemove));
         replSet.setConfig(newConfig);
         replSet.setPrimary(newConfig.getMemberAt(0).getHostAndPort().toString());
         // Force refresh -> should not crash
-        replMonitor->startOrContinueRefresh().refreshAll();
+        replMonitor->runScanForMockReplicaSet();
     }
 
     replMonitor.reset();
@@ -253,7 +258,7 @@ private:
 
 // Tests the case where the connection to secondary went bad and the replica set
 // monitor needs to perform a refresh of it's local view then retry the node selection
-// again after the refresh.
+// again after the refresh as long as the timeout is > 0.
 TEST_F(TwoNodeWithTags, SecDownRetryNoTag) {
     MockReplicaSet* replSet = getReplSet();
 
@@ -265,14 +270,14 @@ TEST_F(TwoNodeWithTags, SecDownRetryNoTag) {
     replSet->kill(secHost);
 
     // Make sure monitor sees the dead secondary
-    monitor->startOrContinueRefresh().refreshAll();
+    monitor->runScanForMockReplicaSet();
 
     replSet->restore(secHost);
 
     HostAndPort node = monitor
                            ->getHostOrRefresh(ReadPreferenceSetting(
                                                   mongo::ReadPreference::SecondaryOnly, TagSet()),
-                                              Milliseconds(0))
+                                              Milliseconds(1))
                            .get();
 
     ASSERT_FALSE(monitor->isPrimary(node));
@@ -282,7 +287,7 @@ TEST_F(TwoNodeWithTags, SecDownRetryNoTag) {
 
 // Tests the case where the connection to secondary went bad and the replica set
 // monitor needs to perform a refresh of it's local view then retry the node selection
-// with tags again after the refresh.
+// with tags again after the refresh as long as the timeout is > 0.
 TEST_F(TwoNodeWithTags, SecDownRetryWithTag) {
     MockReplicaSet* replSet = getReplSet();
 
@@ -294,7 +299,7 @@ TEST_F(TwoNodeWithTags, SecDownRetryWithTag) {
     replSet->kill(secHost);
 
     // Make sure monitor sees the dead secondary
-    monitor->startOrContinueRefresh().refreshAll();
+    monitor->runScanForMockReplicaSet();
 
     replSet->restore(secHost);
 
@@ -303,11 +308,68 @@ TEST_F(TwoNodeWithTags, SecDownRetryWithTag) {
     HostAndPort node =
         monitor
             ->getHostOrRefresh(ReadPreferenceSetting(mongo::ReadPreference::SecondaryOnly, tags),
-                               Milliseconds(0))
+                               Milliseconds(1))
             .get();
 
     ASSERT_FALSE(monitor->isPrimary(node));
     ASSERT_EQUALS(secHost, node.toString());
+    monitor.reset();
+}
+
+// Tests the case where the connection to secondary went bad and the replica set
+// monitor needs to perform a refresh of it's local view, but the scan has an expired timeout.
+TEST_F(TwoNodeWithTags, SecDownRetryExpiredTimeout) {
+    MockReplicaSet* replSet = getReplSet();
+
+    set<HostAndPort> seedList;
+    seedList.insert(HostAndPort(replSet->getPrimary()));
+    auto monitor = ReplicaSetMonitor::createIfNeeded(replSet->getSetName(), seedList);
+
+    const string secHost(replSet->getSecondaries().front());
+    replSet->kill(secHost);
+
+    // Make sure monitor sees the dead secondary
+    monitor->runScanForMockReplicaSet();
+
+    replSet->restore(secHost);
+
+    // This will fail, immediately without doing any refreshing.
+    auto errorFut = monitor->getHostOrRefresh(
+        ReadPreferenceSetting(mongo::ReadPreference::SecondaryOnly, TagSet()), Milliseconds(0));
+    ASSERT(errorFut.isReady());
+    ASSERT_EQ(errorFut.getNoThrow().getStatus(), ErrorCodes::FailedToSatisfyReadPreference);
+
+    // Because it did not schedule an expedited scan, it will continue failing until someone waits.
+    errorFut = monitor->getHostOrRefresh(
+        ReadPreferenceSetting(mongo::ReadPreference::SecondaryOnly, TagSet()), Milliseconds(0));
+    ASSERT(errorFut.isReady());
+    ASSERT_EQ(errorFut.getNoThrow().getStatus(), ErrorCodes::FailedToSatisfyReadPreference);
+
+    // Negative timeouts are handled the same way
+    errorFut = monitor->getHostOrRefresh(
+        ReadPreferenceSetting(mongo::ReadPreference::SecondaryOnly, TagSet()), Milliseconds(-1234));
+    ASSERT(errorFut.isReady());
+    ASSERT_EQ(errorFut.getNoThrow().getStatus(), ErrorCodes::FailedToSatisfyReadPreference);
+
+    // This will trigger a rescan. It is the only call in this test with a non-zero timeout.
+    HostAndPort node = monitor
+                           ->getHostOrRefresh(ReadPreferenceSetting(
+                                                  mongo::ReadPreference::SecondaryOnly, TagSet()),
+                                              Milliseconds(1))
+                           .get();
+
+    ASSERT_FALSE(monitor->isPrimary(node));
+    ASSERT_EQUALS(secHost, node.toString());
+
+    // And this will now succeed.
+    node = monitor
+               ->getHostOrRefresh(
+                   ReadPreferenceSetting(mongo::ReadPreference::SecondaryOnly, TagSet()),
+                   Milliseconds(0))
+               .get();
+    ASSERT_FALSE(monitor->isPrimary(node));
+    ASSERT_EQUALS(secHost, node.toString());
+
     monitor.reset();
 }
 

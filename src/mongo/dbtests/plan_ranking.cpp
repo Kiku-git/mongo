@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -47,7 +46,7 @@
 #include "mongo/db/json.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/query/get_executor.h"
-#include "mongo/db/query/query_knobs.h"
+#include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_planner.h"
 #include "mongo/db/query/query_planner_test_lib.h"
 #include "mongo/db/query/stage_builder.h"
@@ -57,9 +56,9 @@
 namespace mongo {
 
 // How we access the external setParameter testing bool.
-extern AtomicBool internalQueryForceIntersectionPlans;
+extern AtomicWord<bool> internalQueryForceIntersectionPlans;
 
-extern AtomicBool internalQueryPlannerEnableHashIntersection;
+extern AtomicWord<bool> internalQueryPlannerEnableHashIntersection;
 
 }  // namespace mongo
 

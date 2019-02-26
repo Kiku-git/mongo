@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -114,7 +113,7 @@ public:
     void appendConnectionStats(ConnectionPoolStats* stats) const;
 
 private:
-    AtomicUInt32 _counter;
+    AtomicWord<unsigned> _counter;
 
     std::vector<std::unique_ptr<TaskExecutor>> _executors;
 

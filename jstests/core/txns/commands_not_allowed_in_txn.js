@@ -1,5 +1,5 @@
 // Test commands that are not allowed in multi-document transactions.
-// @tags: [uses_transactions]
+// @tags: [uses_transactions, uses_snapshot_read_concern]
 (function() {
     "use strict";
 
@@ -53,13 +53,17 @@
             autocommit: false
         })),
                                      ErrorCodes.OperationNotSupportedInTransaction);
-        assert.commandFailedWithCode(sessionDb.adminCommand({
-            commitTransaction: 1,
-            txnNumber: NumberLong(txnNumber),
-            stmtId: NumberInt(1),
-            autocommit: false
-        }),
-                                     ErrorCodes.NoSuchTransaction);
+
+        // Mongos has special handling for commitTransaction to support commit recovery.
+        if (!isMongos) {
+            assert.commandFailedWithCode(sessionDb.adminCommand({
+                commitTransaction: 1,
+                txnNumber: NumberLong(txnNumber),
+                stmtId: NumberInt(1),
+                autocommit: false
+            }),
+                                         ErrorCodes.NoSuchTransaction);
+        }
 
         // Check that the command fails inside a transaction, but does not abort the transaction.
         setup();
@@ -168,6 +172,32 @@
             stmtId: NumberInt(2),
             autocommit: false
         }));
+    }
+
+    //
+    // Test that a find command with the read-once cursor option is not allowed in a transaction.
+    //
+    assert.commandFailedWithCode(sessionDb.runCommand({
+        find: collName,
+        readOnce: true,
+        readConcern: {level: "snapshot"},
+        txnNumber: NumberLong(++txnNumber),
+        stmtId: NumberInt(0),
+        startTransaction: true,
+        autocommit: false
+    }),
+                                 ErrorCodes.OperationNotSupportedInTransaction);
+
+    // Mongos has special handling for commitTransaction to support commit recovery.
+    if (!isMongos) {
+        // The failed find should abort the transaction so a commit should fail.
+        assert.commandFailedWithCode(sessionDb.adminCommand({
+            commitTransaction: 1,
+            autocommit: false,
+            txnNumber: NumberLong(txnNumber),
+            stmtId: NumberInt(1),
+        }),
+                                     ErrorCodes.NoSuchTransaction);
     }
 
     session.endSession();

@@ -18,6 +18,7 @@ env.Library(
         'sharded_connection_info.cpp',
         'sharding_migration_critical_section.cpp',
         'sharding_state.cpp',
+        'transaction_coordinator_factory.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
@@ -65,6 +66,7 @@ env.Library(
         'sharding_statistics.cpp',
         'split_chunk.cpp',
         'split_vector.cpp',
+        env.Idlc('sharding_runtime_d_params.idl')[0],
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/catalog/multi_index_block',
@@ -76,6 +78,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/repl/oplog',
         '$BUILD_DIR/mongo/db/repl/repl_coordinator_interface',
         '$BUILD_DIR/mongo/db/rw_concern_d',
+        '$BUILD_DIR/mongo/db/storage/remove_saver',
         '$BUILD_DIR/mongo/s/client/shard_local',
         '$BUILD_DIR/mongo/s/sharding_initialization',
         'chunk_splitter',
@@ -83,6 +86,11 @@ env.Library(
         'sharding_api_d',
         'sharding_catalog_manager',
         'sharding_logging',
+        'transaction_coordinator',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/session_catalog',
+        '$BUILD_DIR/mongo/idl/server_parameter',
     ],
 )
 
@@ -107,6 +115,28 @@ env.Library(
     LIBDEPS_PRIVATE=[
         'sharding_runtime_d',
     ],
+)
+
+env.Library(
+    target='transaction_coordinator',
+    source=[
+        'transaction_coordinator_catalog.cpp',
+        'transaction_coordinator_driver.cpp',
+        'transaction_coordinator_factory_mongod.cpp',
+        'transaction_coordinator_futures_util.cpp',
+        'transaction_coordinator_service.cpp',
+        'transaction_coordinator.cpp',
+        env.Idlc('transaction_coordinator_document.idl')[0],
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/catalog_raii',
+        '$BUILD_DIR/mongo/db/commands/txn_cmd_request',
+        '$BUILD_DIR/mongo/db/dbdirectclient',
+        '$BUILD_DIR/mongo/db/rw_concern_d',
+        '$BUILD_DIR/mongo/executor/task_executor_pool',
+        '$BUILD_DIR/mongo/s/grid',
+        'sharding_api_d',
+    ]
 )
 
 env.Library(
@@ -271,7 +301,6 @@ env.Library(
         'config/configsvr_shard_collection_command.cpp',
         'config/configsvr_split_chunk_command.cpp',
         'config/configsvr_update_zone_key_range_command.cpp',
-        'txn_two_phase_commit_cmds.cpp',
         'flush_database_cache_updates_command.cpp',
         'flush_routing_table_cache_updates_command.cpp',
         'get_database_version_command.cpp',
@@ -287,6 +316,7 @@ env.Library(
         'shardsvr_shard_collection.cpp',
         'split_chunk_command.cpp',
         'split_vector_command.cpp',
+        'txn_two_phase_commit_cmds.cpp',
         'unset_sharding_command.cpp',
         'wait_for_ongoing_chunk_splits_command.cpp',
     ],
@@ -300,7 +330,6 @@ env.Library(
         '$BUILD_DIR/mongo/db/index_d',
         '$BUILD_DIR/mongo/db/repl/repl_coordinator_interface',
         '$BUILD_DIR/mongo/db/repl/replica_set_messages',
-        '$BUILD_DIR/mongo/db/transaction_coordinator',
         '$BUILD_DIR/mongo/s/commands/shared_cluster_commands',
         '$BUILD_DIR/mongo/s/sharding_router_api',
         '$BUILD_DIR/mongo/s/sharding_initialization',
@@ -374,6 +403,23 @@ env.CppUnitTest(
         '$BUILD_DIR/mongo/executor/network_test_env',
         '$BUILD_DIR/mongo/executor/thread_pool_task_executor_test_fixture',
         '$BUILD_DIR/mongo/s/shard_server_test_fixture',
+    ],
+)
+
+env.CppUnitTest(
+    target='transaction_coordinator_test',
+    source=[
+        'transaction_coordinator_catalog_test.cpp',
+        'transaction_coordinator_futures_util_test.cpp',
+        'transaction_coordinator_service_test.cpp',
+        'transaction_coordinator_test_fixture.cpp',
+        'transaction_coordinator_test.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/auth/authmocks',
+        '$BUILD_DIR/mongo/s/catalog/sharding_catalog_client_mock',
+        '$BUILD_DIR/mongo/s/shard_server_test_fixture',
+        'transaction_coordinator',
     ],
 )
 

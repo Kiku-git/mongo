@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -47,7 +46,7 @@ public:
     RouterStageMerge(OperationContext* opCtx,
                      executor::TaskExecutor* executor,
                      AsyncResultsMergerParams&& armParams)
-        : RouterExecStage(opCtx), _resultsMerger(opCtx, std::move(armParams), executor) {}
+        : RouterExecStage(opCtx), _resultsMerger(opCtx, std::move(armParams), executor, nullptr) {}
 
     StatusWith<ClusterQueryResult> next(ExecContext execCtx) final {
         return _resultsMerger.next(getOpCtx(), execCtx);

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -338,9 +337,9 @@ public:
             session->setTimeout(boost::none);
             ASSERT_OK(sourceMessage());
 
+            session.reset();
             notifyComplete();
             log() << "ending test";
-            session.reset();
         });
         worker.detach();
     }

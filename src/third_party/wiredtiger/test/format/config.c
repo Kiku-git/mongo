@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2018 MongoDB, Inc.
+ * Public Domain 2014-2019 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -392,11 +392,8 @@ config_compression(const char *conf_name)
 	 */
 	switch (mmrand(NULL, 1, 20)) {
 #ifdef HAVE_BUILTIN_EXTENSION_LZ4
-	case 1: case 2:				/* 10% lz4 */
+	case 1: case 2: case 3:			/* 15% lz4 */
 		cstr = "lz4";
-		break;
-	case 3:					/* 5% lz4-no-raw */
-		cstr = "lz4-noraw";
 		break;
 #endif
 #ifdef HAVE_BUILTIN_EXTENSION_SNAPPY
@@ -409,12 +406,9 @@ config_compression(const char *conf_name)
 	case 10: case 11: case 12: case 13:	/* 20% zlib */
 		cstr = "zlib";
 		break;
-	case 14:				/* 5% zlib-no-raw */
-		cstr = "zlib-noraw";
-		break;
 #endif
 #ifdef HAVE_BUILTIN_EXTENSION_ZSTD
-	case 15: case 16: case 17:		/* 15% zstd */
+	case 14: case 15: case 16: case 17:	/* 20% zstd */
 		cstr = "zstd";
 		break;
 #endif
@@ -784,6 +778,9 @@ config_pct(void)
 static void
 config_prepare(void)
 {
+	/* WT-4537: REMOVE when that merges */
+	config_single("prepare=off", 0);
+
 	/*
 	 * We cannot prepare a transaction if logging is configured, or if
 	 * timestamps are not configured.
@@ -1138,16 +1135,14 @@ config_map_compression(const char *s, u_int *vp)
 		*vp = COMPRESS_NONE;
 	else if (strcmp(s, "lz4") == 0)
 		*vp = COMPRESS_LZ4;
-	else if (strcmp(s, "lz4-noraw") == 0)
-		*vp = COMPRESS_LZ4_NO_RAW;
-	else if (strcmp(s, "lzo") == 0)
-		*vp = COMPRESS_LZO;
+	else if (strcmp(s, "lz4-noraw") == 0)	/* CONFIG compatibility */
+		*vp = COMPRESS_LZ4;
 	else if (strcmp(s, "snappy") == 0)
 		*vp = COMPRESS_SNAPPY;
 	else if (strcmp(s, "zlib") == 0)
 		*vp = COMPRESS_ZLIB;
-	else if (strcmp(s, "zlib-noraw") == 0)
-		*vp = COMPRESS_ZLIB_NO_RAW;
+	else if (strcmp(s, "zlib-noraw") == 0)	/* CONFIG compatibility */
+		*vp = COMPRESS_ZLIB;
 	else if (strcmp(s, "zstd") == 0)
 		*vp = COMPRESS_ZSTD;
 	else

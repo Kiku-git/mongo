@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -113,13 +112,6 @@ using SimpleBSONObjUnorderedSet =
     stdx::unordered_set<BSONObj, SimpleBSONObjComparator::Hasher, SimpleBSONObjComparator::EqualTo>;
 
 /**
- * An unordered_multiset of BSONObjs that performs equality checks using simple binary semantics.
- */
-using SimpleBSONObjUnorderedMultiset = stdx::unordered_multiset<BSONObj,
-                                                                SimpleBSONObjComparator::Hasher,
-                                                                SimpleBSONObjComparator::EqualTo>;
-
-/**
  * A map keyed on BSONObj that performs comparisons with simple binary semantics.
  */
 template <typename T>
@@ -138,13 +130,4 @@ template <typename T>
 using SimpleBSONObjUnorderedMap = stdx::
     unordered_map<BSONObj, T, SimpleBSONObjComparator::Hasher, SimpleBSONObjComparator::EqualTo>;
 
-/**
- * An unordered_multimap keyed on BSONObj that performs equality checks using simple binary
- * semantics.
- */
-template <typename T>
-using SimpleBSONObjUnorderedMultiMap = stdx::unordered_multimap<BSONObj,
-                                                                T,
-                                                                SimpleBSONObjComparator::Hasher,
-                                                                SimpleBSONObjComparator::EqualTo>;
 }  // namespace mongo

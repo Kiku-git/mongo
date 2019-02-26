@@ -17,7 +17,7 @@ selector:
   ##
   ## Limitations with the way the runner file injects transactions.
   ##
-  
+
   # These tests expects some statements to error, which will cause txns to abort entirely.
   - jstests/core/bulk_api_ordered.js
   - jstests/core/bulk_api_unordered.js
@@ -53,7 +53,7 @@ selector:
   - jstests/core/ref4.js
   - jstests/core/regex_limit.js
   - jstests/core/remove_undefined.js
-  - jstests/core/set7.js 
+  - jstests/core/set7.js
   - jstests/core/sortb.js
   - jstests/core/sortf.js
   - jstests/core/sortg.js
@@ -63,6 +63,7 @@ selector:
   - jstests/core/uniqueness.js
   - jstests/core/unset2.js
   - jstests/core/update_addToSet.js
+  - jstests/core/update_array_offset_positional.js
   - jstests/core/update_arrayFilters.js
   - jstests/core/update_find_and_modify_id.js
   - jstests/core/update_modifier_pop.js
@@ -77,6 +78,9 @@ selector:
   # of the transaction, which uses the size of the oplog entry and is 8 bytes larger on
   # Windows debug builds than other builds.
   - jstests/core/insert1.js
+
+  # Reads from system.views.
+  - jstests/core/views/views_drop.js
 
   ##
   ## Some aggregation stages don't support snapshot readconcern.
@@ -120,6 +124,7 @@ selector:
   - jstests/core/json_schema/additional_properties.js
   - jstests/core/json_schema/bsontype.js
   - jstests/core/json_schema/dependencies.js
+  - jstests/core/json_schema/encrypt.js
   - jstests/core/json_schema/items.js
   - jstests/core/json_schema/logical_keywords.js
   - jstests/core/json_schema/min_max_items.js
@@ -173,17 +178,6 @@ selector:
 
   # Collection drops done through applyOps are not converted to w:majority
   - jstests/core/views/invalid_system_views.js
-
-  # Operations run on the "out" collection of a MapReduce call, which is not always
-  # immediately available to a transaction as it is still being replicated. Transactions
-  # fail with "Unable to acquire lock" errors.
-  - jstests/core/function_string_representations.js
-  - jstests/core/mr_errorhandling.js
-  - jstests/core/mr_merge.js
-  - jstests/core/mr_merge2.js
-  - jstests/core/mr_replaceIntoDB.js
-  - jstests/core/mr_outreduce.js
-  - jstests/core/mr_outreduce2.js
 
   ##
   ## Misc. reasons.
@@ -283,10 +277,13 @@ executor:
       eval: >-
         var testingReplication = true;
         load('jstests/libs/override_methods/enable_sessions.js');
+        load('jstests/libs/override_methods/txn_passthrough_cmd_massage.js');
         load('jstests/libs/txns/txn_override.js');
       global_vars:
         TestData:
           sessionOptions:
+            # Tests in this suite only read from primaries and only one node is electable, so causal
+            # consistency is not required to read your own writes.
             causalConsistency: false
       readMode: commands
   hooks:
@@ -303,5 +300,4 @@ executor:
     mongod_options:
       set_parameters:
         enableTestCommands: 1
-        numInitialSyncAttempts: 1
     num_nodes: 2

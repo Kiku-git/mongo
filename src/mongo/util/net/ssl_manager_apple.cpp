@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -386,7 +385,12 @@ StatusWith<SSLX509Name> extractSubjectName(::CFDictionaryRef dict) {
         }
     }
 
-    return SSLX509Name(std::move(ret));
+    SSLX509Name subjectName = SSLX509Name(std::move(ret));
+    Status normalize = subjectName.normalizeStrings();
+    if (!normalize.isOK()) {
+        return normalize;
+    }
+    return subjectName;
 }
 
 StatusWith<mongo::Date_t> extractValidityDate(::CFDictionaryRef dict,
@@ -1153,8 +1157,9 @@ SSLManagerApple::SSLManagerApple(const SSLParams& params, bool isServer)
     if (isServer) {
         uassertStatusOK(initSSLContext(&_serverCtx, params, ConnectionDirection::kIncoming));
         if (_serverCtx.certs) {
-            _sslConfiguration.serverSubjectName = uassertStatusOK(certificateGetSubject(
-                _serverCtx.certs.get(), &_sslConfiguration.serverCertificateExpirationDate));
+            uassertStatusOK(
+                _sslConfiguration.setServerSubjectName(uassertStatusOK(certificateGetSubject(
+                    _serverCtx.certs.get(), &_sslConfiguration.serverCertificateExpirationDate))));
             static auto task =
                 CertificateExpirationMonitor(_sslConfiguration.serverCertificateExpirationDate);
         }
@@ -1441,6 +1446,11 @@ StatusWith<boost::optional<SSLPeerInfo>> SSLManagerApple::parseAndValidatePeerCe
     const auto peerSubjectName = std::move(swPeerSubjectName.getValue());
     LOG(2) << "Accepted TLS connection from peer: " << peerSubjectName;
 
+    // If this is a server and client and server certificate are the same, log a warning.
+    if (_sslConfiguration.serverSubjectName() == peerSubjectName) {
+        warning() << "Client connecting with server's own TLS certificate";
+    }
+
     if (remoteHost.empty()) {
         // If this is an SSL server context (on a mongod/mongos)
         // parse any client roles out of the client certificate.
@@ -1548,21 +1558,18 @@ int SSLManagerApple::SSL_shutdown(SSLConnectionInterface* conn) {
 // Global variable indicating if this is a server or a client instance
 bool isSSLServer = false;
 
-namespace {
-SimpleMutex sslManagerMtx;
-SSLManagerInterface* theSSLManager = nullptr;
-}  // namespace
+extern SSLManagerInterface* theSSLManager;
 
 std::unique_ptr<SSLManagerInterface> SSLManagerInterface::create(const SSLParams& params,
                                                                  bool isServer) {
     return stdx::make_unique<SSLManagerApple>(params, isServer);
 }
 
-MONGO_INITIALIZER(SSLManager)(InitializerContext*) {
+MONGO_INITIALIZER_WITH_PREREQUISITES(SSLManager, ("EndStartupOptionHandling"))
+(InitializerContext*) {
     kMongoDBRolesOID = ::CFStringCreateWithCString(
         nullptr, mongodbRolesOID.identifier.c_str(), ::kCFStringEncodingUTF8);
 
-    stdx::lock_guard<SimpleMutex> lck(sslManagerMtx);
     if (!isSSLServer || (sslGlobalParams.sslMode.load() != SSLParams::SSLMode_disabled)) {
         theSSLManager = new SSLManagerApple(sslGlobalParams, isSSLServer);
     }
@@ -1570,11 +1577,3 @@ MONGO_INITIALIZER(SSLManager)(InitializerContext*) {
 }
 
 }  // namespace mongo
-
-mongo::SSLManagerInterface* mongo::getSSLManager() {
-    stdx::lock_guard<SimpleMutex> lck(sslManagerMtx);
-    if (theSSLManager) {
-        return theSSLManager;
-    }
-    return nullptr;
-}

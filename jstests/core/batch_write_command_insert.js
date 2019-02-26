@@ -36,6 +36,16 @@ function resultNOK(result) {
     return !result.ok && typeof(result.code) == 'number' && typeof(result.errmsg) == 'string';
 }
 
+function countEventually(collection, n) {
+    assert.soon(
+        function() {
+            return collection.count() === n;
+        },
+        function() {
+            return "unacknowledged write timed out";
+        });
+}
+
 // EACH TEST BELOW SHOULD BE SELF-CONTAINED, FOR EASIER DEBUGGING
 
 //
@@ -58,21 +68,6 @@ result = coll.runCommand(request);
 assert(resultOK(result), tojson(result));
 assert.eq(1, result.n);
 assert.eq(coll.count(), 1);
-
-//
-// Single document insert, w:0 write concern specified, missing ordered
-coll.remove({});
-request = {
-    insert: coll.getName(),
-    documents: [{a: 1}],
-    writeConcern: {w: 0}
-};
-result = coll.runCommand(request);
-assert(resultOK(result), tojson(result));
-assert.eq(coll.count(), 1);
-
-var fields = ['ok'];
-assert.hasFields(result, fields, 'fields in result do not match: ' + tojson(fields));
 
 //
 // Single document insert, w:1 write concern specified, ordered:true

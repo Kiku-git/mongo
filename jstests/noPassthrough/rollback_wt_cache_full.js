@@ -21,11 +21,15 @@
         wiredTigerCacheSizeGB: 0.5,
     };
     const rst = new ReplSetTest({
-        nodes: [nodeOptions, nodeOptions, {arbiter: true}],
+        nodes: 3,
+        nodeOptions: nodeOptions,
         useBridge: true,
     });
-    const nodes = rst.startSet();
-    rst.initiate();
+
+    rst.startSet();
+    let config = rst.getReplSetConfig();
+    config.members[2].priority = 0;
+    rst.initiate(config);
 
     // Prior to 4.0, rollback imposed a 300 MB limit on the total size of documents to refetch from
     // the sync source. Therefore, we select values for numDocs and minDocSizeMB, while accounting
@@ -33,10 +37,17 @@
     // This test uses single updates, rather than the multiple updates in the other wt_cache_full.js
     // tests because the refetching logic in the pre-4.0 algorithm depends on which documents were
     // modified, not on the number of modifications to each document.
+    // This test has been observed to hang under some non-standard build platforms so we are
+    // giving ourselves a slightly larger allowance of 5 documents from the theoretical maximum
+    // of documents calculated from the rollback size limit.
+    // Using a numDocs value of (maxDocs - 5) is sufficiently large enough to reproduce the memory
+    // pressure issue in 3.6.5 but small enough for this test to perform uniformly across most of
+    // the platforms in our continuous integration system.
     const rollbackSizeLimitMB = 300;
     const minDocSizeMB = 10;
     const largeString = 'x'.repeat(minDocSizeMB * 1024 * 1024);
-    const numDocs = Math.floor(rollbackSizeLimitMB / minDocSizeMB) - 1;
+    // TODO(SERVER-39774): Increase numDocs to Math.floor(rollbackSizeLimitMB / minDocSizeMB).
+    const numDocs = 1;
 
     // Operations that will be present on both nodes, before the common point.
     const collName = 'test.t';

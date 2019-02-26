@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -40,10 +39,6 @@ namespace repl {
 
 static RamLog* _rsLog = RamLog::get("rs");
 logger::Tee* rsLog = _rsLog;
-
-void fillRsLog(std::stringstream* s) {
-    _rsLog->toHTML(*s);
-}
 
 }  // namespace repl
 }  // namespace mongo

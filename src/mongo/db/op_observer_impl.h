@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -46,6 +45,28 @@ public:
                        CollectionUUID uuid,
                        BSONObj indexDoc,
                        bool fromMigrate) final;
+
+    void onStartIndexBuild(OperationContext* opCtx,
+                           const NamespaceString& nss,
+                           CollectionUUID collUUID,
+                           const UUID& indexBuildUUID,
+                           const std::vector<BSONObj>& indexes,
+                           bool fromMigrate) final;
+
+    void onCommitIndexBuild(OperationContext* opCtx,
+                            const NamespaceString& nss,
+                            CollectionUUID collUUID,
+                            const UUID& indexBuildUUID,
+                            const std::vector<BSONObj>& indexes,
+                            bool fromMigrate) final;
+
+    void onAbortIndexBuild(OperationContext* opCtx,
+                           const NamespaceString& nss,
+                           CollectionUUID collUUID,
+                           const UUID& indexBuildUUID,
+                           const std::vector<BSONObj>& indexes,
+                           bool fromMigrate) final;
+
     void onInserts(OperationContext* opCtx,
                    const NamespaceString& nss,
                    OptionalCollectionUUID uuid,
@@ -83,6 +104,7 @@ public:
     repl::OpTime onDropCollection(OperationContext* opCtx,
                                   const NamespaceString& collectionName,
                                   OptionalCollectionUUID uuid,
+                                  std::uint64_t numRecords,
                                   CollectionDropType dropType) final;
     void onDropIndex(OperationContext* opCtx,
                      const NamespaceString& nss,
@@ -94,6 +116,7 @@ public:
                                      const NamespaceString& toCollection,
                                      OptionalCollectionUUID uuid,
                                      OptionalCollectionUUID dropTargetUUID,
+                                     std::uint64_t numRecords,
                                      bool stayTemp) final;
     void postRenameCollection(OperationContext* opCtx,
                               const NamespaceString& fromCollection,
@@ -106,6 +129,7 @@ public:
                             const NamespaceString& toCollection,
                             OptionalCollectionUUID uuid,
                             OptionalCollectionUUID dropTargetUUID,
+                            std::uint64_t numRecords,
                             bool stayTemp) final;
     void onApplyOps(OperationContext* opCtx,
                     const std::string& dbName,
@@ -113,10 +137,16 @@ public:
     void onEmptyCapped(OperationContext* opCtx,
                        const NamespaceString& collectionName,
                        OptionalCollectionUUID uuid);
-    void onTransactionCommit(OperationContext* opCtx,
-                             boost::optional<OplogSlot> commitOplogEntryOpTime,
-                             boost::optional<Timestamp> commitTimestamp) final;
-    void onTransactionPrepare(OperationContext* opCtx, const OplogSlot& prepareOpTime) final;
+    void onUnpreparedTransactionCommit(OperationContext* opCtx,
+                                       const std::vector<repl::ReplOperation>& statements) final;
+    void onPreparedTransactionCommit(
+        OperationContext* opCtx,
+        OplogSlot commitOplogEntryOpTime,
+        Timestamp commitTimestamp,
+        const std::vector<repl::ReplOperation>& statements) noexcept final;
+    void onTransactionPrepare(OperationContext* opCtx,
+                              const OplogSlot& prepareOpTime,
+                              std::vector<repl::ReplOperation>& statments) final;
     void onTransactionAbort(OperationContext* opCtx,
                             boost::optional<OplogSlot> abortOplogEntryOpTime) final;
     void onReplicationRollback(OperationContext* opCtx, const RollbackObserverInfo& rbInfo) final;
@@ -148,6 +178,10 @@ private:
                                       const repl::OpTime& opTime,
                                       const repl::OpTime& preImageOpTime,
                                       const bool inMultiDocumentTransaction) {}
+    virtual void shardObserveTransactionCommit(OperationContext* opCtx,
+                                               const std::vector<repl::ReplOperation>& stmts,
+                                               const repl::OpTime& opTime,
+                                               const bool fromPreparedTransactionCommit) {}
 };
 
 }  // namespace mongo

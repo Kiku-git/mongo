@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -41,6 +40,10 @@ namespace mongo {
 struct BackupCursorState {
     UUID backupId;
     boost::optional<Document> preamble;
+    std::vector<std::string> filenames;
+};
+
+struct BackupCursorExtendState {
     std::vector<std::string> filenames;
 };
 

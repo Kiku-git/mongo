@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -217,12 +216,3 @@ template StringBuilderImpl<SharedBufferAllocator>& operator<<(
     StringBuilderImpl<SharedBufferAllocator>&, const HostAndPort&);
 
 }  // namespace mongo
-
-MONGO_HASH_NAMESPACE_START
-size_t hash<mongo::HostAndPort>::operator()(const mongo::HostAndPort& host) const {
-    hash<int> intHasher;
-    size_t hash = intHasher(host.port());
-    boost::hash_combine(hash, host.host());
-    return hash;
-}
-MONGO_HASH_NAMESPACE_END

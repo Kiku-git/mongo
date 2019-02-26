@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -32,6 +31,10 @@
 
 #include "mongo/db/pipeline/mongo_process_common.h"
 #include "mongo/db/pipeline/pipeline.h"
+#include "mongo/s/async_requests_sender.h"
+#include "mongo/s/catalog_cache.h"
+#include "mongo/s/query/cluster_aggregation_planner.h"
+#include "mongo/s/query/owned_remote_cursor.h"
 
 namespace mongo {
 
@@ -41,6 +44,34 @@ namespace mongo {
  */
 class MongoSInterface final : public MongoProcessCommon {
 public:
+    static BSONObj createPassthroughCommandForShard(OperationContext* opCtx,
+                                                    const AggregationRequest& request,
+                                                    const boost::optional<ShardId>& shardId,
+                                                    Pipeline* pipeline,
+                                                    BSONObj collationObj);
+
+    /**
+     * Appends information to the command sent to the shards which should be appended both if this
+     * is a passthrough sent to a single shard and if this is a split pipeline.
+     */
+    static BSONObj genericTransformForShards(MutableDocument&& cmdForShards,
+                                             OperationContext* opCtx,
+                                             const boost::optional<ShardId>& shardId,
+                                             const AggregationRequest& request,
+                                             BSONObj collationObj);
+
+    static BSONObj createCommandForTargetedShards(
+        OperationContext* opCtx,
+        const AggregationRequest& request,
+        const LiteParsedPipeline& litePipe,
+        const cluster_aggregation_planner::SplitPipeline& splitPipeline,
+        const BSONObj collationObj,
+        const boost::optional<cluster_aggregation_planner::ShardedExchangePolicy> exchangeSpec,
+        bool needsMerge);
+
+    static StatusWith<CachedCollectionRoutingInfo> getExecutionNsRoutingInfo(
+        OperationContext* opCtx, const NamespaceString& execNss);
+
     MongoSInterface() = default;
 
     virtual ~MongoSInterface() = default;
@@ -52,7 +83,8 @@ public:
         const NamespaceString& nss,
         UUID collectionUUID,
         const Document& documentKey,
-        boost::optional<BSONObj> readConcern) final;
+        boost::optional<BSONObj> readConcern,
+        bool allowSpeculativeMajorityRead = false) final;
 
     std::vector<GenericCursor> getIdleCursors(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                               CurrentOpUserMode userMode) const final;
@@ -119,10 +151,8 @@ public:
         MONGO_UNREACHABLE;
     }
 
-    Status attachCursorSourceToPipeline(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                        Pipeline* pipeline) final {
-        MONGO_UNREACHABLE;
-    }
+    std::unique_ptr<Pipeline, PipelineDeleter> attachCursorSourceToPipeline(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx, Pipeline* pipeline) final;
 
     std::string getShardName(OperationContext* opCtx) const final {
         MONGO_UNREACHABLE;
@@ -133,12 +163,10 @@ public:
         MONGO_UNREACHABLE;
     }
 
-    StatusWith<std::unique_ptr<Pipeline, PipelineDeleter>> makePipeline(
+    std::unique_ptr<Pipeline, PipelineDeleter> makePipeline(
         const std::vector<BSONObj>& rawPipeline,
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
-        const MakePipelineOptions pipelineOptions) final {
-        MONGO_UNREACHABLE;
-    }
+        const MakePipelineOptions pipelineOptions) final;
 
     /**
      * The following methods only make sense for data-bearing nodes and should never be called on
@@ -148,7 +176,13 @@ public:
         MONGO_UNREACHABLE;
     }
 
-    void closeBackupCursor(OperationContext* opCtx, UUID backupId) final {
+    void closeBackupCursor(OperationContext* opCtx, const UUID& backupId) final {
+        MONGO_UNREACHABLE;
+    }
+
+    BackupCursorExtendState extendBackupCursor(OperationContext* opCtx,
+                                               const UUID& backupId,
+                                               const Timestamp& extendTo) final {
         MONGO_UNREACHABLE;
     }
 
@@ -166,6 +200,16 @@ public:
     bool uniqueKeyIsSupportedByIndex(const boost::intrusive_ptr<ExpressionContext>&,
                                      const NamespaceString&,
                                      const std::set<FieldPath>& uniqueKeyPaths) const final;
+
+    void checkRoutingInfoEpochOrThrow(const boost::intrusive_ptr<ExpressionContext>&,
+                                      const NamespaceString&,
+                                      ChunkVersion) const final {
+        MONGO_UNREACHABLE;
+    }
+
+    std::unique_ptr<ResourceYielder> getResourceYielder() const override {
+        return nullptr;
+    }
 
 protected:
     BSONObj _reportCurrentOpForClient(OperationContext* opCtx,

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -71,6 +70,10 @@ public:
                 FacetRequirement::kNotAllowed,
                 TransactionRequirement::kNotAllowed,
                 ChangeStreamRequirement::kChangeStreamStage};
+    }
+
+    boost::optional<MergingLogic> mergingLogic() final {
+        return boost::none;
     }
 
     GetNextResult getNext() final;

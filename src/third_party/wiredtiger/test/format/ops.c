@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2018 MongoDB, Inc.
+ * Public Domain 2014-2019 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -62,6 +62,21 @@ modify_repl_init(void)
 
 	for (i = 0; i < sizeof(modify_repl); ++i)
 		modify_repl[i] = "zyxwvutsrqponmlkjihgfedcba"[i % 26];
+}
+
+static void
+set_alarm(void)
+{
+#ifdef HAVE_TIMER_CREATE
+	struct itimerspec timer_val;
+	timer_t timer_id;
+
+	testutil_check(timer_create(CLOCK_REALTIME, NULL, &timer_id));
+	memset(&timer_val, 0, sizeof(timer_val));
+	timer_val.it_value.tv_sec = 60 * 2;
+	timer_val.it_value.tv_nsec = 0;
+	testutil_check(timer_settime(timer_id, 0, &timer_val, NULL));
+#endif
 }
 
 /*
@@ -239,13 +254,22 @@ wts_ops(int lastrun)
 			--fourths;
 		if (quit_fourths != -1 && --quit_fourths == 0) {
 			fprintf(stderr, "%s\n",
-			    "format run exceeded 15 minutes past the maximum "
-			    "time, aborting the process.");
+			    "format run more than 15 minutes past the maximum "
+			    "time");
+			fprintf(stderr, "%s\n",
+			    "format run dumping cache and transaction state, "
+			    "then aborting the process");
+
+			/*
+			 * If the library is deadlocked, we might just join the
+			 * mess, set a timer to limit our exposure.
+			 */
+			set_alarm();
 
 			(void)conn->debug_info(conn, "txn");
 			(void)conn->debug_info(conn, "cache");
 
-			abort();
+			__wt_abort(NULL);
 		}
 	}
 
@@ -274,6 +298,44 @@ wts_ops(int lastrun)
 	for (i = 0; i < g.c_threads; ++i)
 		free(tinfo_list[i]);
 	free(tinfo_list);
+}
+
+typedef enum { NEXT, PREV, SEARCH, SEARCH_NEAR } read_operation;
+
+/*
+ * read_op --
+ *	Perform a read operation, waiting out prepare conflicts.
+ */
+static inline int
+read_op(WT_CURSOR *cursor, read_operation op, int *exactp)
+{
+	WT_DECL_RET;
+
+	/*
+	 * Read operations wait out prepare-conflicts. (As part of the snapshot
+	 * isolation checks, we repeat reads that succeeded before, they should
+	 * be repeatable.)
+	 */
+	switch (op) {
+	case NEXT:
+		while ((ret = cursor->next(cursor)) == WT_PREPARE_CONFLICT)
+			__wt_yield();
+		break;
+	case PREV:
+		while ((ret = cursor->prev(cursor)) == WT_PREPARE_CONFLICT)
+			__wt_yield();
+		break;
+	case SEARCH:
+		while ((ret = cursor->search(cursor)) == WT_PREPARE_CONFLICT)
+			__wt_yield();
+		break;
+	case SEARCH_NEAR:
+		while ((ret =
+		    cursor->search_near(cursor, exactp)) == WT_PREPARE_CONFLICT)
+			__wt_yield();
+		break;
+	}
+	return (ret);
 }
 
 typedef enum { INSERT, MODIFY, READ, REMOVE, TRUNCATE, UPDATE } thread_op;
@@ -401,7 +463,7 @@ snap_check(WT_CURSOR *cursor,
 			}
 		}
 
-		switch (ret = cursor->search(cursor)) {
+		switch (ret = read_op(cursor, SEARCH, NULL)) {
 		case 0:
 			if (g.type == FIX) {
 				testutil_check(
@@ -634,12 +696,22 @@ prepare_transaction(TINFO *tinfo, WT_SESSION *session)
  */
 #define	OP_FAILED(notfound_ok) do {					\
 	positioned = false;						\
-	if (intxn && (ret == WT_CACHE_FULL ||				\
-	    ret == WT_PREPARE_CONFLICT || ret == WT_ROLLBACK))		\
+	if (intxn && (ret == WT_CACHE_FULL || ret == WT_ROLLBACK))	\
 		goto rollback;						\
 	testutil_assert((notfound_ok && ret == WT_NOTFOUND) ||		\
-	    ret == WT_CACHE_FULL ||					\
-	    ret == WT_PREPARE_CONFLICT || ret == WT_ROLLBACK);		\
+	    ret == WT_CACHE_FULL || ret == WT_ROLLBACK);		\
+} while (0)
+
+/*
+ * Rollback updates returning prepare-conflict, they're unlikely to succeed
+ * unless the prepare aborts. Reads wait out the error, so it's unexpected.
+ */
+#define	READ_OP_FAILED(notfound_ok)					\
+	OP_FAILED(notfound_ok)
+#define	WRITE_OP_FAILED(notfound_ok) do {				\
+	if (ret == WT_PREPARE_CONFLICT)					\
+		ret = WT_ROLLBACK;					\
+	OP_FAILED(notfound_ok);						\
 } while (0)
 
 /*
@@ -826,7 +898,7 @@ ops(void *arg)
 				positioned = true;
 				SNAP_TRACK(READ, tinfo);
 			} else
-				OP_FAILED(true);
+				READ_OP_FAILED(true);
 		}
 
 		/* Optionally reserve a row. */
@@ -845,7 +917,7 @@ ops(void *arg)
 
 				__wt_yield();	/* Let other threads proceed. */
 			} else
-				OP_FAILED(true);
+				WRITE_OP_FAILED(true);
 		}
 
 		/* Perform the operation. */
@@ -875,7 +947,7 @@ ops(void *arg)
 				++tinfo->insert;
 				SNAP_TRACK(INSERT, tinfo);
 			} else
-				OP_FAILED(false);
+				WRITE_OP_FAILED(false);
 			break;
 		case MODIFY:
 			/*
@@ -899,7 +971,7 @@ ops(void *arg)
 				positioned = true;
 				SNAP_TRACK(MODIFY, tinfo);
 			} else
-				OP_FAILED(true);
+				WRITE_OP_FAILED(true);
 			break;
 		case READ:
 			++tinfo->search;
@@ -908,7 +980,7 @@ ops(void *arg)
 				positioned = true;
 				SNAP_TRACK(READ, tinfo);
 			} else
-				OP_FAILED(true);
+				READ_OP_FAILED(true);
 			break;
 		case REMOVE:
 remove_instead_of_truncate:
@@ -929,7 +1001,7 @@ remove_instead_of_truncate:
 				 */
 				SNAP_TRACK(REMOVE, tinfo);
 			} else
-				OP_FAILED(true);
+				WRITE_OP_FAILED(true);
 			break;
 		case TRUNCATE:
 			/*
@@ -958,7 +1030,8 @@ remove_instead_of_truncate:
 			 * vice-versa).
 			 */
 			greater_than = mmrand(&tinfo->rnd, 0, 1) == 1;
-			range = mmrand(&tinfo->rnd, 1, (u_int)g.rows / 20);
+			range = g.rows < 20 ?
+			    1 : mmrand(&tinfo->rnd, 1, (u_int)g.rows / 20);
 			tinfo->last = tinfo->keyno;
 			if (greater_than) {
 				if (g.c_reverse) {
@@ -992,14 +1065,15 @@ remove_instead_of_truncate:
 				ret = col_truncate(tinfo, cursor);
 				break;
 			}
-			positioned = false;
 			(void)__wt_atomic_subv64(&g.truncate_cnt, 1);
 
+			/* Truncate never leaves the cursor positioned. */
+			positioned = false;
 			if (ret == 0) {
 				++tinfo->truncate;
 				SNAP_TRACK(TRUNCATE, tinfo);
 			} else
-				OP_FAILED(false);
+				WRITE_OP_FAILED(false);
 			break;
 		case UPDATE:
 update_instead_of_chosen_op:
@@ -1017,7 +1091,7 @@ update_instead_of_chosen_op:
 				positioned = true;
 				SNAP_TRACK(UPDATE, tinfo);
 			} else
-				OP_FAILED(false);
+				WRITE_OP_FAILED(false);
 			break;
 		}
 
@@ -1033,7 +1107,7 @@ update_instead_of_chosen_op:
 				if ((ret = nextprev(tinfo, cursor, next)) == 0)
 					continue;
 
-				OP_FAILED(true);
+				READ_OP_FAILED(true);
 				break;
 			}
 		}
@@ -1066,9 +1140,8 @@ update_instead_of_chosen_op:
 		 */
 		if (g.c_prepare && mmrand(&tinfo->rnd, 1, 10) == 1) {
 			ret = prepare_transaction(tinfo, session);
-			testutil_assert(ret == 0 || ret == WT_PREPARE_CONFLICT);
-			if (ret == WT_PREPARE_CONFLICT)
-				goto rollback;
+			if (ret != 0)
+				WRITE_OP_FAILED(false);
 
 			__wt_yield();		/* Let other threads proceed. */
 		}
@@ -1193,11 +1266,11 @@ read_row_worker(
 	}
 
 	if (sn) {
-		ret = cursor->search_near(cursor, &exact);
+		ret = read_op(cursor, SEARCH_NEAR, &exact);
 		if (ret == 0 && exact != 0)
 			ret = WT_NOTFOUND;
 	} else
-		ret = cursor->search(cursor);
+		ret = read_op(cursor, SEARCH, NULL);
 	switch (ret) {
 	case 0:
 		if (g.type == FIX) {
@@ -1288,7 +1361,7 @@ nextprev(TINFO *tinfo, WT_CURSOR *cursor, bool next)
 	keyno = 0;
 	which = next ? "WT_CURSOR.next" : "WT_CURSOR.prev";
 
-	switch (ret = (next ? cursor->next(cursor) : cursor->prev(cursor))) {
+	switch (ret = read_op(cursor, next ? NEXT : PREV, NULL)) {
 	case 0:
 		switch (g.type) {
 		case FIX:
@@ -2019,7 +2092,7 @@ row_remove(TINFO *tinfo, WT_CURSOR *cursor, bool positioned)
 	}
 
 	/* We use the cursor in overwrite mode, check for existence. */
-	if ((ret = cursor->search(cursor)) == 0)
+	if ((ret = read_op(cursor, SEARCH, NULL)) == 0)
 		ret = cursor->remove(cursor);
 
 	if (ret != 0 && ret != WT_NOTFOUND)
@@ -2053,7 +2126,7 @@ col_remove(TINFO *tinfo, WT_CURSOR *cursor, bool positioned)
 		cursor->set_key(cursor, tinfo->keyno);
 
 	/* We use the cursor in overwrite mode, check for existence. */
-	if ((ret = cursor->search(cursor)) == 0)
+	if ((ret = read_op(cursor, SEARCH, NULL)) == 0)
 		ret = cursor->remove(cursor);
 
 	if (ret != 0 && ret != WT_NOTFOUND)

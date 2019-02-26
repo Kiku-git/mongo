@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -68,13 +67,11 @@ public:
     Status startCommand(const TaskExecutor::CallbackHandle& cbHandle,
                         RemoteCommandRequest& request,
                         RemoteCommandCompletionFn&& onFinish,
-                        const transport::BatonHandle& baton) override;
+                        const BatonHandle& baton) override;
 
     void cancelCommand(const TaskExecutor::CallbackHandle& cbHandle,
-                       const transport::BatonHandle& baton) override;
-    Status setAlarm(Date_t when,
-                    unique_function<void()> action,
-                    const transport::BatonHandle& baton) override;
+                       const BatonHandle& baton) override;
+    Status setAlarm(Date_t when, unique_function<void()> action) override;
 
     bool onNetworkThread() override;
 
@@ -99,8 +96,7 @@ private:
             transport::ReactorHandle reactor;
 
             void operator()(ConnectionPool::ConnectionInterface* ptr) const {
-                reactor->schedule(transport::Reactor::kDispatch,
-                                  [ ret = returner, ptr ] { ret(ptr); });
+                reactor->dispatch([ ret = returner, ptr ] { ret(ptr); });
             }
         };
         using ConnHandle = std::unique_ptr<ConnectionPool::ConnectionInterface, Deleter>;
@@ -108,7 +104,7 @@ private:
         ConnHandle conn;
         std::unique_ptr<transport::ReactorTimer> timer;
 
-        AtomicBool done;
+        AtomicWord<bool> done;
         Promise<RemoteCommandResponse> promise;
     };
 
@@ -117,7 +113,7 @@ private:
     Future<RemoteCommandResponse> _onAcquireConn(std::shared_ptr<CommandState> state,
                                                  Future<RemoteCommandResponse> future,
                                                  CommandState::ConnHandle conn,
-                                                 const transport::BatonHandle& baton);
+                                                 const BatonHandle& baton);
 
     std::string _instanceName;
     ServiceContext* _svcCtx;
@@ -133,7 +129,7 @@ private:
     Counters _counters;
 
     std::unique_ptr<rpc::EgressMetadataHook> _metadataHook;
-    AtomicBool _inShutdown;
+    AtomicWord<bool> _inShutdown;
     stdx::thread _ioThread;
 
     stdx::mutex _inProgressMutex;

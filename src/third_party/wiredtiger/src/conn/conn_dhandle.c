@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2018 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -348,7 +348,7 @@ __wt_conn_dhandle_close(
 	 * so discard mapped files before closing, otherwise, close first.
 	 */
 	if (discard && is_mapped)
-		WT_TRET(__wt_cache_op(session, WT_SYNC_DISCARD));
+		WT_TRET(__wt_evict_file(session, WT_SYNC_DISCARD));
 
 	/* Close the underlying handle. */
 	switch (dhandle->type) {
@@ -382,7 +382,7 @@ __wt_conn_dhandle_close(
 	 * pages.
 	 */
 	if (discard && !is_mapped)
-		WT_TRET(__wt_cache_op(session, WT_SYNC_DISCARD));
+		WT_TRET(__wt_evict_file(session, WT_SYNC_DISCARD));
 
 	/*
 	 * If we marked a handle dead it will be closed by sweep, via another

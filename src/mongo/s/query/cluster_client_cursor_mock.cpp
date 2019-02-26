@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -71,7 +70,15 @@ BSONObj ClusterClientCursorMock::getOriginatingCommand() const {
     return _originatingCommand;
 }
 
+const PrivilegeVector& ClusterClientCursorMock::getOriginatingPrivileges() const& {
+    return _originatingPrivileges;
+}
+
 std::size_t ClusterClientCursorMock::getNumRemotes() const {
+    MONGO_UNREACHABLE;
+}
+
+BSONObj ClusterClientCursorMock::getPostBatchResumeToken() const {
     MONGO_UNREACHABLE;
 }
 

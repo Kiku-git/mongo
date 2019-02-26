@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -48,7 +47,6 @@
 #include "mongo/util/concurrency/mutex.h"
 #include "mongo/util/system_tick_source.h"
 #include "mongo/util/timer.h"
-#include <boost/date_time/filetime_functions.hpp>
 #include <mmsystem.h>
 #elif defined(__linux__)
 #include <time.h>
@@ -213,6 +211,29 @@ void _dateToCtimeString(Date_t date, DateStringBuffer* result) {
              static_cast<unsigned>(date.toMillisSinceEpoch() % 1000));
     result->size = ctimeSubstrLen + millisSubstrLen;
 }
+
+#if defined(_WIN32)
+
+uint64_t fileTimeToMicroseconds(FILETIME const ft) {
+    // Microseconds between 1601-01-01 00:00:00 UTC and 1970-01-01 00:00:00 UTC
+    constexpr uint64_t kEpochDifferenceMicros = 11644473600000000ull;
+
+    // Construct a 64 bit value that is the number of nanoseconds from the
+    // Windows epoch which is 1601-01-01 00:00:00 UTC
+    auto totalMicros = static_cast<uint64_t>(ft.dwHighDateTime) << 32;
+    totalMicros |= static_cast<uint64_t>(ft.dwLowDateTime);
+
+    // FILETIME is 100's of nanoseconds since Windows epoch
+    totalMicros /= 10;
+
+    // Move it from micros since the Windows epoch to micros since the Unix epoch
+    totalMicros -= kEpochDifferenceMicros;
+
+    return totalMicros;
+}
+
+#endif
+
 }  // namespace
 
 std::string dateToISOStringUTC(Date_t date) {
@@ -734,14 +755,15 @@ void sleepmicros(long long s) {
     stdx::this_thread::sleep_for(Microseconds(s).toSystemDuration());
 }
 
-void Backoff::nextSleepMillis() {
+Milliseconds Backoff::nextSleep() {
     // Get the current time
     unsigned long long currTimeMillis = curTimeMillis64();
 
     int lastSleepMillis = _lastSleepMillis;
 
-    if (_lastErrorTimeMillis == 0 || _lastErrorTimeMillis > currTimeMillis /* VM bugs exist */)
+    if (!_lastErrorTimeMillis || _lastErrorTimeMillis > currTimeMillis /* VM bugs exist */)
         _lastErrorTimeMillis = currTimeMillis;
+
     unsigned long long lastErrorTimeMillis = _lastErrorTimeMillis;
     _lastErrorTimeMillis = currTimeMillis;
 
@@ -749,27 +771,20 @@ void Backoff::nextSleepMillis() {
 
     // Store the last slept time
     _lastSleepMillis = lastSleepMillis;
-    sleepmillis(lastSleepMillis);
+    return Milliseconds(lastSleepMillis);
 }
 
-int Backoff::getNextSleepMillis(int lastSleepMillis,
+int Backoff::getNextSleepMillis(long long lastSleepMillis,
                                 unsigned long long currTimeMillis,
                                 unsigned long long lastErrorTimeMillis) const {
     // Backoff logic
 
     // Get the time since the last error
-    unsigned long long timeSinceLastErrorMillis = currTimeMillis - lastErrorTimeMillis;
+    const long long timeSinceLastErrorMillis = currTimeMillis - lastErrorTimeMillis;
 
-    // Makes the cast below safe
-    verify(_resetAfterMillis >= 0);
-
-    // If we haven't seen another error recently (3x the max wait time), reset our
-    // wait counter.
-    if (timeSinceLastErrorMillis > (unsigned)(_resetAfterMillis))
+    // If we haven't seen another error recently (3x the max wait time), reset our wait counter
+    if (timeSinceLastErrorMillis > _resetAfterMillis)
         lastSleepMillis = 0;
-
-    // Makes the test below sane
-    verify(_maxSleepMillis > 0);
 
     // Wait a power of two millis
     if (lastSleepMillis == 0)
@@ -867,7 +882,7 @@ unsigned long long curTimeMicros64() {
     if (GetSystemTimePreciseAsFileTimeFunc != NULL) {
         FILETIME time;
         GetSystemTimePreciseAsFileTimeFunc(&time);
-        return boost::date_time::winapi::file_time_to_microseconds(time);
+        return fileTimeToMicroseconds(time);
     }
 
     // Get a current value for QueryPerformanceCounter; if it is not time to resync we will
@@ -898,9 +913,13 @@ unsigned long long curTimeMicros64() {
         ((perfCounter - basePerfCounter) * 10 * 1000 * 1000) /
             SystemTickSource::get()->getTicksPerSecond();
 
+    FILETIME fileTimeComputed;
+    fileTimeComputed.dwHighDateTime = computedTime >> 32;
+    fileTimeComputed.dwLowDateTime = computedTime;
+
     // Convert the computed FILETIME into microseconds since the Unix epoch (1/1/1970).
     //
-    return boost::date_time::winapi::file_time_to_microseconds(computedTime);
+    return fileTimeToMicroseconds(fileTimeComputed);
 }
 
 #else

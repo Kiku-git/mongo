@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -61,6 +60,11 @@ MONGO_STARTUP_OPTIONS_STORE(FrameworkOptions)(InitializerContext* context) {
         std::cerr << "try '" << context->args()[0] << " --help' for more information" << std::endl;
         quickExit(EXIT_BADOPTIONS);
     }
+    return Status::OK();
+}
+
+MONGO_INITIALIZER_GENERAL(CoreOptions_Store, MONGO_NO_PREREQUISITES, MONGO_NO_DEPENDENTS)
+(InitializerContext* context) {
     return Status::OK();
 }
 }

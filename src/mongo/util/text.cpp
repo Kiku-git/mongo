@@ -1,6 +1,3 @@
-// text.cpp
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -121,14 +118,9 @@ inline int leadingOnes(unsigned char c) {
     return _leadingOnes[c & 0x7f];
 }
 
-bool isValidUTF8(const std::string& s) {
-    return isValidUTF8(s.c_str());
-}
-
-bool isValidUTF8(const char* s) {
+bool isValidUTF8(StringData s) {
     int left = 0;  // how many bytes are left in the current codepoint
-    while (*s) {
-        const unsigned char c = (unsigned char)*(s++);
+    for (unsigned char c : s) {
         const int ones = leadingOnes(c);
         if (left) {
             if (ones != 1)

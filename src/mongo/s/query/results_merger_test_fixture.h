@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -32,6 +31,7 @@
 
 #include "mongo/s/query/async_results_merger.h"
 #include "mongo/s/sharding_router_test_fixture.h"
+#include "mongo/util/clock_source_mock.h"
 
 namespace mongo {
 
@@ -153,6 +153,15 @@ protected:
     }
 
     /**
+     * Schedules a single cursor response to be returned by the mock network.
+     */
+    void scheduleNetworkResponse(CursorResponse&& response) {
+        std::vector<CursorResponse> responses;
+        responses.push_back(std::move(response));
+        scheduleNetworkResponses(std::move(responses));
+    }
+
+    /**
      * Schedules a list of raw BSON command responses to be returned by the mock network.
      */
     void scheduleNetworkResponseObjs(std::vector<BSONObj> objs) {
@@ -185,7 +194,7 @@ protected:
         return guard->hasReadyRequests();
     }
 
-    void scheduleErrorResponse(executor::ResponseStatus rs) {
+    void scheduleErrorResponse(executor::TaskExecutor::ResponseStatus rs) {
         invariant(!rs.isOK());
         rs.elapsedMillis = Milliseconds(0);
         executor::NetworkInterfaceMock* net = network();
@@ -231,6 +240,13 @@ protected:
         remoteCursor.setHostAndPort(std::move(host));
         remoteCursor.setCursorResponse(std::move(response));
         return remoteCursor;
+    }
+
+    ClockSourceMock* getMockClockSource() {
+        ClockSourceMock* mockClock = dynamic_cast<ClockSourceMock*>(
+            operationContext()->getServiceContext()->getPreciseClockSource());
+        invariant(mockClock);
+        return mockClock;
     }
 };
 

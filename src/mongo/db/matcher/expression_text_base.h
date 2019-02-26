@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -60,6 +59,10 @@ public:
      * Returns a reference to the parsed text query that this TextMatchExpressionBase owns.
      */
     virtual const fts::FTSQuery& getFTSQuery() const = 0;
+
+    BSONObj getSerializedRightHandSide() const final {
+        MONGO_UNREACHABLE;
+    }
 
     //
     // Methods inherited from MatchExpression.

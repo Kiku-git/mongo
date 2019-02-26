@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -42,6 +41,7 @@
 #include "mongo/executor/task_executor.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/stdx/functional.h"
+#include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/time_support.h"
 
@@ -93,8 +93,8 @@ public:
      * Known errors are:
      *  FailedToSatisfyReadPreference, if node cannot be found, which matches the read preference.
      */
-    Future<HostAndPort> getHostOrRefresh(const ReadPreferenceSetting& readPref,
-                                         Milliseconds maxWait = kDefaultFindHostTimeout);
+    SharedSemiFuture<HostAndPort> getHostOrRefresh(const ReadPreferenceSetting& readPref,
+                                                   Milliseconds maxWait = kDefaultFindHostTimeout);
 
     /**
      * Returns the host we think is the current master or uasserts.
@@ -104,13 +104,6 @@ public:
      * rather than returning an empty HostAndPort.
      */
     HostAndPort getMasterOrUassert();
-
-    /**
-     * Returns a refresher object that can be used to update our view of the set.
-     * If a refresh is currently in-progress, the returned Refresher will participate in the
-     * current refresh round.
-     */
-    Refresher startOrContinueRefresh();
 
     /**
      * Notifies this Monitor that a host has failed because of the specified error 'status' and
@@ -152,8 +145,15 @@ public:
     /**
      * Returns a std::string with the format name/server1,server2.
      * If name is empty, returns just comma-separated list of servers.
+     * It IS updated to reflect the current members of the set.
      */
     std::string getServerAddress() const;
+
+    /**
+     * Returns the URI that was used to construct this monitor.
+     * It IS NOT updated to reflect the current members of the set.
+     */
+    const MongoURI& getOriginalUri() const;
 
     /**
      * Is server part of this set? Uses only cached information.
@@ -274,34 +274,32 @@ public:
      */
     static bool useDeterministicHostSelection;
 
+    /**
+     * This is for use in tests using MockReplicaSet to ensure that a full scan completes before
+     * continuing.
+     */
+    void runScanForMockReplicaSet();
+
 private:
     /**
      * Schedules a refresh via the task executor. (Task is automatically canceled in the d-tor.)
      */
-    void _scheduleRefresh(Date_t when);
+    void _scheduleRefresh(Date_t when, WithLock);
 
     /**
      * This function refreshes the replica set and calls _scheduleRefresh() again.
      */
     void _doScheduledRefresh(const executor::TaskExecutor::CallbackHandle& currentHandle);
 
-    // Serializes refresh and protects _refresherHandle
-    stdx::mutex _mutex;
     executor::TaskExecutor::CallbackHandle _refresherHandle;
 
     const SetStatePtr _state;
-    executor::TaskExecutor* _executor;
-    AtomicBool _isRemovedFromManager{false};
+    AtomicWord<bool> _isRemovedFromManager{false};
 };
 
 
 /**
  * Refreshes the local view of a replica set.
- *
- * Use ReplicaSetMonitor::startOrContinueRefresh() to obtain a Refresher.
- *
- * Multiple threads can refresh a single set without any additional synchronization, however
- * they must each use their own Refresher object.
  *
  * All logic related to choosing the hosts to contact and updating the SetState based on replies
  * lives in this class.
@@ -309,31 +307,18 @@ private:
 class ReplicaSetMonitor::Refresher {
 public:
     /**
-     * Contact hosts in the set to refresh our view, but stop once a host matches criteria.
-     * Returns the matching host or empty if none match after a refresh.
-     *
-     * This is called by ReplicaSetMonitor::getHostWithRefresh()
+     * If no scan is in-progress, this function is responsible for setting up a new scan. Otherwise,
+     * does nothing.
      */
-    HostAndPort refreshUntilMatches(const ReadPreferenceSetting& criteria);
-
-    /**
-     * Refresh all hosts. Equivalent to refreshUntilMatches with a criteria that never
-     * matches.
-     *
-     * This is intended to be called periodically, possibly from a background thread.
-     */
-    void refreshAll();
+    static void ensureScanInProgress(const SetStatePtr&, WithLock);
 
     //
     // Remaining methods are only for testing and internal use.
-    // Callers are responsible for holding SetState::mutex before calling any of these methods.
+    // Callers are responsible for holding SetState::mutex before calling any of these methods, but
+    // not all of them take a WithLock because they predate its introduction, and because they are
+    // mostly called from single-threaded unit tests.
     //
 
-    /**
-     * Any passed-in pointers are shared with caller.
-     *
-     * If no scan is in-progress, this function is responsible for setting up a new scan.
-     */
     explicit Refresher(const SetStatePtr& setState);
 
     struct NextStep {
@@ -389,18 +374,19 @@ private:
     Status receivedIsMasterFromMaster(const HostAndPort& from, const IsMasterReply& reply);
 
     /**
+     * Schedules isMaster requests to all hosts that currently need to be contacted.
+     * Does nothing if requests have already been sent to all known hosts.
+     */
+    void scheduleNetworkRequests(WithLock);
+
+    void scheduleIsMaster(const HostAndPort& host, WithLock);
+
+    /**
      * Adjusts the _scan work queue based on information from this host.
      * This should only be called with replies from non-masters.
      * Does not update _set at all.
      */
     void receivedIsMasterBeforeFoundMaster(const IsMasterReply& reply);
-
-    /**
-     * Shared implementation of refreshUntilMatches and refreshAll.
-     * NULL criteria means refresh every host.
-     * Handles own locking.
-     */
-    HostAndPort _refreshUntilMatches(const ReadPreferenceSetting* criteria);
 
     // Both pointers are never NULL
     SetStatePtr _set;

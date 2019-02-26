@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -40,7 +39,7 @@
 #include "mongo/db/pipeline/dependencies.h"
 #include "mongo/db/pipeline/value.h"
 #include "mongo/db/query/explain_options.h"
-#include "mongo/db/query/query_knobs.h"
+#include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/s/query/async_results_merger_params_gen.h"
 #include "mongo/stdx/functional.h"
@@ -234,9 +233,10 @@ public:
 
     /**
      * Returns any other collections involved in the pipeline in addition to the collection the
-     * aggregation is run on.
+     * aggregation is run on. All namespaces returned are the names of collections, after views have
+     * been resolved.
      */
-    std::vector<NamespaceString> getInvolvedCollections() const;
+    stdx::unordered_set<NamespaceString> getInvolvedCollections() const;
 
     /**
      * Serializes the pipeline into a form that can be parsed into an equivalent pipeline.

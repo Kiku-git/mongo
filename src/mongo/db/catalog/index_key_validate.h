@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -61,6 +60,11 @@ StatusWith<BSONObj> validateIndexSpec(
     const BSONObj& indexSpec,
     const NamespaceString& expectedNamespace,
     const ServerGlobalParams::FeatureCompatibility& featureCompatibility);
+
+/**
+ * Returns a new index spec with any unknown field names removed from 'indexSpec'.
+ */
+BSONObj removeUnknownFields(const BSONObj& indexSpec);
 
 /**
  * Performs additional validation for _id index specifications. This should be called after

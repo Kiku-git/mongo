@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -54,6 +53,7 @@ constexpr StringData AggregationRequest::kCursorName;
 constexpr StringData AggregationRequest::kBatchSizeName;
 constexpr StringData AggregationRequest::kFromMongosName;
 constexpr StringData AggregationRequest::kNeedsMergeName;
+constexpr StringData AggregationRequest::kMergeByPBRTName;
 constexpr StringData AggregationRequest::kPipelineName;
 constexpr StringData AggregationRequest::kCollationName;
 constexpr StringData AggregationRequest::kExplainName;
@@ -63,9 +63,6 @@ constexpr StringData AggregationRequest::kCommentName;
 constexpr StringData AggregationRequest::kExchangeName;
 
 constexpr long long AggregationRequest::kDefaultBatchSize;
-
-AggregationRequest::AggregationRequest(NamespaceString nss, std::vector<BSONObj> pipeline)
-    : _nss(std::move(nss)), _pipeline(std::move(pipeline)), _batchSize(kDefaultBatchSize) {}
 
 StatusWith<std::vector<BSONObj>> AggregationRequest::parsePipelineFromBSON(
     BSONElement pipelineElem) {
@@ -204,6 +201,14 @@ StatusWith<AggregationRequest> AggregationRequest::parseFromBSON(
 
             hasNeedsMergeElem = true;
             request.setNeedsMerge(elem.Bool());
+        } else if (kMergeByPBRTName == fieldName) {
+            if (elem.type() != BSONType::Bool) {
+                return {ErrorCodes::TypeMismatch,
+                        str::stream() << kMergeByPBRTName << " must be a boolean, not a "
+                                      << typeName(elem.type())};
+            }
+
+            request.setMergeByPBRT(elem.Bool());
         } else if (kAllowDiskUseName == fieldName) {
             if (storageGlobalParams.readOnly) {
                 return {ErrorCodes::IllegalOperation,
@@ -313,6 +318,7 @@ Document AggregationRequest::serializeToCommandObj() const {
         {kAllowDiskUseName, _allowDiskUse ? Value(true) : Value()},
         {kFromMongosName, _fromMongos ? Value(true) : Value()},
         {kNeedsMergeName, _needsMerge ? Value(true) : Value()},
+        {kMergeByPBRTName, _mergeByPBRT ? Value(true) : Value()},
         {bypassDocumentValidationCommandOption(),
          _bypassDocumentValidation ? Value(true) : Value()},
         // Only serialize a collation if one was specified.
@@ -338,5 +344,4 @@ Document AggregationRequest::serializeToCommandObj() const {
          _writeConcern ? Value(_writeConcern->toBSON()) : Value()},
     };
 }
-
 }  // namespace mongo

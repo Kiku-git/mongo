@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -50,6 +49,7 @@
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/ops/write_ops.h"
 #include "mongo/db/query/internal_plans.h"
 #include "mongo/db/repl/bgsync.h"
 #include "mongo/db/repl/drop_pending_collection_reaper.h"
@@ -82,7 +82,7 @@ namespace {
  */
 OplogEntry makeOplogEntry(OpTypeEnum opType, NamespaceString nss, OptionalCollectionUUID uuid) {
     return OplogEntry(OpTime(Timestamp(1, 1), 1),  // optime
-                      1LL,                         // hash
+                      boost::none,                 // hash
                       opType,                      // opType
                       nss,                         // namespace
                       uuid,                        // uuid
@@ -207,7 +207,8 @@ auto createCollectionWithUuid(OperationContext* opCtx, const NamespaceString& ns
 void createDatabase(OperationContext* opCtx, StringData dbName) {
     Lock::GlobalWrite globalLock(opCtx);
     bool justCreated;
-    Database* db = DatabaseHolder::getDatabaseHolder().openDb(opCtx, dbName, &justCreated);
+    auto databaseHolder = DatabaseHolder::get(opCtx);
+    auto db = databaseHolder->openDb(opCtx, dbName, &justCreated);
     ASSERT_TRUE(db);
     ASSERT_TRUE(justCreated);
 }
@@ -235,15 +236,17 @@ auto parseFromOplogEntryArray(const BSONObj& obj, int elem) {
 TEST_F(SyncTailTest, SyncApplyNoNamespaceBadOp) {
     const BSONObj op = BSON("op"
                             << "x");
-    ASSERT_THROWS(SyncTail::syncApply(_opCtx.get(), op, OplogApplication::Mode::kInitialSync),
-                  ExceptionFor<ErrorCodes::BadValue>);
+    ASSERT_THROWS(
+        SyncTail::syncApply(_opCtx.get(), op, OplogApplication::Mode::kInitialSync, boost::none),
+        ExceptionFor<ErrorCodes::BadValue>);
 }
 
 TEST_F(SyncTailTest, SyncApplyNoNamespaceNoOp) {
     ASSERT_OK(SyncTail::syncApply(_opCtx.get(),
                                   BSON("op"
                                        << "n"),
-                                  OplogApplication::Mode::kInitialSync));
+                                  OplogApplication::Mode::kInitialSync,
+                                  boost::none));
 }
 
 TEST_F(SyncTailTest, SyncApplyBadOp) {
@@ -251,16 +254,17 @@ TEST_F(SyncTailTest, SyncApplyBadOp) {
                             << "x"
                             << "ns"
                             << "test.t");
-    ASSERT_THROWS(SyncTail::syncApply(_opCtx.get(), op, OplogApplication::Mode::kInitialSync),
-                  ExceptionFor<ErrorCodes::BadValue>);
+    ASSERT_THROWS(
+        SyncTail::syncApply(_opCtx.get(), op, OplogApplication::Mode::kInitialSync, boost::none),
+        ExceptionFor<ErrorCodes::BadValue>);
 }
 
 TEST_F(SyncTailTest, SyncApplyInsertDocumentDatabaseMissing) {
     NamespaceString nss("test.t");
     auto op = makeOplogEntry(OpTypeEnum::kInsert, nss, {});
-    ASSERT_THROWS(
-        SyncTail::syncApply(_opCtx.get(), op.toBSON(), OplogApplication::Mode::kSecondary),
-        ExceptionFor<ErrorCodes::NamespaceNotFound>);
+    ASSERT_THROWS(SyncTail::syncApply(
+                      _opCtx.get(), op.toBSON(), OplogApplication::Mode::kSecondary, boost::none),
+                  ExceptionFor<ErrorCodes::NamespaceNotFound>);
 }
 
 TEST_F(SyncTailTest, SyncApplyDeleteDocumentDatabaseMissing) {
@@ -274,9 +278,9 @@ TEST_F(SyncTailTest, SyncApplyInsertDocumentCollectionLookupByUUIDFails) {
     createDatabase(_opCtx.get(), nss.db());
     NamespaceString otherNss(nss.getSisterNS("othername"));
     auto op = makeOplogEntry(OpTypeEnum::kInsert, otherNss, kUuid);
-    ASSERT_THROWS(
-        SyncTail::syncApply(_opCtx.get(), op.toBSON(), OplogApplication::Mode::kSecondary),
-        ExceptionFor<ErrorCodes::NamespaceNotFound>);
+    ASSERT_THROWS(SyncTail::syncApply(
+                      _opCtx.get(), op.toBSON(), OplogApplication::Mode::kSecondary, boost::none),
+                  ExceptionFor<ErrorCodes::NamespaceNotFound>);
 }
 
 TEST_F(SyncTailTest, SyncApplyDeleteDocumentCollectionLookupByUUIDFails) {
@@ -294,9 +298,9 @@ TEST_F(SyncTailTest, SyncApplyInsertDocumentCollectionMissing) {
     // which in the case of this test just ignores such errors. This tests mostly that we don't
     // implicitly create the collection and lock the database in MODE_X.
     auto op = makeOplogEntry(OpTypeEnum::kInsert, nss, {});
-    ASSERT_THROWS(
-        SyncTail::syncApply(_opCtx.get(), op.toBSON(), OplogApplication::Mode::kSecondary),
-        ExceptionFor<ErrorCodes::NamespaceNotFound>);
+    ASSERT_THROWS(SyncTail::syncApply(
+                      _opCtx.get(), op.toBSON(), OplogApplication::Mode::kSecondary, boost::none),
+                  ExceptionFor<ErrorCodes::NamespaceNotFound>);
     ASSERT_FALSE(collectionExists(_opCtx.get(), nss));
 }
 
@@ -355,9 +359,7 @@ TEST_F(SyncTailTest, SyncApplyCommand) {
                    << "o"
                    << BSON("create" << nss.coll())
                    << "ts"
-                   << Timestamp(1, 1)
-                   << "h"
-                   << 0LL);
+                   << Timestamp(1, 1));
     bool applyCmdCalled = false;
     _opObserver->onCreateCollectionFn = [&](OperationContext* opCtx,
                                             Collection*,
@@ -374,7 +376,8 @@ TEST_F(SyncTailTest, SyncApplyCommand) {
     };
     ASSERT_TRUE(_opCtx->writesAreReplicated());
     ASSERT_FALSE(documentValidationDisabled(_opCtx.get()));
-    ASSERT_OK(SyncTail::syncApply(_opCtx.get(), op, OplogApplication::Mode::kInitialSync));
+    ASSERT_OK(
+        SyncTail::syncApply(_opCtx.get(), op, OplogApplication::Mode::kInitialSync, boost::none));
     ASSERT_TRUE(applyCmdCalled);
 }
 
@@ -387,12 +390,11 @@ TEST_F(SyncTailTest, SyncApplyCommandThrowsException) {
                             << BSON("create"
                                     << "t")
                             << "ts"
-                            << Timestamp(1, 1)
-                            << "h"
-                            << 0LL);
+                            << Timestamp(1, 1));
     // This test relies on the namespace type check of IDL.
-    ASSERT_THROWS(SyncTail::syncApply(_opCtx.get(), op, OplogApplication::Mode::kInitialSync),
-                  ExceptionFor<ErrorCodes::TypeMismatch>);
+    ASSERT_THROWS(
+        SyncTail::syncApply(_opCtx.get(), op, OplogApplication::Mode::kInitialSync, boost::none),
+        ExceptionFor<ErrorCodes::TypeMismatch>);
 }
 
 DEATH_TEST_F(SyncTailTest, MultiApplyAbortsWhenNoOperationsAreGiven, "!ops.empty()") {
@@ -454,76 +456,6 @@ TEST_F(SyncTailTest,
                                                      getStorageInterface(),
                                                      nss,
                                                      createOplogCollectionOptions()));
-}
-
-TEST_F(SyncTailTest, MultiApplyAssignsOperationsToWriterThreadsBasedOnNamespaceHash) {
-    // This test relies on implementation details of how multiApply uses hashing to distribute ops
-    // to threads. It is possible for this test to fail, even if the implementation of multiApply is
-    // correct. If it fails, consider adjusting the namespace names (to adjust the hash values) or
-    // the number of threads in the pool.
-    NamespaceString nss1("test.t0");
-    NamespaceString nss2("test.t1");
-    auto writerPool = OplogApplier::makeWriterPool(2);
-
-    stdx::mutex mutex;
-    std::vector<MultiApplier::Operations> operationsApplied;
-    auto applyOperationFn =
-        [&mutex, &operationsApplied](OperationContext* opCtx,
-                                     MultiApplier::OperationPtrs* operationsForWriterThreadToApply,
-                                     SyncTail* st,
-                                     WorkerMultikeyPathInfo*) -> Status {
-        stdx::lock_guard<stdx::mutex> lock(mutex);
-        operationsApplied.emplace_back();
-        for (auto&& opPtr : *operationsForWriterThreadToApply) {
-            operationsApplied.back().push_back(*opPtr);
-        }
-        return Status::OK();
-    };
-
-    auto op1 = makeInsertDocumentOplogEntry({Timestamp(Seconds(1), 0), 1LL}, nss1, BSON("x" << 1));
-    auto op2 = makeInsertDocumentOplogEntry({Timestamp(Seconds(2), 0), 1LL}, nss2, BSON("x" << 2));
-
-    SyncTail syncTail(nullptr,
-                      getConsistencyMarkers(),
-                      getStorageInterface(),
-                      applyOperationFn,
-                      writerPool.get());
-    auto lastOpTime = unittest::assertGet(syncTail.multiApply(_opCtx.get(), {op1, op2}));
-    ASSERT_EQUALS(op2.getOpTime(), lastOpTime);
-
-    // Each writer thread should be given exactly one operation to apply.
-    std::vector<OpTime> seen;
-    {
-        stdx::lock_guard<stdx::mutex> lock(mutex);
-        ASSERT_EQUALS(operationsApplied.size(), 2U);
-        for (auto&& operationsAppliedByThread : operationsApplied) {
-            ASSERT_EQUALS(1U, operationsAppliedByThread.size());
-            const auto& oplogEntry = operationsAppliedByThread.front();
-            ASSERT_TRUE(std::find(seen.cbegin(), seen.cend(), oplogEntry.getOpTime()) ==
-                        seen.cend());
-            ASSERT_TRUE(oplogEntry == op1 || oplogEntry == op2);
-            seen.push_back(oplogEntry.getOpTime());
-        }
-    }
-
-    // Check ops in oplog.
-    // Obtain the last 2 entries in the oplog using a reverse collection scan.
-    stdx::lock_guard<stdx::mutex> lock(mutex);
-    auto storage = getStorageInterface();
-    auto operationsWrittenToOplog =
-        unittest::assertGet(storage->findDocuments(_opCtx.get(),
-                                                   NamespaceString::kRsOplogNamespace,
-                                                   {},
-                                                   StorageInterface::ScanDirection::kBackward,
-                                                   {},
-                                                   BoundInclusion::kIncludeStartKeyOnly,
-                                                   2U));
-    ASSERT_EQUALS(2U, operationsWrittenToOplog.size());
-
-    auto lastEntry = unittest::assertGet(OplogEntry::parse(operationsWrittenToOplog[0]));
-    auto secondToLastEntry = unittest::assertGet(OplogEntry::parse(operationsWrittenToOplog[1]));
-    ASSERT_EQUALS(op1, secondToLastEntry);
-    ASSERT_EQUALS(op2, lastEntry);
 }
 
 TEST_F(SyncTailTest, MultiSyncApplyUsesSyncApplyToApplyOperation) {
@@ -832,7 +764,7 @@ TEST_F(SyncTailTest, MultiSyncApplyLimitsBatchSizeWhenGroupingInsertOperations) 
     auto createOp = makeCreateCollectionOplogEntry({Timestamp(Seconds(seconds++), 0), 1LL}, nss);
 
     // Create a sequence of insert ops that are too large to fit in one group.
-    int maxBatchSize = insertVectorMaxBytes;
+    int maxBatchSize = write_ops::insertVectorMaxBytes;
     int opsPerBatch = 3;
     int opSize = maxBatchSize / opsPerBatch - 500;  // Leave some room for other oplog fields.
 
@@ -880,7 +812,7 @@ TEST_F(SyncTailTest, MultiSyncApplyAppliesOpIndividuallyWhenOpIndividuallyExceed
     NamespaceString nss("test." + _agent.getSuiteName() + "_" + _agent.getTestName());
     auto createOp = makeCreateCollectionOplogEntry({Timestamp(Seconds(seconds++), 0), 1LL}, nss);
 
-    int maxBatchSize = insertVectorMaxBytes;
+    int maxBatchSize = write_ops::insertVectorMaxBytes;
     // Create an insert op that exceeds the maximum batch size by itself.
     auto insertOpLarge = makeSizedInsertOp(nss, maxBatchSize, seconds++);
     auto insertOpSmall = makeSizedInsertOp(nss, 100, seconds++);
@@ -1008,8 +940,8 @@ TEST_F(SyncTailTest, MultiSyncApplyIgnoresUpdateOperationIfDocumentIsMissingFrom
     {
         Lock::GlobalWrite globalLock(_opCtx.get());
         bool justCreated = false;
-        Database* db =
-            DatabaseHolder::getDatabaseHolder().openDb(_opCtx.get(), nss.db(), &justCreated);
+        auto databaseHolder = DatabaseHolder::get(_opCtx.get());
+        auto db = databaseHolder->openDb(_opCtx.get(), nss.db(), &justCreated);
         ASSERT_TRUE(db);
         ASSERT_TRUE(justCreated);
     }
@@ -1571,13 +1503,13 @@ TEST_F(SyncTailTest, LogSlowOpApplicationWhenSuccessful) {
     auto entry = makeOplogEntry(OpTypeEnum::kInsert, nss, {});
 
     startCapturingLogMessages();
-    ASSERT_OK(
-        SyncTail::syncApply(_opCtx.get(), entry.toBSON(), OplogApplication::Mode::kSecondary));
+    ASSERT_OK(SyncTail::syncApply(
+        _opCtx.get(), entry.toBSON(), OplogApplication::Mode::kSecondary, boost::none));
 
     // Use a builder for easier escaping. We expect the operation to be logged.
     StringBuilder expected;
     expected << "applied op: CRUD { op: \"i\", ns: \"test.t\", o: { _id: 0 }, ts: Timestamp(1, 1), "
-                "t: 1, h: 1, v: 2 }, took "
+                "t: 1, v: 2 }, took "
              << applyDuration << "ms";
     ASSERT_EQUALS(1, countLogLinesContaining(expected.str()));
 }
@@ -1594,7 +1526,8 @@ TEST_F(SyncTailTest, DoNotLogSlowOpApplicationWhenFailed) {
 
     startCapturingLogMessages();
     ASSERT_THROWS(
-        SyncTail::syncApply(_opCtx.get(), entry.toBSON(), OplogApplication::Mode::kSecondary),
+        SyncTail::syncApply(
+            _opCtx.get(), entry.toBSON(), OplogApplication::Mode::kSecondary, boost::none),
         ExceptionFor<ErrorCodes::NamespaceNotFound>);
 
     // Use a builder for easier escaping. We expect the operation to *not* be logged
@@ -1618,8 +1551,8 @@ TEST_F(SyncTailTest, DoNotLogNonSlowOpApplicationWhenSuccessful) {
     auto entry = makeOplogEntry(OpTypeEnum::kInsert, nss, {});
 
     startCapturingLogMessages();
-    ASSERT_OK(
-        SyncTail::syncApply(_opCtx.get(), entry.toBSON(), OplogApplication::Mode::kSecondary));
+    ASSERT_OK(SyncTail::syncApply(
+        _opCtx.get(), entry.toBSON(), OplogApplication::Mode::kSecondary, boost::none));
 
     // Use a builder for easier escaping. We expect the operation to *not* be logged,
     // since it wasn't slow to apply.
@@ -1641,10 +1574,6 @@ public:
         BSONObj result;
         ASSERT(client.runCommand(kNs.db().toString(), BSON("create" << kNs.coll()), result));
     }
-    void tearDown() override {
-        SessionCatalog::get(_opCtx->getServiceContext())->reset_forTest();
-        SyncTailTest::tearDown();
-    }
 
     /**
      * Creates an OplogEntry with given parameters and preset defaults for this test suite.
@@ -1657,7 +1586,7 @@ public:
                                     const OperationSessionInfo& sessionInfo,
                                     Date_t wallClockTime) {
         return repl::OplogEntry(opTime,         // optime
-                                0,              // hash
+                                boost::none,    // hash
                                 opType,         // opType
                                 ns,             // namespace
                                 boost::none,    // uuid

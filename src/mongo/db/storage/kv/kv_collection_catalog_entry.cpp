@@ -1,6 +1,3 @@
-// kv_collection_catalog_entry.cpp
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -30,15 +27,21 @@
  *    it in the license file.
  */
 
-#include <memory>
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kStorage
+
+#include "mongo/platform/basic.h"
 
 #include "mongo/db/storage/kv/kv_collection_catalog_entry.h"
+
+#include <memory>
 
 #include "mongo/db/catalog/uuid_catalog.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/storage/kv/kv_catalog.h"
 #include "mongo/db/storage/kv/kv_catalog_feature_tracker.h"
 #include "mongo/db/storage/kv/kv_engine.h"
+#include "mongo/db/storage/kv/kv_storage_engine.h"
+#include "mongo/util/log.h"
 
 namespace mongo {
 
@@ -60,7 +63,8 @@ public:
     virtual void commit(boost::optional<Timestamp>) {}
     virtual void rollback() {
         // Intentionally ignoring failure.
-        _cce->_engine->dropIdent(_opCtx, _ident).transitional_ignore();
+        auto kvEngine = _cce->_engine->getEngine();
+        MONGO_COMPILER_VARIABLE_UNUSED auto status = kvEngine->dropIdent(_opCtx, _ident);
     }
 
     OperationContext* const _opCtx;
@@ -70,23 +74,42 @@ public:
 
 class KVCollectionCatalogEntry::RemoveIndexChange : public RecoveryUnit::Change {
 public:
-    RemoveIndexChange(OperationContext* opCtx, KVCollectionCatalogEntry* cce, StringData ident)
-        : _opCtx(opCtx), _cce(cce), _ident(ident.toString()) {}
+    RemoveIndexChange(OperationContext* opCtx,
+                      KVCollectionCatalogEntry* cce,
+                      const NamespaceString& indexNss,
+                      StringData indexName,
+                      StringData ident)
+        : _opCtx(opCtx),
+          _cce(cce),
+          _indexNss(indexNss),
+          _indexName(indexName),
+          _ident(ident.toString()) {}
 
     virtual void rollback() {}
-    virtual void commit(boost::optional<Timestamp>) {
+    virtual void commit(boost::optional<Timestamp> commitTimestamp) {
         // Intentionally ignoring failure here. Since we've removed the metadata pointing to the
         // index, we should never see it again anyway.
-        _cce->_engine->dropIdent(_opCtx, _ident).transitional_ignore();
+        auto engine = _cce->_engine;
+        auto storageEngine = engine->getStorageEngine();
+        if (storageEngine->supportsPendingDrops() && commitTimestamp) {
+            log() << "Deferring ident drop for " << _ident << " (" << _indexNss
+                  << ") with commit timestamp: " << commitTimestamp;
+            engine->addDropPendingIdent(*commitTimestamp, _indexNss, _ident);
+        } else {
+            auto kvEngine = engine->getEngine();
+            MONGO_COMPILER_VARIABLE_UNUSED auto status = kvEngine->dropIdent(_opCtx, _ident);
+        }
     }
 
     OperationContext* const _opCtx;
     KVCollectionCatalogEntry* const _cce;
+    const NamespaceString _indexNss;
+    const std::string _indexName;
     const std::string _ident;
 };
 
 
-KVCollectionCatalogEntry::KVCollectionCatalogEntry(KVEngine* engine,
+KVCollectionCatalogEntry::KVCollectionCatalogEntry(KVStorageEngineInterface* engine,
                                                    KVCatalog* catalog,
                                                    StringData ns,
                                                    StringData ident,
@@ -184,18 +207,27 @@ Status KVCollectionCatalogEntry::removeIndex(OperationContext* opCtx, StringData
     _catalog->putMetaData(opCtx, ns().toString(), md);
 
     // Lazily remove to isolate underlying engine from rollback.
-    opCtx->recoveryUnit()->registerChange(new RemoveIndexChange(opCtx, this, ident));
+    opCtx->recoveryUnit()->registerChange(
+        new RemoveIndexChange(opCtx, this, ns().makeIndexNamespace(indexName), indexName, ident));
     return Status::OK();
 }
 
 Status KVCollectionCatalogEntry::prepareForIndexBuild(OperationContext* opCtx,
                                                       const IndexDescriptor* spec,
+                                                      IndexBuildProtocol indexBuildProtocol,
                                                       bool isBackgroundSecondaryBuild) {
     MetaData md = _getMetaData(opCtx);
 
     KVPrefix prefix = KVPrefix::getNextPrefix(ns());
-    IndexMetaData imd(
-        spec->infoObj(), false, RecordId(), false, prefix, isBackgroundSecondaryBuild);
+    IndexMetaData imd;
+    imd.spec = spec->infoObj();
+    imd.ready = false;
+    imd.head = RecordId();
+    imd.multikey = false;
+    imd.prefix = prefix;
+    imd.isBackgroundSecondaryBuild = isBackgroundSecondaryBuild;
+    imd.runTwoPhaseBuild = indexBuildProtocol == IndexBuildProtocol::kTwoPhase;
+
     if (indexTypeSupportsPathLevelMultikeyTracking(spec->getAccessMethodName())) {
         const auto feature =
             KVCatalog::FeatureTracker::RepairableFeature::kPathLevelMultikeyTracking;
@@ -218,7 +250,8 @@ Status KVCollectionCatalogEntry::prepareForIndexBuild(OperationContext* opCtx,
 
     string ident = _catalog->getIndexIdent(opCtx, ns().ns(), spec->indexName());
 
-    const Status status = _engine->createGroupedSortedDataInterface(opCtx, ident, spec, prefix);
+    auto kvEngine = _engine->getEngine();
+    const Status status = kvEngine->createGroupedSortedDataInterface(opCtx, ident, spec, prefix);
     if (status.isOK()) {
         opCtx->recoveryUnit()->registerChange(new AddIndexChange(opCtx, this, ident));
     }
@@ -226,12 +259,95 @@ Status KVCollectionCatalogEntry::prepareForIndexBuild(OperationContext* opCtx,
     return status;
 }
 
+bool KVCollectionCatalogEntry::isTwoPhaseIndexBuild(OperationContext* opCtx,
+                                                    StringData indexName) const {
+    MetaData md = _getMetaData(opCtx);
+    int offset = md.findIndexOffset(indexName);
+    invariant(offset >= 0);
+    return md.indexes[offset].runTwoPhaseBuild;
+}
+
+long KVCollectionCatalogEntry::getIndexBuildVersion(OperationContext* opCtx,
+                                                    StringData indexName) const {
+    MetaData md = _getMetaData(opCtx);
+    int offset = md.findIndexOffset(indexName);
+    invariant(offset >= 0);
+    return md.indexes[offset].versionOfBuild;
+}
+
+void KVCollectionCatalogEntry::setIndexBuildScanning(
+    OperationContext* opCtx,
+    StringData indexName,
+    std::string sideWritesIdent,
+    boost::optional<std::string> constraintViolationsIdent) {
+    MetaData md = _getMetaData(opCtx);
+    int offset = md.findIndexOffset(indexName);
+    invariant(offset >= 0);
+    invariant(!md.indexes[offset].ready);
+    invariant(!md.indexes[offset].buildPhase);
+    invariant(md.indexes[offset].runTwoPhaseBuild);
+
+    md.indexes[offset].buildPhase = kIndexBuildScanning.toString();
+    md.indexes[offset].sideWritesIdent = sideWritesIdent;
+    md.indexes[offset].constraintViolationsIdent = constraintViolationsIdent;
+    _catalog->putMetaData(opCtx, ns().toString(), md);
+}
+
+bool KVCollectionCatalogEntry::isIndexBuildScanning(OperationContext* opCtx,
+                                                    StringData indexName) const {
+    MetaData md = _getMetaData(opCtx);
+    int offset = md.findIndexOffset(indexName);
+    invariant(offset >= 0);
+    return md.indexes[offset].buildPhase == kIndexBuildScanning.toString();
+}
+
+void KVCollectionCatalogEntry::setIndexBuildDraining(OperationContext* opCtx,
+                                                     StringData indexName) {
+    MetaData md = _getMetaData(opCtx);
+    int offset = md.findIndexOffset(indexName);
+    invariant(offset >= 0);
+    invariant(!md.indexes[offset].ready);
+    invariant(md.indexes[offset].runTwoPhaseBuild);
+    invariant(md.indexes[offset].buildPhase == kIndexBuildScanning.toString());
+
+    md.indexes[offset].buildPhase = kIndexBuildDraining.toString();
+    _catalog->putMetaData(opCtx, ns().toString(), md);
+}
+
+bool KVCollectionCatalogEntry::isIndexBuildDraining(OperationContext* opCtx,
+                                                    StringData indexName) const {
+    MetaData md = _getMetaData(opCtx);
+    int offset = md.findIndexOffset(indexName);
+    invariant(offset >= 0);
+    return md.indexes[offset].buildPhase == kIndexBuildDraining.toString();
+}
+
 void KVCollectionCatalogEntry::indexBuildSuccess(OperationContext* opCtx, StringData indexName) {
     MetaData md = _getMetaData(opCtx);
     int offset = md.findIndexOffset(indexName);
     invariant(offset >= 0);
     md.indexes[offset].ready = true;
+    md.indexes[offset].runTwoPhaseBuild = false;
+    md.indexes[offset].buildPhase = boost::none;
+    md.indexes[offset].sideWritesIdent = boost::none;
+    md.indexes[offset].constraintViolationsIdent = boost::none;
     _catalog->putMetaData(opCtx, ns().toString(), md);
+}
+
+boost::optional<std::string> KVCollectionCatalogEntry::getSideWritesIdent(
+    OperationContext* opCtx, StringData indexName) const {
+    MetaData md = _getMetaData(opCtx);
+    int offset = md.findIndexOffset(indexName);
+    invariant(offset >= 0);
+    return md.indexes[offset].sideWritesIdent;
+}
+
+boost::optional<std::string> KVCollectionCatalogEntry::getConstraintViolationsIdent(
+    OperationContext* opCtx, StringData indexName) const {
+    MetaData md = _getMetaData(opCtx);
+    int offset = md.findIndexOffset(indexName);
+    invariant(offset >= 0);
+    return md.indexes[offset].constraintViolationsIdent;
 }
 
 void KVCollectionCatalogEntry::updateTTLSetting(OperationContext* opCtx,
@@ -248,7 +364,8 @@ void KVCollectionCatalogEntry::updateIndexMetadata(OperationContext* opCtx,
                                                    const IndexDescriptor* desc) {
     // Update any metadata Ident has for this index
     const string ident = _catalog->getIndexIdent(opCtx, ns().ns(), desc->indexName());
-    _engine->alterIdentMetadata(opCtx, ident, desc);
+    auto kvEngine = _engine->getEngine();
+    kvEngine->alterIdentMetadata(opCtx, ident, desc);
 }
 
 bool KVCollectionCatalogEntry::isEqualToMetadataUUID(OperationContext* opCtx,

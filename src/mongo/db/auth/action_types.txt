@@ -39,6 +39,7 @@
 "dropAllRolesFromDatabase",  # Not used for permissions checks, but to id the event in logs.
 "dropAllUsersFromDatabase",  # Not used for permissions checks, but to id the event in logs.
 "dropCollection",
+"dropConnections",
 "dropDatabase",
 "dropIndex",
 "dropRole",
@@ -69,7 +70,7 @@
 "invalidateUserCache",
 "killAnyCursor",
 "killAnySession",
-"killCursors",
+"killCursors", # Deprecated in favor of killAnyCursor
 "killop",
 "listCachedAndActiveUsers",
 "listCollections",
@@ -114,6 +115,7 @@
 "storageDetails",
 "top",
 "touch",
+"trafficRecord",
 "unlock",
 "useUUID",
 "update",
@@ -122,4 +124,3 @@
 "validate",
 "viewRole",
 "viewUser"]
-

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -48,7 +47,7 @@
 #include "mongo/db/catalog/coll_mod.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/collection_catalog_entry.h"
-#include "mongo/db/catalog/database.h"
+#include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/uuid_catalog.h"
@@ -59,7 +58,7 @@
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/exec/delete.h"
-#include "mongo/db/exec/update.h"
+#include "mongo/db/exec/update_stage.h"
 #include "mongo/db/exec/working_set_common.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/keypattern.h"
@@ -91,6 +90,9 @@ using UniqueLock = stdx::unique_lock<stdx::mutex>;
 
 const auto kIdIndexName = "_id_"_sd;
 
+LockMode fixLockModeForSystemDotViewsChanges(const NamespaceString& nss, LockMode mode) {
+    return nss.isSystemDotViews() ? MODE_X : mode;
+}
 }  // namespace
 
 StorageInterfaceImpl::StorageInterfaceImpl()
@@ -118,6 +120,7 @@ StatusWith<int> StorageInterfaceImpl::getRollbackID(OperationContext* opCtx) {
 }
 
 StatusWith<int> StorageInterfaceImpl::initializeRollbackID(OperationContext* opCtx) {
+    UninterruptibleLockGuard noInterrupt(opCtx->lockState());
     auto status = createCollection(opCtx, _rollbackIdNss, CollectionOptions());
     if (!status.isOK()) {
         return status;
@@ -218,7 +221,7 @@ StorageInterfaceImpl::createCollectionForBulkLoading(
 
         // Get locks and create the collection.
         AutoGetOrCreateDb db(opCtx.get(), nss.db(), MODE_X);
-        AutoGetCollection coll(opCtx.get(), nss, MODE_IX);
+        AutoGetCollection coll(opCtx.get(), nss, fixLockModeForSystemDotViewsChanges(nss, MODE_IX));
 
         if (coll.getCollection()) {
             return Status(ErrorCodes::NamespaceExists,
@@ -231,7 +234,8 @@ StorageInterfaceImpl::createCollectionForBulkLoading(
             wunit.commit();
         }
 
-        autoColl = stdx::make_unique<AutoGetCollection>(opCtx.get(), nss, MODE_IX);
+        autoColl = stdx::make_unique<AutoGetCollection>(
+            opCtx.get(), nss, fixLockModeForSystemDotViewsChanges(nss, MODE_IX));
 
         // Build empty capped indexes.  Capped indexes cannot be built by the MultiIndexBlock
         // because the cap might delete documents off the back while we are inserting them into
@@ -372,7 +376,37 @@ Status StorageInterfaceImpl::insertDocuments(OperationContext* opCtx,
 }
 
 Status StorageInterfaceImpl::dropReplicatedDatabases(OperationContext* opCtx) {
-    Database::dropAllDatabasesExceptLocal(opCtx);
+    Lock::GlobalWrite globalWriteLock(opCtx);
+
+    std::vector<std::string> dbNames;
+    opCtx->getServiceContext()->getStorageEngine()->listDatabases(&dbNames);
+    invariant(!dbNames.empty());
+    log() << "dropReplicatedDatabases - dropping " << dbNames.size() << " databases";
+
+    ReplicationCoordinator::get(opCtx)->dropAllSnapshots();
+
+    auto databaseHolder = DatabaseHolder::get(opCtx);
+    auto hasLocalDatabase = false;
+    for (const auto& dbName : dbNames) {
+        if (dbName == "local") {
+            hasLocalDatabase = true;
+            continue;
+        }
+        writeConflictRetry(opCtx, "dropReplicatedDatabases", dbName, [&] {
+            if (auto db = databaseHolder->getDb(opCtx, dbName)) {
+                databaseHolder->dropDb(opCtx, db);
+            } else {
+                // This is needed since dropDatabase can't be rolled back.
+                // This is safe be replaced by "invariant(db);dropDatabase(opCtx, db);" once fixed.
+                log() << "dropReplicatedDatabases - database disappeared after retrieving list of "
+                         "database names but before drop: "
+                      << dbName;
+            }
+        });
+    }
+    invariant(hasLocalDatabase, "local database missing");
+    log() << "dropReplicatedDatabases - dropped " << dbNames.size() << " databases";
+
     return Status::OK();
 }
 
@@ -401,7 +435,6 @@ Status StorageInterfaceImpl::createCollection(OperationContext* opCtx,
                                               const NamespaceString& nss,
                                               const CollectionOptions& options) {
     return writeConflictRetry(opCtx, "StorageInterfaceImpl::createCollection", nss.ns(), [&] {
-        UninterruptibleLockGuard noInterrupt(opCtx->lockState());
         AutoGetOrCreateDb databaseWriteGuard(opCtx, nss.db(), MODE_X);
         auto db = databaseWriteGuard.getDb();
         invariant(db);
@@ -424,7 +457,6 @@ Status StorageInterfaceImpl::createCollection(OperationContext* opCtx,
 
 Status StorageInterfaceImpl::dropCollection(OperationContext* opCtx, const NamespaceString& nss) {
     return writeConflictRetry(opCtx, "StorageInterfaceImpl::dropCollection", nss.ns(), [&] {
-        UninterruptibleLockGuard noInterrupt(opCtx->lockState());
         AutoGetDb autoDB(opCtx, nss.db(), MODE_X);
         if (!autoDB.getDb()) {
             // Database does not exist - nothing to do.
@@ -528,7 +560,7 @@ Status StorageInterfaceImpl::setIndexIsMultikey(OperationContext* opCtx,
                                         << nss.ns()
                                         << " to set to multikey.");
         }
-        collection->getIndexCatalog()->getIndex(idx)->setIndexIsMultikey(opCtx, paths);
+        collection->getIndexCatalog()->setMultikeyPaths(opCtx, idx, paths);
         wunit.commit();
         return Status::OK();
     });
@@ -539,10 +571,10 @@ namespace {
 /**
  * Returns DeleteStageParams for deleteOne with fetch.
  */
-DeleteStageParams makeDeleteStageParamsForDeleteDocuments() {
-    DeleteStageParams deleteStageParams;
-    deleteStageParams.isMulti = true;
-    deleteStageParams.returnDeleted = true;
+std::unique_ptr<DeleteStageParams> makeDeleteStageParamsForDeleteDocuments() {
+    auto deleteStageParams = std::make_unique<DeleteStageParams>();
+    deleteStageParams->isMulti = true;
+    deleteStageParams->returnDeleted = true;
     return deleteStageParams;
 }
 
@@ -609,7 +641,7 @@ StatusWith<std::vector<BSONObj>> _findOrDeleteDocuments(
                 auto indexCatalog = collection->getIndexCatalog();
                 invariant(indexCatalog);
                 bool includeUnfinishedIndexes = false;
-                IndexDescriptor* indexDescriptor =
+                const IndexDescriptor* indexDescriptor =
                     indexCatalog->findIndexByName(opCtx, *indexName, includeUnfinishedIndexes);
                 if (!indexDescriptor) {
                     return Result(ErrorCodes::IndexNotFound,
@@ -673,7 +705,6 @@ StatusWith<std::vector<BSONObj>> _findOrDeleteDocuments(
                 case PlanExecutor::IS_EOF:
                     return Result(docs);
                 case PlanExecutor::FAILURE:
-                case PlanExecutor::DEAD:
                     return WorkingSetCommon::getMemberObjectStatus(out);
                 default:
                     MONGO_UNREACHABLE;
@@ -1124,8 +1155,12 @@ Status StorageInterfaceImpl::isAdminDbValid(OperationContext* opCtx) {
     return Status::OK();
 }
 
-void StorageInterfaceImpl::waitForAllEarlierOplogWritesToBeVisible(OperationContext* opCtx) {
+void StorageInterfaceImpl::waitForAllEarlierOplogWritesToBeVisible(OperationContext* opCtx,
+                                                                   bool primaryOnly) {
     Lock::GlobalLock lk(opCtx, MODE_IS);
+    if (primaryOnly &&
+        !repl::ReplicationCoordinator::get(opCtx)->canAcceptWritesForDatabase(opCtx, "admin"))
+        return;
     Collection* oplog;
     {
         // We don't want to be holding the collection lock while blocking, to avoid deadlocks.
@@ -1181,6 +1216,10 @@ bool StorageInterfaceImpl::supportsDocLocking(ServiceContext* serviceCtx) const 
 
 Timestamp StorageInterfaceImpl::getAllCommittedTimestamp(ServiceContext* serviceCtx) const {
     return serviceCtx->getStorageEngine()->getAllCommittedTimestamp();
+}
+
+Timestamp StorageInterfaceImpl::getOldestOpenReadTimestamp(ServiceContext* serviceCtx) const {
+    return serviceCtx->getStorageEngine()->getOldestOpenReadTimestamp();
 }
 
 Timestamp StorageInterfaceImpl::getPointInTimeReadTimestamp(OperationContext* opCtx) const {

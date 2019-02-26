@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -30,6 +29,7 @@
 
 #pragma once
 
+#include <boost/algorithm/string.hpp>
 #include <map>
 #include <sstream>
 #include <string>
@@ -41,6 +41,7 @@
 #include "mongo/bson/util/builder.h"
 #include "mongo/client/connection_string.h"
 #include "mongo/stdx/mutex.h"
+#include "mongo/transport/transport_layer.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/net/hostandport.h"
 
@@ -102,12 +103,37 @@ StatusWith<std::string> uriDecode(StringData str);
  */
 class MongoURI {
 public:
+    class CaseInsensitiveString {
+    public:
+        CaseInsensitiveString(std::string str)
+            : _original(std::move(str)), _lowercase(boost::algorithm::to_lower_copy(_original)) {}
+
+        CaseInsensitiveString(StringData sd) : CaseInsensitiveString(std::string(sd)) {}
+        CaseInsensitiveString(const char* str) : CaseInsensitiveString(std::string(str)) {}
+
+        friend bool operator<(const CaseInsensitiveString& lhs, const CaseInsensitiveString& rhs) {
+            return lhs._lowercase < rhs._lowercase;
+        }
+
+        friend bool operator==(const CaseInsensitiveString& lhs, const CaseInsensitiveString& rhs) {
+            return lhs._lowercase == rhs._lowercase;
+        }
+
+        const std::string& original() const noexcept {
+            return _original;
+        }
+
+    private:
+        std::string _original;
+        std::string _lowercase;
+    };
+
     // Note that, because this map is used for DNS TXT record injection on options, there is a
     // requirement on its behavior for `insert`: insert must not replace or update existing values
     // -- this gives the desired behavior that user-specified values override TXT record specified
     // values.  `std::map` and `std::unordered_map` satisfy this requirement.  Make sure that
     // whichever map type is used provides that guarantee.
-    using OptionsMap = std::map<std::string, std::string>;
+    using OptionsMap = std::map<CaseInsensitiveString, std::string>;
 
     static StatusWith<MongoURI> parse(const std::string& url);
 
@@ -146,14 +172,10 @@ public:
         return _options;
     }
 
-    void addOption(std::string newKey, std::string newValue) {
-        _options[std::move(newKey)] = std::move(newValue);
-    }
-
     void setOptionIfNecessary(std::string uriParamKey, std::string value) {
         const auto key = _options.find(uriParamKey);
         if (key == end(_options) && !value.empty()) {
-            addOption(uriParamKey, value);
+            _options[std::move(uriParamKey)] = std::move(value);
         }
     }
 
@@ -210,24 +232,25 @@ public:
         return _retryWrites;
     }
 
+    transport::ConnectSSLMode getSSLMode() const {
+        return _sslMode;
+    }
+
     // If you are trying to clone a URI (including its options/auth information) for a single
     // server (say a member of a replica-set), you can pass in its HostAndPort information to
     // get a new URI with the same info, except type() will be MASTER and getServers() will
     // be the single host you pass in.
     MongoURI cloneURIForServer(HostAndPort hostAndPort) const {
-        return MongoURI(ConnectionString(std::move(hostAndPort)),
-                        _user,
-                        _password,
-                        _database,
-                        _retryWrites,
-                        _options);
+        auto out = *this;
+        out._connectString = ConnectionString(std::move(hostAndPort));
+        return out;
     }
 
     ConnectionString::ConnectionType type() const {
         return _connectString.type();
     }
 
-    explicit MongoURI(const ConnectionString& connectString) : _connectString(connectString){};
+    explicit MongoURI(const ConnectionString& connectString) : _connectString(connectString) {}
 
     MongoURI() = default;
 
@@ -241,15 +264,17 @@ private:
              const std::string& password,
              const std::string& database,
              boost::optional<bool> retryWrites,
+             transport::ConnectSSLMode sslMode,
              OptionsMap options)
         : _connectString(std::move(connectString)),
           _user(user),
           _password(password),
           _database(database),
           _retryWrites(std::move(retryWrites)),
+          _sslMode(sslMode),
           _options(std::move(options)) {}
 
-    BSONObj _makeAuthObjFromOptions(int maxWireVersion) const;
+    boost::optional<BSONObj> _makeAuthObjFromOptions(int maxWireVersion) const;
 
     static MongoURI parseImpl(const std::string& url);
 
@@ -258,6 +283,7 @@ private:
     std::string _password;
     std::string _database;
     boost::optional<bool> _retryWrites;
+    transport::ConnectSSLMode _sslMode = transport::kGlobalSSLMode;
     OptionsMap _options;
 };
 

@@ -1,6 +1,3 @@
-// devnull_kv_engine.h
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -64,6 +61,9 @@ public:
                                                         StringData ident,
                                                         const CollectionOptions& options);
 
+    virtual std::unique_ptr<RecordStore> makeTemporaryRecordStore(OperationContext* opCtx,
+                                                                  StringData ident) override;
+
     virtual Status createSortedDataInterface(OperationContext* opCtx,
                                              StringData ident,
                                              const IndexDescriptor* desc) {
@@ -125,6 +125,10 @@ public:
         return Timestamp();
     }
 
+    virtual Timestamp getOldestOpenReadTimestamp() const override {
+        return Timestamp();
+    }
+
     virtual Status beginBackup(OperationContext* opCtx) override {
         return Status::OK();
     }
@@ -135,6 +139,9 @@ public:
         OperationContext* opCtx) override;
 
     virtual void endNonBlockingBackup(OperationContext* opCtx) override {}
+
+    virtual StatusWith<std::vector<std::string>> extendBackupCursor(
+        OperationContext* opCtx) override;
 
 private:
     std::shared_ptr<void> _catalogInfo;

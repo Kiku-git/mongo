@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Public Domain 2014-2018 MongoDB, Inc.
+# Public Domain 2014-2019 MongoDB, Inc.
 # Public Domain 2008-2014 WiredTiger, Inc.
 #
 # This is free and unencumbered software released into the public domain.
@@ -62,9 +62,6 @@ class test_las02(wttest.WiredTigerTestCase):
         self.assertEqual(count, nrows)
 
     def test_las(self):
-        if not wiredtiger.timestamp_build():
-            self.skipTest('requires a timestamp build')
-
         nrows = 10000
 
         # Create a table without logging to ensure we get "skew_newest" lookaside eviction behavior.

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -62,7 +61,7 @@ const Milliseconds kNetworkTimeoutBufferMS{5000};
 class MockOplogFetcher : public AbstractOplogFetcher {
 public:
     explicit MockOplogFetcher(executor::TaskExecutor* executor,
-                              OpTimeWithHash lastFetched,
+                              OpTime lastFetched,
                               HostAndPort source,
                               NamespaceString nss,
                               std::size_t maxFetcherRestarts,
@@ -93,7 +92,7 @@ private:
 };
 
 MockOplogFetcher::MockOplogFetcher(executor::TaskExecutor* executor,
-                                   OpTimeWithHash lastFetched,
+                                   OpTime lastFetched,
                                    HostAndPort source,
                                    NamespaceString nss,
                                    std::size_t maxFetcherRestarts,
@@ -141,15 +140,15 @@ TEST_F(AbstractOplogFetcherTest, ShuttingExecutorDownShouldPreventOplogFetcherFr
 
     MockOplogFetcher oplogFetcher(&getExecutor(), lastFetched, source, nss, 0, [](Status) {});
 
-    // Last optime and hash fetched should match values passed to constructor.
-    ASSERT_EQUALS(lastFetched, oplogFetcher.getLastOpTimeWithHashFetched_forTest());
+    // Last optime fetched should match values passed to constructor.
+    ASSERT_EQUALS(lastFetched, oplogFetcher.getLastOpTimeFetched_forTest());
 
     ASSERT_FALSE(oplogFetcher.isActive());
     ASSERT_EQUALS(ErrorCodes::ShutdownInProgress, oplogFetcher.startup());
     ASSERT_FALSE(oplogFetcher.isActive());
 
-    // Last optime and hash fetched should not change.
-    ASSERT_EQUALS(lastFetched, oplogFetcher.getLastOpTimeWithHashFetched_forTest());
+    // Last optime fetched should not change.
+    ASSERT_EQUALS(lastFetched, oplogFetcher.getLastOpTimeFetched_forTest());
 }
 
 TEST_F(AbstractOplogFetcherTest, StartupReturnsOperationFailedIfExecutorFailsToScheduleFetcher) {
@@ -225,22 +224,18 @@ TEST_F(AbstractOplogFetcherTest, OplogFetcherReturnsCallbackCanceledIfShutdownAf
     ASSERT_EQUALS(ErrorCodes::CallbackCanceled, shutdownState.getStatus());
 }
 
-long long _getHash(const BSONObj& oplogEntry) {
-    return oplogEntry["h"].numberLong();
-}
-
 Timestamp _getTimestamp(const BSONObj& oplogEntry) {
     return OplogEntry(oplogEntry).getOpTime().getTimestamp();
 }
 
-OpTimeWithHash _getOpTimeWithHash(const BSONObj& oplogEntry) {
-    return {_getHash(oplogEntry), OplogEntry(oplogEntry).getOpTime()};
+OpTime _getOpTime(const BSONObj& oplogEntry) {
+    return OplogEntry(oplogEntry).getOpTime();
 }
 
 std::vector<BSONObj> _generateOplogEntries(std::size_t size) {
     std::vector<BSONObj> ops(size);
     for (std::size_t i = 0; i < size; ++i) {
-        ops[i] = AbstractOplogFetcherTest::makeNoopOplogEntry(Seconds(100 + int(i)), 123LL);
+        ops[i] = AbstractOplogFetcherTest::makeNoopOplogEntry(Seconds(100 + int(i)));
     }
     return ops;
 }
@@ -262,7 +257,7 @@ TEST_F(AbstractOplogFetcherTest,
     std::size_t maxFetcherRestarts = 1U;
     auto shutdownState = stdx::make_unique<ShutdownState>();
     MockOplogFetcher oplogFetcher(&getExecutor(),
-                                  _getOpTimeWithHash(ops[0]),
+                                  _getOpTime(ops[0]),
                                   source,
                                   nss,
                                   maxFetcherRestarts,
@@ -294,7 +289,7 @@ TEST_F(AbstractOplogFetcherTest, OplogFetcherStopsRestartingFetcherIfRestartLimi
     std::size_t maxFetcherRestarts = 2U;
     auto shutdownState = stdx::make_unique<ShutdownState>();
     MockOplogFetcher oplogFetcher(&getExecutor(),
-                                  _getOpTimeWithHash(ops[0]),
+                                  _getOpTime(ops[0]),
                                   source,
                                   nss,
                                   maxFetcherRestarts,
@@ -330,7 +325,7 @@ TEST_F(AbstractOplogFetcherTest, OplogFetcherResetsRestartCounterOnSuccessfulFet
     std::size_t maxFetcherRestarts = 2U;
     auto shutdownState = stdx::make_unique<ShutdownState>();
     MockOplogFetcher oplogFetcher(&getExecutor(),
-                                  _getOpTimeWithHash(ops[0]),
+                                  _getOpTime(ops[0]),
                                   source,
                                   nss,
                                   maxFetcherRestarts,
@@ -376,10 +371,9 @@ public:
                                                    ShouldFailRequestFn shouldFailRequest)
         : unittest::TaskExecutorProxy(executor), _shouldFailRequest(shouldFailRequest) {}
 
-    StatusWith<CallbackHandle> scheduleRemoteCommand(
-        const executor::RemoteCommandRequest& request,
-        const RemoteCommandCallbackFn& cb,
-        const transport::BatonHandle& baton = nullptr) override {
+    StatusWith<CallbackHandle> scheduleRemoteCommand(const executor::RemoteCommandRequest& request,
+                                                     const RemoteCommandCallbackFn& cb,
+                                                     const BatonHandle& baton = nullptr) override {
         if (_shouldFailRequest(request)) {
             return Status(ErrorCodes::OperationFailed, "failed to schedule remote command");
         }
@@ -401,7 +395,7 @@ TEST_F(AbstractOplogFetcherTest,
             return shouldFailSchedule;
         });
     MockOplogFetcher oplogFetcher(&_executorProxy,
-                                  _getOpTimeWithHash(ops[0]),
+                                  _getOpTime(ops[0]),
                                   source,
                                   nss,
                                   maxFetcherRestarts,
@@ -432,7 +426,7 @@ TEST_F(AbstractOplogFetcherTest, OplogFetcherTimesOutCorrectlyOnInitialFindReque
     std::size_t maxFetcherRestarts = 0U;
     auto shutdownState = stdx::make_unique<ShutdownState>();
     MockOplogFetcher oplogFetcher(&getExecutor(),
-                                  _getOpTimeWithHash(ops[0]),
+                                  _getOpTime(ops[0]),
                                   source,
                                   nss,
                                   maxFetcherRestarts,
@@ -462,7 +456,7 @@ TEST_F(AbstractOplogFetcherTest, OplogFetcherTimesOutCorrectlyOnInitialFindReque
     oplogFetcher.join();
 
     // The fetcher should have shut down after its last request timed out.
-    ASSERT_EQUALS(ErrorCodes::NetworkTimeout, shutdownState->getStatus());
+    ASSERT_TRUE(ErrorCodes::isExceededTimeLimitError(shutdownState->getStatus().code()));
 }
 
 TEST_F(AbstractOplogFetcherTest, OplogFetcherTimesOutCorrectlyOnRetriedFindRequests) {
@@ -470,7 +464,7 @@ TEST_F(AbstractOplogFetcherTest, OplogFetcherTimesOutCorrectlyOnRetriedFindReque
     std::size_t maxFetcherRestarts = 1U;
     auto shutdownState = stdx::make_unique<ShutdownState>();
     MockOplogFetcher oplogFetcher(&getExecutor(),
-                                  _getOpTimeWithHash(ops[0]),
+                                  _getOpTime(ops[0]),
                                   source,
                                   nss,
                                   maxFetcherRestarts,
@@ -512,7 +506,7 @@ TEST_F(AbstractOplogFetcherTest, OplogFetcherTimesOutCorrectlyOnRetriedFindReque
     oplogFetcher.join();
 
     // The fetcher should have shut down after its last request timed out.
-    ASSERT_EQUALS(ErrorCodes::NetworkTimeout, shutdownState->getStatus());
+    ASSERT_TRUE(ErrorCodes::isExceededTimeLimitError(shutdownState->getStatus().code()));
 }
 
 bool sharedCallbackStateDestroyed = false;

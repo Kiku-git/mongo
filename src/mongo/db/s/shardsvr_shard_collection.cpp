@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -41,6 +40,7 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/hasher.h"
+#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/logical_clock.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
@@ -134,6 +134,22 @@ BSONObj makeCreateIndexesCmd(const NamespaceString& nss,
     createIndexes.append("indexes", BSON_ARRAY(index.obj()));
     createIndexes.append("writeConcern", WriteConcernOptions::Majority);
     return appendAllowImplicitCreate(createIndexes.obj(), true);
+}
+
+bool checkIfCollectionAlreadyShardedWithSameOptions(OperationContext* opCtx,
+                                                    const NamespaceString& nss,
+                                                    const ShardsvrShardCollection& request,
+                                                    BSONObjBuilder& result) {
+    if (auto existingColl = InitialSplitPolicy::checkIfCollectionAlreadyShardedWithSameOptions(
+            opCtx, nss, request, repl::ReadConcernLevel::kMajorityReadConcern)) {
+        result << "collectionsharded" << nss.ns();
+        if (existingColl->getUUID()) {
+            result << "collectionUUID" << *existingColl->getUUID();
+        }
+
+        return true;
+    }
+    return false;
 }
 
 /**
@@ -249,7 +265,7 @@ void createCollectionOrValidateExisting(OperationContext* opCtx,
         BSONObj res;
         auto success = localClient.runCommand("admin", checkShardingIndexCmd.obj(), res);
         uassert(ErrorCodes::OperationFailed, res["errmsg"].str(), success);
-    } else if (localClient.count(nss.ns()) != 0) {
+    } else if (!localClient.findOne(nss.ns(), Query()).isEmpty()) {
         // 4. if no useful index, and collection is non-empty, fail
         uasserted(ErrorCodes::InvalidOptions,
                   "Please create an index that starts with the proposed shard key before "
@@ -406,14 +422,13 @@ void shardCollection(OperationContext* opCtx,
                      bool unique,
                      const std::vector<BSONObj>& splitPoints,
                      const std::vector<TagsType>& tags,
-                     const bool fromMapReduce,
+                     bool fromMapReduce,
                      const ShardId& dbPrimaryShardId,
-                     const int numContiguousChunksPerShard) {
+                     int numContiguousChunksPerShard,
+                     bool isEmpty) {
     const auto shardRegistry = Grid::get(opCtx)->shardRegistry();
 
     const auto primaryShard = uassertStatusOK(shardRegistry->getShard(opCtx, dbPrimaryShardId));
-    const bool distributeChunks =
-        fromMapReduce || fieldsAndOrder.isHashedPattern() || !tags.empty();
 
     // Fail if there are partially written chunks from a previous failed shardCollection.
     checkForExistingChunks(opCtx, nss);
@@ -423,9 +438,10 @@ void shardCollection(OperationContext* opCtx,
         BSONObjBuilder collectionDetail;
         collectionDetail.append("shardKey", fieldsAndOrder.toBSON());
         collectionDetail.append("collection", nss.ns());
-        if (uuid) {
+        if (uuid)
             uuid->appendToBuilder(&collectionDetail, "uuid");
-        }
+        collectionDetail.append("empty", isEmpty);
+        collectionDetail.append("fromMapReduce", fromMapReduce);
         collectionDetail.append("primary", primaryShard->toString());
         collectionDetail.append("numChunks", static_cast<int>(splitPoints.size() + 1));
         uassertStatusOK(ShardingLogging::get(opCtx)->logChangeChecked(
@@ -449,7 +465,7 @@ void shardCollection(OperationContext* opCtx,
                                                                      dbPrimaryShardId,
                                                                      splitPoints,
                                                                      tags,
-                                                                     distributeChunks,
+                                                                     isEmpty,
                                                                      numContiguousChunksPerShard);
 
     // Create collections on all shards that will receive chunks. We need to do this after we mark
@@ -605,8 +621,22 @@ public:
             result << "collectionsharded" << nss.ns();
         } else {
             try {
+                if (checkIfCollectionAlreadyShardedWithSameOptions(opCtx, nss, request, result)) {
+                    status = Status::OK();
+                    scopedShardCollection.signalComplete(status);
+
+                    return true;
+                }
+
                 // Take the collection critical section so that no writes can happen.
                 CollectionCriticalSection critSec(opCtx, nss);
+
+                if (checkIfCollectionAlreadyShardedWithSameOptions(opCtx, nss, request, result)) {
+                    status = Status::OK();
+                    scopedShardCollection.signalComplete(status);
+
+                    return true;
+                }
 
                 auto proposedKey(request.getKey().getOwned());
                 ShardKeyPattern shardKeyPattern(proposedKey);
@@ -632,8 +662,13 @@ public:
                 const auto shardRegistry = grid->shardRegistry();
                 shardRegistry->reload(opCtx);
 
-                DBDirectClient localClient(opCtx);
-                bool isEmpty = (localClient.count(nss.ns()) == 0);
+                const bool isEmpty = [&] {
+                    // Use find with predicate instead of count in order to ensure that the count
+                    // command doesn't just consult the cached metadata, which may not always be
+                    // correct
+                    DBDirectClient localClient(opCtx);
+                    return localClient.findOne(nss.ns(), Query()).isEmpty();
+                }();
 
                 std::vector<ShardId> shardIds;
                 shardRegistry->getAllShardIds(opCtx, &shardIds);
@@ -643,14 +678,8 @@ public:
                 std::vector<BSONObj> finalSplitPoints;
 
                 if (request.getInitialSplitPoints()) {
-                    finalSplitPoints = std::move(*request.getInitialSplitPoints());
-                } else if (!tags.empty()) {
-                    // no need to find split points since we will create chunks based on
-                    // the existing zones
-                    uassert(ErrorCodes::InvalidOptions,
-                            str::stream() << "found existing zones but the collection is not empty",
-                            isEmpty);
-                } else {
+                    finalSplitPoints = *request.getInitialSplitPoints();
+                } else if (tags.empty()) {
                     InitialSplitPolicy::calculateHashedSplitPointsForEmptyCollection(
                         shardKeyPattern,
                         isEmpty,
@@ -670,12 +699,21 @@ public:
                 LOG(0) << "CMD: shardcollection: " << cmdObj;
 
                 audit::logShardCollection(
-                    Client::getCurrent(), nss.ns(), proposedKey, request.getUnique());
+                    opCtx->getClient(), nss.ns(), proposedKey, request.getUnique());
 
-                // The initial chunks are distributed evenly across shards if the initial split
-                // points were specified in the request by mapReduce or if we are using a hashed
-                // shard key. Otherwise, all the initial chunks are placed on the primary shard.
+                // Map/reduce with output to an empty collection assumes it has full control of the
+                // output collection and it would be an unsupported operation if the collection is
+                // being concurrently written
                 const bool fromMapReduce = bool(request.getInitialSplitPoints());
+                if (fromMapReduce) {
+                    uassert(ErrorCodes::ConflictingOperationInProgress,
+                            str::stream()
+                                << "Map reduce with sharded output to a new collection found "
+                                << nss.ns()
+                                << " to be non-empty which is not supported.",
+                            isEmpty);
+                }
+
                 const int numContiguousChunksPerShard = initialSplitPoints.empty()
                     ? 1
                     : (finalSplitPoints.size() + 1) / (initialSplitPoints.size() + 1);
@@ -691,7 +729,8 @@ public:
                                 tags,
                                 fromMapReduce,
                                 ShardingState::get(opCtx)->shardId(),
-                                numContiguousChunksPerShard);
+                                numContiguousChunksPerShard,
+                                isEmpty);
 
                 status = Status::OK();
             } catch (const DBException& e) {

@@ -1,6 +1,3 @@
-// expression_parser.h
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -65,6 +62,7 @@ enum class PathAcceptingKeyword {
     GREATER_THAN_OR_EQUAL,
     INTERNAL_EXPR_EQ,
     INTERNAL_SCHEMA_ALL_ELEM_MATCH_FROM_INDEX,
+    INTERNAL_SCHEMA_BIN_DATA_SUBTYPE,
     INTERNAL_SCHEMA_EQ,
     INTERNAL_SCHEMA_FMOD,
     INTERNAL_SCHEMA_MATCH_ARRAY_INDEX,
@@ -106,11 +104,6 @@ public:
         std::numeric_limits<unsigned long long>::max();
     static constexpr AllowedFeatureSet kDefaultSpecialFeatures =
         AllowedFeatures::kExpr | AllowedFeatures::kJSONSchema;
-
-    /**
-     * Constant double representation of 2^63.
-     */
-    static const double kLongLongMaxPlusOneAsDouble;
 
     /**
      * Parses PathAcceptingKeyword from 'typeElem'. Returns 'defaultKeyword' if 'typeElem'

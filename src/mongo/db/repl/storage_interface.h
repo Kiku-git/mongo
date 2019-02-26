@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -390,8 +389,11 @@ public:
      * Waits for oplog writes to be visible in the oplog.
      * This function is used to ensure tests do not fail due to initial sync receiving an empty
      * batch.
+     *
+     * primaryOnly: If this node is not primary, do nothing.
      */
-    virtual void waitForAllEarlierOplogWritesToBeVisible(OperationContext* opCtx) = 0;
+    virtual void waitForAllEarlierOplogWritesToBeVisible(OperationContext* opCtx,
+                                                         bool primaryOnly = false) = 0;
 
     /**
      * Returns the all committed timestamp. All transactions with timestamps earlier than the
@@ -400,6 +402,13 @@ public:
      * implementation.
      */
     virtual Timestamp getAllCommittedTimestamp(ServiceContext* serviceCtx) const = 0;
+
+    /**
+     * Returns the oldest read timestamp in use by an open transaction. Storage engines that support
+     * the 'snapshot' ReadConcern must provide an implementation. Other storage engines may provide
+     * a no-op implementation.
+     */
+    virtual Timestamp getOldestOpenReadTimestamp(ServiceContext* serviceCtx) const = 0;
 
     /**
      * Returns true if the storage engine supports document level locking.

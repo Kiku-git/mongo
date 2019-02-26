@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -113,6 +112,11 @@ OptionDescription::OptionDescription(const std::string& dottedName,
 
 OptionDescription& OptionDescription::hidden() {
     _isVisible = false;
+    return *this;
+}
+
+OptionDescription& OptionDescription::redact() {
+    _redact = true;
     return *this;
 }
 

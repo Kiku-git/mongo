@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -37,6 +36,7 @@
 #include <vector>
 
 #include "mongo/db/auth/restriction_environment.h"
+#include "mongo/db/service_context.h"
 #include "mongo/transport/service_state_machine.h"
 #include "mongo/transport/session.h"
 #include "mongo/util/log.h"
@@ -168,7 +168,7 @@ void ServiceEntryPointImpl::startSession(transport::SessionHandle session) {
               << connectionCount << word << " now open)";
     }
 
-    ssm->setCleanupHook([ this, ssmIt, session = std::move(session) ] {
+    ssm->setCleanupHook([ this, ssmIt, quiet, session = std::move(session) ] {
         size_t connectionCount;
         auto remote = session->remote();
         {
@@ -178,9 +178,11 @@ void ServiceEntryPointImpl::startSession(transport::SessionHandle session) {
             _currentConnections.store(connectionCount);
         }
         _shutdownCondition.notify_one();
-        const auto word = (connectionCount == 1 ? " connection"_sd : " connections"_sd);
-        log() << "end connection " << remote << " (" << connectionCount << word << " now open)";
 
+        if (!quiet) {
+            const auto word = (connectionCount == 1 ? " connection"_sd : " connections"_sd);
+            log() << "end connection " << remote << " (" << connectionCount << word << " now open)";
+        }
     });
 
     auto ownership = ServiceStateMachine::Ownership::kOwned;
@@ -244,6 +246,9 @@ void ServiceEntryPointImpl::appendStats(BSONObjBuilder* bob) const {
     bob->append("current", static_cast<int>(sessionCount));
     bob->append("available", static_cast<int>(_maxNumConnections - sessionCount));
     bob->append("totalCreated", static_cast<int>(_createdConnections.load()));
+    if (auto sc = getGlobalServiceContext()) {
+        bob->append("active", static_cast<int>(sc->getActiveClientOperations()));
+    }
 
     if (_adminInternalPool) {
         BSONObjBuilder section(bob->subobjStart("adminConnections"));

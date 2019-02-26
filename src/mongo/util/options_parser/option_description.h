@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -102,6 +101,12 @@ public:
      * Make this option hidden so it does not appear in command line help
      */
     OptionDescription& hidden();
+
+    /*
+     * Mark this option as sensitive so that attempts by a client to read this setting
+     * will only return a placeholder value rather than the real setting.
+     */
+    OptionDescription& redact();
 
     /*
      * Add a default value for this option if it is not specified
@@ -217,6 +222,7 @@ public:
                                // (required by boost)
     std::string _description;  // Description of option printed in help output
     bool _isVisible;           // Visible in help output
+    bool _redact = false;      // Value should not be exposed to inquiry
     Value _default;            // Value if option is not specified
     Value _implicit;           // Value if option is specified with no argument
     bool _isComposing;         // Aggregate values from different sources instead of overriding
@@ -242,6 +248,50 @@ public:
 
     // Canonicalizer method.
     Canonicalize_t _canonicalize;
+};
+
+template <OptionType T>
+struct OptionTypeMap;
+
+template <>
+struct OptionTypeMap<StringVector> {
+    using type = std::vector<std::string>;
+};
+template <>
+struct OptionTypeMap<StringMap> {
+    using type = std::vector<std::string>;
+};
+template <>
+struct OptionTypeMap<Bool> {
+    using type = bool;
+};
+template <>
+struct OptionTypeMap<Double> {
+    using type = double;
+};
+template <>
+struct OptionTypeMap<Int> {
+    using type = int;
+};
+template <>
+struct OptionTypeMap<Long> {
+    using type = long;
+};
+template <>
+struct OptionTypeMap<String> {
+    using type = std::string;
+};
+template <>
+struct OptionTypeMap<UnsignedLongLong> {
+    using type = unsigned long long;
+};
+template <>
+struct OptionTypeMap<Unsigned> {
+    using type = unsigned;
+};
+template <>
+struct OptionTypeMap<Switch> {
+    using type = bool;
 };
 
 }  // namespace optionenvironment

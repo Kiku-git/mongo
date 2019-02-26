@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -92,16 +91,16 @@ public:
         return countWorks;
     }
 
-    IndexDescriptor* getIndex(Database* db, const BSONObj& obj) {
+    const IndexDescriptor* getIndex(Database* db, const BSONObj& obj) {
         Collection* collection = db->getCollection(&_opCtx, ns());
-        std::vector<IndexDescriptor*> indexes;
+        std::vector<const IndexDescriptor*> indexes;
         collection->getIndexCatalog()->findIndexesByKeyPattern(&_opCtx, obj, false, &indexes);
         return indexes.empty() ? nullptr : indexes[0];
     }
 
     CountScanParams makeCountScanParams(OperationContext* opCtx,
                                         const IndexDescriptor* descriptor) {
-        return {opCtx, *descriptor};
+        return {opCtx, descriptor};
     }
 
     static const char* ns() {
@@ -330,10 +329,10 @@ public:
         }
 
         // Prepare the cursor to yield
-        count.saveState();
+        static_cast<PlanStage*>(&count)->saveState();
 
         // Recover from yield
-        count.restoreState();
+        static_cast<PlanStage*>(&count)->restoreState();
 
         // finish counting
         while (PlanStage::IS_EOF != countState) {
@@ -382,13 +381,13 @@ public:
         }
 
         // Prepare the cursor to yield
-        count.saveState();
+        static_cast<PlanStage*>(&count)->saveState();
 
         // Remove remaining objects
         remove(BSON("a" << GTE << 5));
 
         // Recover from yield
-        count.restoreState();
+        static_cast<PlanStage*>(&count)->restoreState();
 
         // finish counting
         while (PlanStage::IS_EOF != countState) {
@@ -437,7 +436,7 @@ public:
         }
 
         // Prepare the cursor to yield
-        count.saveState();
+        static_cast<PlanStage*>(&count)->saveState();
 
         // Insert one document before the end
         insert(BSON("a" << 5.5));
@@ -446,7 +445,7 @@ public:
         insert(BSON("a" << 6.5));
 
         // Recover from yield
-        count.restoreState();
+        static_cast<PlanStage*>(&count)->restoreState();
 
         // finish counting
         while (PlanStage::IS_EOF != countState) {
@@ -560,13 +559,13 @@ public:
         }
 
         // Prepare the cursor to yield
-        count.saveState();
+        static_cast<PlanStage*>(&count)->saveState();
 
         // Mark the key at position 5 as 'unused'
         remove(BSON("a" << 1 << "b" << 5));
 
         // Recover from yield
-        count.restoreState();
+        static_cast<PlanStage*>(&count)->restoreState();
 
         // finish counting
         while (PlanStage::IS_EOF != countState) {

@@ -1,7 +1,3 @@
-// #file dbtests.cpp : Runs db unit tests.
-//
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -31,6 +27,10 @@
  *    it in the license file.
  */
 
+/**
+ * Runs db unit tests.
+ */
+
 #include "mongo/platform/basic.h"
 
 #include "mongo/dbtests/dbtests.h"
@@ -39,7 +39,6 @@
 #include "mongo/base/initializer.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/catalog/multi_index_block.h"
-#include "mongo/db/catalog/multi_index_block_impl.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/db/db_raii.h"
@@ -105,20 +104,26 @@ Status createIndexFromSpec(OperationContext* opCtx, StringData ns, const BSONObj
         invariant(coll);
         wunit.commit();
     }
-    MultiIndexBlockImpl indexer(opCtx, coll);
-    Status status = indexer.init(spec).getStatus();
+    MultiIndexBlock indexer;
+    ON_BLOCK_EXIT([&] { indexer.cleanUpAfterBuild(opCtx, coll); });
+    Status status = indexer.init(opCtx, coll, spec, MultiIndexBlock::kNoopOnInitFn).getStatus();
     if (status == ErrorCodes::IndexAlreadyExists) {
         return Status::OK();
     }
     if (!status.isOK()) {
         return status;
     }
-    status = indexer.insertAllDocumentsInCollection();
+    status = indexer.insertAllDocumentsInCollection(opCtx, coll);
+    if (!status.isOK()) {
+        return status;
+    }
+    status = indexer.checkConstraints(opCtx);
     if (!status.isOK()) {
         return status;
     }
     WriteUnitOfWork wunit(opCtx);
-    indexer.commit();
+    ASSERT_OK(indexer.commit(
+        opCtx, coll, MultiIndexBlock::kNoopOnCreateEachFn, MultiIndexBlock::kNoopOnCommitFn));
     wunit.commit();
     return Status::OK();
 }

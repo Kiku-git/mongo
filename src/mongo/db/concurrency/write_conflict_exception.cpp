@@ -1,6 +1,3 @@
-// write_conflict_exception.cpp
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -35,11 +32,12 @@
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/server_parameters.h"
 #include "mongo/util/log.h"
+#include "mongo/util/log_and_backoff.h"
 #include "mongo/util/stacktrace.h"
 
 namespace mongo {
 
-AtomicBool WriteConflictException::trace(false);
+AtomicWord<bool> WriteConflictException::trace(false);
 
 WriteConflictException::WriteConflictException()
     : DBException(Status(ErrorCodes::WriteConflict, "WriteConflict")) {
@@ -49,23 +47,12 @@ WriteConflictException::WriteConflictException()
 }
 
 void WriteConflictException::logAndBackoff(int attempt, StringData operation, StringData ns) {
-    LOG(1) << "Caught WriteConflictException doing " << operation << " on " << ns
-           << ", attempt: " << attempt << " retrying";
-
-    // All numbers below chosen by guess and check against a few random benchmarks.
-    if (attempt < 4) {
-        // no-op
-    } else if (attempt < 10) {
-        sleepmillis(1);
-    } else if (attempt < 100) {
-        sleepmillis(5);
-    } else if (attempt < 200) {
-        sleepmillis(10);
-    } else {
-        sleepmillis(100);
-    }
+    mongo::logAndBackoff(
+        ::mongo::logger::LogComponent::kWrite,
+        logger::LogSeverity::Debug(1),
+        static_cast<size_t>(attempt),
+        str::stream() << "Caught WriteConflictException doing " << operation << " on " << ns);
 }
-
 namespace {
 // for WriteConflictException
 ExportedServerParameter<bool, ServerParameterType::kStartupAndRuntime> TraceWCExceptionsSetting(

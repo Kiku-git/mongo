@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -33,10 +32,12 @@
 #include <memory>
 
 #include "mongo/base/status.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/stdx/functional.h"
 #include "mongo/transport/session.h"
 #include "mongo/util/functional.h"
 #include "mongo/util/future.h"
+#include "mongo/util/out_of_line_executor.h"
 #include "mongo/util/time_support.h"
 
 namespace mongo {
@@ -109,8 +110,8 @@ public:
     enum WhichReactor { kIngress, kEgress, kNewReactor };
     virtual ReactorHandle getReactor(WhichReactor which) = 0;
 
-    virtual BatonHandle makeBaton(OperationContext* opCtx) {
-        return nullptr;
+    virtual BatonHandle makeBaton(OperationContext* opCtx) const {
+        return opCtx->getServiceContext()->makeBaton(opCtx);
     }
 
 protected:
@@ -119,7 +120,8 @@ protected:
 
 class ReactorTimer {
 public:
-    ReactorTimer() = default;
+    ReactorTimer();
+
     ReactorTimer(const ReactorTimer&) = delete;
     ReactorTimer& operator=(const ReactorTimer&) = delete;
 
@@ -127,6 +129,10 @@ public:
      * The destructor calls cancel() to ensure outstanding Futures are filled.
      */
     virtual ~ReactorTimer() = default;
+
+    size_t id() const {
+        return _id;
+    }
 
     /*
      * Cancel any outstanding future from waitFor/waitUntil. The future will be filled with an
@@ -142,9 +148,12 @@ public:
      * Calling this implicitly calls cancel().
      */
     virtual Future<void> waitUntil(Date_t deadline, const BatonHandle& baton = nullptr) = 0;
+
+private:
+    const size_t _id;
 };
 
-class Reactor {
+class Reactor : public OutOfLineExecutor {
 public:
     Reactor(const Reactor&) = delete;
     Reactor& operator=(const Reactor&) = delete;
@@ -159,20 +168,8 @@ public:
     virtual void stop() = 0;
     virtual void drain() = 0;
 
-    using Task = unique_function<void()>;
-
-    enum ScheduleMode { kDispatch, kPost };
-    virtual void schedule(ScheduleMode mode, Task task) = 0;
-
-    template <typename Callback>
-    Future<FutureContinuationResult<Callback>> execute(Callback&& cb) {
-        auto pf = makePromiseFuture<FutureContinuationResult<Callback>>();
-        schedule(kPost, [ cb = std::forward<Callback>(cb), p = std::move(pf.promise) ]() mutable {
-            p.setWith(cb);
-        });
-
-        return std::move(pf.future);
-    }
+    virtual void schedule(Task task) = 0;
+    virtual void dispatch(Task task) = 0;
 
     virtual bool onReactorThread() const = 0;
 

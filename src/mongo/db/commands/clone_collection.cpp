@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -44,7 +43,6 @@
 #include "mongo/db/cloner.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/rename_collection.h"
-#include "mongo/db/db.h"
 #include "mongo/db/index_builder.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/namespace_string.h"
@@ -60,6 +58,10 @@ using std::string;
 using std::stringstream;
 using std::endl;
 
+/**
+ * The cloneCollection command is deprecated.
+ * See http://dochub.mongodb.org/core/clonecollection-deprecation.
+ */
 class CmdCloneCollection : public ErrmsgCommandDeprecated {
 public:
     CmdCloneCollection() : ErrmsgCommandDeprecated("cloneCollection") {}
@@ -108,6 +110,12 @@ public:
                            const BSONObj& cmdObj,
                            string& errmsg,
                            BSONObjBuilder& result) {
+        const char* deprecationWarning =
+            "Support for the cloneCollection command has been deprecated. See "
+            "http://dochub.mongodb.org/core/clonecollection-deprecation";
+        warning() << deprecationWarning;
+        result.append("note", deprecationWarning);
+
         boost::optional<DisableDocumentValidation> maybeDisableValidation;
         if (shouldBypassDocumentValidationForCommand(cmdObj))
             maybeDisableValidation.emplace(opCtx);

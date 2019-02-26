@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -55,7 +54,7 @@ public:
         _sessionPool.reset(new MobileSessionPool(_fullPath));
     }
 
-    std::unique_ptr<SortedDataInterface> newSortedDataInterface(bool isUnique) {
+    std::unique_ptr<SortedDataInterface> newSortedDataInterface(bool isUnique, bool isPartial) {
         std::string ident("index_" + std::to_string(inc++));
         OperationContextNoop opCtx(newRecoveryUnit().release());
         Status status = MobileIndex::create(&opCtx, ident);

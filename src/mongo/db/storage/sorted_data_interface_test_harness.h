@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -51,6 +50,10 @@ const BSONObj key3 = BSON("" << 3);
 const BSONObj key4 = BSON("" << 4);
 const BSONObj key5 = BSON("" << 5);
 const BSONObj key6 = BSON("" << 6);
+const BSONObj key7 = BSON(""
+                          << "\x00");
+const BSONObj key8 = BSON(""
+                          << "\xff");
 
 const BSONObj compoundKey1a = BSON("" << 1 << ""
                                       << "a");
@@ -86,7 +89,8 @@ class RecoveryUnit;
 
 class SortedDataInterfaceHarnessHelper : public virtual HarnessHelper {
 public:
-    virtual std::unique_ptr<SortedDataInterface> newSortedDataInterface(bool unique) = 0;
+    virtual std::unique_ptr<SortedDataInterface> newSortedDataInterface(bool unique,
+                                                                        bool partial) = 0;
 
     /**
      * Creates a new SDI with some initial data.
@@ -94,7 +98,7 @@ public:
      * For clarity to readers, toInsert must be sorted.
      */
     std::unique_ptr<SortedDataInterface> newSortedDataInterface(
-        bool unique, std::initializer_list<IndexKeyEntry> toInsert);
+        bool unique, bool partial, std::initializer_list<IndexKeyEntry> toInsert);
 };
 
 /**

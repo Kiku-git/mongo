@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -34,7 +33,6 @@
 
 #include "mongo/db/s/sharding_initialization_mongod.h"
 
-#include "mongo/base/status.h"
 #include "mongo/client/connection_string.h"
 #include "mongo/client/global_conn_pool.h"
 #include "mongo/client/remote_command_targeter.h"
@@ -53,6 +51,7 @@
 #include "mongo/db/s/read_only_catalog_cache_loader.h"
 #include "mongo/db/s/shard_server_catalog_cache_loader.h"
 #include "mongo/db/s/sharding_config_optime_gossip.h"
+#include "mongo/db/s/transaction_coordinator_service.h"
 #include "mongo/db/server_options.h"
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/rpc/metadata/egress_metadata_hook_list.h"
@@ -122,16 +121,21 @@ void initializeShardingEnvironmentOnShardServer(OperationContext* opCtx,
 
     // Determine primary/secondary/standalone state in order to properly initialize sharding
     // components.
-    auto replCoord = repl::ReplicationCoordinator::get(opCtx);
+    const auto replCoord = repl::ReplicationCoordinator::get(opCtx);
     bool isReplSet = replCoord->getReplicationMode() == repl::ReplicationCoordinator::modeReplSet;
     bool isStandaloneOrPrimary =
-        !isReplSet || (repl::ReplicationCoordinator::get(opCtx)->getMemberState() ==
-                       repl::MemberState::RS_PRIMARY);
+        !isReplSet || (replCoord->getMemberState() == repl::MemberState::RS_PRIMARY);
 
     CatalogCacheLoader::get(opCtx).initializeReplicaSetRole(isStandaloneOrPrimary);
     ChunkSplitter::get(opCtx).onShardingInitialization(isStandaloneOrPrimary);
     PeriodicBalancerConfigRefresher::get(opCtx).onShardingInitialization(opCtx->getServiceContext(),
                                                                          isStandaloneOrPrimary);
+
+    // Start the transaction coordinator service only if the node is the primary of a replica set
+    TransactionCoordinatorService::get(opCtx)->onShardingInitialization(
+        opCtx, isReplSet && isStandaloneOrPrimary);
+
+    Grid::get(opCtx)->setShardingInitialized();
 
     LOG(0) << "Finished initializing sharding components for "
            << (isStandaloneOrPrimary ? "primary" : "secondary") << " node.";
@@ -399,8 +403,6 @@ void initializeGlobalShardingStateForMongoD(OperationContext* opCtx,
         replCoord->getMemberState().primary()) {
         LogicalTimeValidator::get(opCtx)->enableKeyGenerator(opCtx, true);
     }
-
-    Grid::get(opCtx)->setShardingInitialized();
 }
 
 }  // namespace mongo

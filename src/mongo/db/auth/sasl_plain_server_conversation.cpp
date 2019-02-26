@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -55,7 +54,7 @@ StatusWith<bool> trySCRAM(const User::CredentialData& credentials, StringData pw
     }
 
     const auto decodedSalt = base64::decode(scram.salt);
-    scram::Secrets<HashBlock> secrets(scram::Presecrets<HashBlock>(
+    scram::Secrets<HashBlock, scram::UnlockedSecretsPolicy> secrets(scram::Presecrets<HashBlock>(
         pwd.toString(),
         std::vector<std::uint8_t>(reinterpret_cast<const std::uint8_t*>(decodedSalt.c_str()),
                                   reinterpret_cast<const std::uint8_t*>(decodedSalt.c_str()) +

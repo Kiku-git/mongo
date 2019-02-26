@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -100,6 +99,12 @@ public:
     }
 
     StatusWith<UserHandle> acquireUser(OperationContext*, const UserName&) override {
+        UASSERT_NOT_IMPLEMENTED;
+    }
+
+    StatusWith<UserHandle> acquireUserForSessionRefresh(OperationContext*,
+                                                        const UserName&,
+                                                        const User::UserId&) override {
         UASSERT_NOT_IMPLEMENTED;
     }
 

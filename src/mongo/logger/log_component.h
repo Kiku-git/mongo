@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -71,6 +70,7 @@ public:
         kBridge,
         kTracking,
         kTransaction,
+        kConnectionPool,
         kNumLogComponents
     };
 

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -33,6 +32,7 @@
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/cloner.h"
+#include "mongo/db/cloner_gen.h"
 
 #include "mongo/base/status.h"
 #include "mongo/bson/unordered_fields_bsonobj_comparator.h"
@@ -44,8 +44,8 @@
 #include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_holder.h"
+#include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/multi_index_block.h"
-#include "mongo/db/catalog/multi_index_block_impl.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/list_collections_filter.h"
 #include "mongo/db/commands/rename_collection.h"
@@ -63,7 +63,6 @@
 #include "mongo/db/server_parameters.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/storage_options.h"
-#include "mongo/s/grid.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point_service.h"
 #include "mongo/util/log.h"
@@ -80,7 +79,6 @@ using std::vector;
 
 using IndexVersion = IndexDescriptor::IndexVersion;
 
-MONGO_EXPORT_SERVER_PARAMETER(skipCorruptDocumentsWhenCloning, bool, false);
 MONGO_FAIL_POINT_DEFINE(movePrimaryFailPoint);
 
 BSONElement getErrField(const BSONObj& o);
@@ -142,7 +140,8 @@ struct Cloner::Fun {
                 repl::ReplicationCoordinator::get(opCtx)->canAcceptWritesFor(opCtx, to_collection));
 
         // Make sure database still exists after we resume from the temp release
-        Database* db = DatabaseHolder::getDatabaseHolder().openDb(opCtx, _dbName);
+        auto databaseHolder = DatabaseHolder::get(opCtx);
+        auto db = databaseHolder->openDb(opCtx, _dbName);
 
         bool createdCollection = false;
         Collection* collection = NULL;
@@ -161,16 +160,18 @@ struct Cloner::Fun {
                 CollectionOptions collectionOptions;
                 uassertStatusOK(collectionOptions.parse(
                     from_options, CollectionOptions::ParseKind::parseForCommand));
-                Status s = Database::userCreateNS(
-                    opCtx,
-                    db,
-                    to_collection.toString(),
-                    collectionOptions,
-                    createDefaultIndexes,
-                    fixIndexSpec(to_collection.db().toString(), from_id_index));
-                verify(s.isOK());
+                auto indexSpec = fixIndexSpec(to_collection.db().toString(), from_id_index);
+                invariant(
+                    db->userCreateNS(
+                        opCtx, to_collection, collectionOptions, createDefaultIndexes, indexSpec),
+                    str::stream() << "collection creation failed during clone ["
+                                  << to_collection.ns()
+                                  << "]");
                 wunit.commit();
                 collection = db->getCollection(opCtx, to_collection);
+                invariant(collection,
+                          str::stream() << "Missing collection during clone [" << to_collection.ns()
+                                        << "]");
             });
         }
 
@@ -203,7 +204,7 @@ struct Cloner::Fun {
                 }
 
                 // TODO: SERVER-16598 abort if original db or collection is gone.
-                db = DatabaseHolder::getDatabaseHolder().get(opCtx, _dbName);
+                db = databaseHolder->getDb(opCtx, _dbName);
                 uassert(28593,
                         str::stream() << "Database " << _dbName << " dropped while cloning",
                         db != NULL);
@@ -242,7 +243,7 @@ struct Cloner::Fun {
                 str::stream ss;
                 ss << "Cloner: found corrupt document in " << from_collection.toString() << ": "
                    << redact(status);
-                if (skipCorruptDocumentsWhenCloning.load()) {
+                if (gSkipCorruptDocumentsWhenCloning.load()) {
                     warning() << ss.ss.str() << "; skipping";
                     continue;
                 }
@@ -363,7 +364,8 @@ void Cloner::copyIndexes(OperationContext* opCtx,
 
     // We are under lock here again, so reload the database in case it may have disappeared
     // during the temp release
-    Database* db = DatabaseHolder::getDatabaseHolder().openDb(opCtx, toDBName);
+    auto databaseHolder = DatabaseHolder::get(opCtx);
+    auto db = databaseHolder->openDb(opCtx, toDBName);
 
     Collection* collection = db->getCollection(opCtx, to_collection);
     if (!collection) {
@@ -375,18 +377,28 @@ void Cloner::copyIndexes(OperationContext* opCtx,
             uassertStatusOK(
                 collectionOptions.parse(from_opts, CollectionOptions::ParseKind::parseForCommand));
             const bool createDefaultIndexes = true;
-            Status s = Database::userCreateNS(
-                opCtx,
-                db,
-                to_collection.toString(),
-                collectionOptions,
-                createDefaultIndexes,
-                fixIndexSpec(to_collection.db().toString(), getIdIndexSpec(from_indexes)));
-            invariant(s.isOK());
-            collection = db->getCollection(opCtx, to_collection);
-            invariant(collection);
+            invariant(db->userCreateNS(opCtx,
+                                       to_collection,
+                                       collectionOptions,
+                                       createDefaultIndexes,
+                                       fixIndexSpec(to_collection.db().toString(),
+                                                    getIdIndexSpec(from_indexes))),
+                      str::stream() << "Collection creation failed while copying indexes from "
+                                    << from_collection.ns()
+                                    << " to "
+                                    << to_collection.ns()
+                                    << " (Cloner)");
             wunit.commit();
+            collection = db->getCollection(opCtx, to_collection);
+            invariant(collection,
+                      str::stream() << "Missing collection " << to_collection.ns() << " (Cloner)");
         });
+    }
+
+    auto indexCatalog = collection->getIndexCatalog();
+    auto prunedIndexesToBuild = indexCatalog->removeExistingIndexes(opCtx, indexesToBuild);
+    if (prunedIndexesToBuild.empty()) {
+        return;
     }
 
     // TODO pass the MultiIndexBlock when inserting into the collection rather than building the
@@ -394,18 +406,18 @@ void Cloner::copyIndexes(OperationContext* opCtx,
     // from creation to completion without yielding to ensure the index and the collection
     // matches. It also wouldn't work on non-empty collections so we would need both
     // implementations anyway as long as that is supported.
-    MultiIndexBlockImpl indexer(opCtx, collection);
-    indexer.allowInterruption();
+    MultiIndexBlock indexer;
 
-    indexer.removeExistingIndexes(&indexesToBuild);
-    if (indexesToBuild.empty())
-        return;
+    // The code below throws, so ensure build cleanup occurs.
+    ON_BLOCK_EXIT([&] { indexer.cleanUpAfterBuild(opCtx, collection); });
 
-    auto indexInfoObjs = uassertStatusOK(indexer.init(indexesToBuild));
-    uassertStatusOK(indexer.insertAllDocumentsInCollection());
+    auto indexInfoObjs = uassertStatusOK(
+        indexer.init(opCtx, collection, prunedIndexesToBuild, MultiIndexBlock::kNoopOnInitFn));
+    uassertStatusOK(indexer.insertAllDocumentsInCollection(opCtx, collection));
 
     WriteUnitOfWork wunit(opCtx);
-    indexer.commit();
+    uassertStatusOK(indexer.commit(
+        opCtx, collection, MultiIndexBlock::kNoopOnCreateEachFn, MultiIndexBlock::kNoopOnCommitFn));
     if (opCtx->writesAreReplicated()) {
         for (auto&& infoObj : indexInfoObjs) {
             getGlobalServiceContext()->getOpObserver()->onCreateIndex(
@@ -472,7 +484,8 @@ bool Cloner::copyCollection(OperationContext* opCtx,
             !opCtx->writesAreReplicated() ||
                 repl::ReplicationCoordinator::get(opCtx)->canAcceptWritesFor(opCtx, nss));
 
-    Database* db = DatabaseHolder::getDatabaseHolder().openDb(opCtx, dbname);
+    auto databaseHolder = DatabaseHolder::get(opCtx);
+    auto db = databaseHolder->openDb(opCtx, dbname);
 
     if (shouldCreateCollection) {
         bool result = writeConflictRetry(opCtx, "createCollection", ns, [&] {
@@ -482,8 +495,8 @@ bool Cloner::copyCollection(OperationContext* opCtx,
             CollectionOptions collectionOptions;
             uassertStatusOK(collectionOptions.parse(options, optionsParser));
             const bool createDefaultIndexes = true;
-            Status status = Database::userCreateNS(
-                opCtx, db, ns, collectionOptions, createDefaultIndexes, idIndexSpec);
+            Status status =
+                db->userCreateNS(opCtx, nss, collectionOptions, createDefaultIndexes, idIndexSpec);
             if (!status.isOK()) {
                 errmsg = status.toString();
                 // abort write unit of work
@@ -562,7 +575,8 @@ Status Cloner::createCollectionsForDb(
     const std::vector<CreateCollectionParams>& createCollectionParams,
     const std::string& dbName,
     const CloneOptions& opts) {
-    Database* db = DatabaseHolder::getDatabaseHolder().openDb(opCtx, dbName);
+    auto databaseHolder = DatabaseHolder::get(opCtx);
+    auto db = databaseHolder->openDb(opCtx, dbName);
     invariant(opCtx->lockState()->isDbLockedForMode(dbName, MODE_X));
 
     auto collCount = 0;
@@ -636,13 +650,9 @@ Status Cloner::createCollectionsForDb(
                 CollectionOptions collectionOptions;
                 uassertStatusOK(collectionOptions.parse(
                     options, CollectionOptions::ParseKind::parseForStorage));
-                Status createStatus =
-                    Database::userCreateNS(opCtx,
-                                           db,
-                                           nss.ns(),
-                                           collectionOptions,
-                                           createDefaultIndexes,
-                                           fixIndexSpec(nss.db().toString(), params.idIndexSpec));
+                auto indexSpec = fixIndexSpec(nss.db().toString(), params.idIndexSpec);
+                Status createStatus = db->userCreateNS(
+                    opCtx, nss, collectionOptions, createDefaultIndexes, indexSpec);
                 if (!createStatus.isOK()) {
                     return createStatus;
                 }

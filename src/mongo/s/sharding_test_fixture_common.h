@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -49,7 +48,7 @@ class TaskExecutor;
  */
 class ShardingTestFixtureCommon {
 public:
-    static constexpr Seconds kFutureTimeout{5};
+    static constexpr Seconds kFutureTimeout{15};
 
     ShardingTestFixtureCommon();
     ~ShardingTestFixtureCommon();
@@ -64,6 +63,18 @@ public:
         invariant(_mockNetwork);
         return _mockNetwork;
     }
+
+    /**
+     * Blocking methods, which receive one message from the network and respond using the responses
+     * returned from the input function. This is a syntactic sugar for simple, single request +
+     * response or find tests.
+     */
+    void onCommand(executor::NetworkTestEnv::OnCommandFunction func);
+    void onCommands(std::vector<executor::NetworkTestEnv::OnCommandFunction> funcs);
+    void onCommandWithMetadata(executor::NetworkTestEnv::OnCommandWithMetadataFunction func);
+    void onFindCommand(executor::NetworkTestEnv::OnFindCommandFunction func);
+    void onFindWithMetadataCommand(
+        executor::NetworkTestEnv::OnFindCommandWithMetadataFunction func);
 
 protected:
     // Since a NetworkInterface is a private member of a TaskExecutor, we store a raw pointer to the

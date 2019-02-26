@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -161,7 +160,7 @@ int removeSessionsRecords(OperationContext* opCtx,
     Locker::LockSnapshot snapshot;
     invariant(locker->saveLockStateAndUnlock(&snapshot));
 
-    const auto guard = MakeGuard([&] {
+    const auto guard = makeGuard([&] {
         UninterruptibleLockGuard noInterrupt(opCtx->lockState());
         locker->restoreLockState(opCtx, snapshot);
     });

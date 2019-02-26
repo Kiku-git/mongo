@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -70,8 +69,17 @@ public:
 
         rpc::OpMsgReplyBuilder replyBuilder;
 
-        auto status = runAggregate(
-            opCtx, request.getNamespaceString(), request, std::move(aggCmdObj), &replyBuilder);
+        PrivilegeVector privileges;
+        if (!aggCmdObj["$ownOps"].trueValue()) {
+            privileges = {Privilege(ResourcePattern::forClusterResource(), ActionType::inprog)};
+        }
+
+        auto status = runAggregate(opCtx,
+                                   request.getNamespaceString(),
+                                   request,
+                                   std::move(aggCmdObj),
+                                   privileges,
+                                   &replyBuilder);
 
         if (!status.isOK()) {
             return status;

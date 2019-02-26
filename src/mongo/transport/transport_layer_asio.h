@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -136,7 +135,9 @@ public:
         return _listenerPort;
     }
 
-    BatonHandle makeBaton(OperationContext* opCtx) override;
+#ifdef __linux__
+    BatonHandle makeBaton(OperationContext* opCtx) const override;
+#endif
 
 private:
     class BatonASIO;

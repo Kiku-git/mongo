@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -33,7 +32,6 @@
 #include <iostream>
 #include <string>
 
-#include "mongo/db/catalog/multi_index_block.h"
 #include "mongo/db/client.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/index/index_descriptor.h"
@@ -87,10 +85,10 @@ public:
                              BSONObj keyPattern,
                              const MultikeyPaths& expectedMultikeyPaths) {
         IndexCatalog* indexCatalog = collection->getIndexCatalog();
-        std::vector<IndexDescriptor*> indexes;
+        std::vector<const IndexDescriptor*> indexes;
         indexCatalog->findIndexesByKeyPattern(_opCtx.get(), keyPattern, false, &indexes);
         ASSERT_EQ(indexes.size(), 1U);
-        IndexDescriptor* desc = indexes[0];
+        auto desc = indexes[0];
         const IndexCatalogEntry* ice = indexCatalog->getEntry(desc);
 
         auto actualMultikeyPaths = ice->getMultikeyPaths(_opCtx.get());

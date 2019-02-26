@@ -31,12 +31,15 @@
 from __future__ import absolute_import, print_function, unicode_literals
 
 from abc import ABCMeta, abstractmethod
+import copy
 import io
 import os
+import re
 import string
 import sys
 import textwrap
-from typing import cast, List, Mapping, Union
+import hashlib
+from typing import cast, Dict, List, Mapping, Tuple, Union
 
 from . import ast
 from . import bson
@@ -91,11 +94,7 @@ def _get_field_constant_name(field):
 
 def _get_field_member_validator_name(field):
     # type (ast.Field) -> unicode
-    """
-    Get the name of the validator method for this field.
-
-    Fields with no validation rules will have a stub validator which returns Status::OK().
-    """
+    """Get the name of the validator method for this field."""
     return 'validate%s' % common.title_case(field.cpp_name)
 
 
@@ -131,6 +130,51 @@ def _get_bson_type_check(bson_element, ctxt_name, field):
     else:
         type_list = '{%s}' % (', '.join([bson.cpp_bson_type_name(b) for b in bson_types]))
         return '%s.checkAndAssertTypes(%s, %s)' % (ctxt_name, bson_element, type_list)
+
+
+def _get_comparison(field, rel_op, left, right):
+    # type: (ast.Field, unicode, unicode, unicode) -> unicode
+    """Generate a comparison for a field."""
+    name = _get_field_member_name(field)
+    if not "BSONObj" in field.cpp_type:
+        return "%s.%s %s %s.%s" % (left, name, rel_op, right, name)
+
+    access = name
+    if field.optional:
+        access = name + ".get()"
+
+    comp = "(SimpleBSONObjComparator::kInstance.compare(%s.%s, %s.%s) %s 0)" % (left, access, right,
+                                                                                access, rel_op)
+
+    # boost::optional implements the various operator comparisons but we need to reimplement them
+    # for BSONObj
+    if field.optional:
+        if rel_op == "==":
+            # optional values are equal if they do not contain values otherwise compare the values
+            pred = "( (static_cast<bool>(${left}.${name}) == static_cast<bool>(${right}.${name}))" +\
+                " && (!static_cast<bool>(${left}.${name}) || ${comp}) )"
+        elif rel_op == "!=":
+            pred = "( (static_cast<bool>(${left}.${name}) != static_cast<bool>(${right}.${name}))" +\
+                " && (static_cast<bool>(${left}.${name}) && ${comp}) )"
+        elif rel_op == "<":
+            pred = "( static_cast<bool>(${right}.${name}) && (!static_cast<bool>(${left}.${name})" +\
+                " || ${comp}) )"
+
+        comp = common.template_args(pred, name=name, comp=comp, left=left, right=right)
+
+    return comp
+
+
+def _get_comparison_less(fields):
+    # type: (List[ast.Field]) -> unicode
+    """Generate a less than comparison for a list of fields recursively."""
+    field = fields[0]
+    if len(fields) == 1:
+        return _get_comparison(field, "<", "left", "right")
+
+    return "%s || (!(%s) && (%s))" % (_get_comparison(field, "<", "left", "right"),
+                                      _get_comparison(field, "<", "right", "left"),
+                                      _get_comparison_less(fields[1:]))
 
 
 def _get_all_fields(struct):
@@ -228,6 +272,12 @@ def _gen_field_usage_constant(field):
     return "k%sBit" % (common.title_case(field.cpp_name))
 
 
+def _get_constant(name):
+    # type: (unicode) -> unicode
+    """Transform an arbitrary label to a constant name."""
+    return 'k' + re.sub(r'([^a-zA-Z0-9_]+)', '_', common.title_case(name))
+
+
 class _FastFieldUsageChecker(_FieldUsageCheckerBase):
     """
     Check for duplicate fields, and required fields as needed.
@@ -314,12 +364,31 @@ def _encaps(val):
     # type: (unicode) -> unicode
     if val is None:
         return '""'
-    assert isinstance(val, unicode)
 
     for i in ["\\", '"', "'"]:
         if i in val:
             val = val.replace(i, '\\' + i)
     return '"' + val + '"'
+
+
+# Turn a list of pything strings into a C++ initializer list.
+def _encaps_list(vals):
+    # type: (List[unicode]) -> unicode
+    if vals is None:
+        return '{}'
+
+    return '{' + ', '.join([_encaps(v) for v in vals]) + '}'
+
+
+# Translate an ast.Expression into C++ code.
+def _get_expression(expr):
+    # type: (ast.Expression) -> unicode
+    if not expr.validate_constexpr:
+        return expr.expr
+
+    # Wrap in a lambda to let the compiler enforce constexprness for us.
+    # The optimization pass should end up inlining it.
+    return '([]{ constexpr auto value = %s; return value; })()' % expr.expr
 
 
 class _CppFileWriterBase(object):
@@ -374,11 +443,14 @@ class _CppFileWriterBase(object):
 
         return writer.NamespaceScopeBlock(self._writer, namespace_list)
 
-    def get_initializer_lambda(self, decl, unused=False):
-        # type: (unicode, bool) -> writer.IndentedScopedBlock
+    def get_initializer_lambda(self, decl, unused=False, return_type=None):
+        # type: (unicode, bool, unicode) -> writer.IndentedScopedBlock
         """Generate an indented block lambda initializing an outer scope variable."""
         prefix = 'MONGO_COMPILER_VARIABLE_UNUSED ' if unused else ''
-        return writer.IndentedScopedBlock(self._writer, prefix + decl + ' = ([] {', '})();')
+        prefix = prefix + decl + ' = ([]'
+        if return_type:
+            prefix = prefix + '() -> ' + return_type
+        return writer.IndentedScopedBlock(self._writer, prefix + ' {', '})();')
 
     def gen_description_comment(self, description):
         # type: (unicode) -> None
@@ -402,8 +474,8 @@ class _CppFileWriterBase(object):
 
         return writer.IndentedScopedBlock(self._writer, opening, closing)
 
-    def _predicate(self, check_str, use_else_if=False):
-        # type: (unicode, bool) -> Union[writer.IndentedScopedBlock,writer.EmptyBlock]
+    def _predicate(self, check_str, use_else_if=False, constexpr=False):
+        # type: (unicode, bool, bool) -> Union[writer.IndentedScopedBlock,writer.EmptyBlock]
         """
         Generate an if block if the condition is not-empty.
 
@@ -416,7 +488,36 @@ class _CppFileWriterBase(object):
         if use_else_if:
             conditional = 'else if'
 
+        if constexpr:
+            conditional = conditional + ' constexpr'
+
         return writer.IndentedScopedBlock(self._writer, '%s (%s) {' % (conditional, check_str), '}')
+
+    def _condition(self, condition, preprocessor_only=False):
+        # type: (ast.Condition, bool) -> writer.WriterBlock
+        """Generate one or more blocks for multiple conditional types."""
+
+        if not condition:
+            return writer.EmptyBlock()
+
+        blocks = []  # type: List[writer.WriterBlock]
+        if condition.preprocessor:
+            blocks.append(
+                writer.UnindentedBlock(self._writer, '#if ' + condition.preprocessor, '#endif'))
+
+        if not preprocessor_only:
+            if condition.constexpr:
+                blocks.append(self._predicate(condition.constexpr, constexpr=True))
+            if condition.expr:
+                blocks.append(self._predicate(condition.expr))
+
+        if not blocks:
+            return writer.EmptyBlock()
+
+        if len(blocks) == 1:
+            return blocks[0]
+
+        return writer.MultiBlock(blocks)
 
 
 class _CppHeaderFileWriter(_CppFileWriterBase):
@@ -523,23 +624,25 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
                 self._writer.write_template(
                     '${const_type}${param_type} ${method_name}() const { ${body} }')
 
-    def gen_validator(self, field):
+    def gen_validators(self, field):
         # type: (ast.Field) -> None
-        """Generate the C++ validator definition for a field."""
+        """Generate the C++ validators definition for a field."""
+        assert field.validator
+
+        param_type = field.cpp_type
+        if not cpp_types.is_primitive_type(param_type):
+            param_type += '&'
 
         template_params = {
             'method_name': _get_field_member_validator_name(field),
-            'param_type': cpp_types.get_cpp_type(field).get_getter_setter_type()
+            'param_type': param_type,
         }
 
         with self._with_template(template_params):
-            if field.validator is None:
-                # Header inline the Status::OK stub for non-validated fields.
-                self._writer.write_template(
-                    'Status ${method_name}(${param_type}) { return Status::OK(); }')
-            else:
-                # Declare method implemented in C++ file.
-                self._writer.write_template('Status ${method_name}(${param_type});')
+            # Declare method implemented in C++ file.
+            self._writer.write_template('void ${method_name}(const ${param_type} value);')
+            self._writer.write_template(
+                'void ${method_name}(IDLParserErrorContext& ctxt, const ${param_type} value);')
 
         self._writer.write_empty_line()
 
@@ -554,22 +657,21 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
         if _is_required_serializer_field(field):
             post_body = '%s = true;' % (_get_has_field_member_name(field))
 
-        validator = ''
+        validator_method_name = ''
         if field.validator is not None:
-            validator = 'uassertStatusOK(%s(value));' % _get_field_member_validator_name(field)
+            validator_method_name = _get_field_member_validator_name(field)
 
         template_params = {
             'method_name': _get_field_member_setter_name(field),
             'member_name': member_name,
             'param_type': param_type,
-            'body': cpp_type_info.get_setter_body(member_name),
+            'body': cpp_type_info.get_setter_body(member_name, validator_method_name),
             'post_body': post_body,
-            'validator': validator,
         }
 
         with self._with_template(template_params):
             self._writer.write_template(
-                'void ${method_name}(${param_type} value) & { ${validator} ${body} ${post_body} }')
+                'void ${method_name}(${param_type} value) & { ${body} ${post_body} }')
 
         self._writer.write_empty_line()
 
@@ -666,41 +768,132 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
         # type: (ast.Struct) -> None
         """Generate comparison operators declarations for the type."""
         # pylint: disable=invalid-name
-
         sorted_fields = sorted([
             field for field in struct.fields if (not field.ignore) and field.comparison_order != -1
         ], key=lambda f: f.comparison_order)
-        fields = [_get_field_member_name(field) for field in sorted_fields]
 
-        with self._block("auto relationalTie() const {", "}"):
-            self._writer.write_line('return std::tie(%s);' % (', '.join(fields)))
-
-        for rel_op in ['==', '!=', '<', '>', '<=', '>=']:
+        for rel_op in [('==', " && "), ('!=', " || ")]:
             self.write_empty_line()
             decl = common.template_args(
                 "friend bool operator${rel_op}(const ${class_name}& left, const ${class_name}& right) {",
-                rel_op=rel_op, class_name=common.title_case(struct.name))
+                rel_op=rel_op[0], class_name=common.title_case(struct.name))
 
             with self._block(decl, "}"):
-                self._writer.write_line('return left.relationalTie() %s right.relationalTie();' %
-                                        (rel_op))
+                self._writer.write_line('return %s;' % (rel_op[1].join(
+                    [_get_comparison(field, rel_op[0], "left", "right")
+                     for field in sorted_fields])))
+
+        decl = common.template_args(
+            "friend bool operator<(const ${class_name}& left, const ${class_name}& right) {",
+            class_name=common.title_case(struct.name))
+        with self._block(decl, "}"):
+            self._writer.write_line("return %s;" % (_get_comparison_less(sorted_fields)))
+
+        decl = common.template_args(
+            "friend bool operator>(const ${class_name}& left, const ${class_name}& right) {",
+            class_name=common.title_case(struct.name))
+        with self._block(decl, "}"):
+            self._writer.write_line('return right < left;')
+
+        decl = common.template_args(
+            "friend bool operator<=(const ${class_name}& left, const ${class_name}& right) {",
+            class_name=common.title_case(struct.name))
+        with self._block(decl, "}"):
+            self._writer.write_line('return !(right < left);')
+
+        decl = common.template_args(
+            "friend bool operator>=(const ${class_name}& left, const ${class_name}& right) {",
+            class_name=common.title_case(struct.name))
+        with self._block(decl, "}"):
+            self._writer.write_line('return !(left < right);')
 
         self.write_empty_line()
 
-    def gen_extern_server_parameters(self, scps):
-        # type: (List[ast.ServerParameter]) -> None
-        """Generate externs for storage declaring server parameters."""
-        for scp in scps:
-            if (scp.cpp_vartype is None) or (scp.cpp_varname is None):
-                continue
-            idents = scp.cpp_varname.split('::')
+    def _gen_exported_constexpr(self, name, suffix, expr, condition):
+        # type: (unicode, unicode, ast.Expression, ast.Condition) -> None
+        """Generate exports for default initializer."""
+        if not (name and expr and expr.export):
+            return
+
+        with self._condition(condition, preprocessor_only=True):
+            self._writer.write_line('constexpr auto %s%s = %s;' % (_get_constant(name), suffix,
+                                                                   expr.expr))
+
+        self.write_empty_line()
+
+    def _gen_extern_declaration(self, vartype, varname, condition):
+        # type: (unicode, unicode, ast.Condition) -> None
+        """Generate externs for storage declaration."""
+        if (vartype is None) or (varname is None):
+            return
+
+        with self._condition(condition, preprocessor_only=True):
+            idents = varname.split('::')
             decl = idents.pop()
             for ns in idents:
                 self._writer.write_line('namespace %s {' % (ns))
-            self._writer.write_line('extern %s %s;' % (scp.cpp_vartype, decl))
+
+            self._writer.write_line('extern %s %s;' % (vartype, decl))
+
             for ns in reversed(idents):
                 self._writer.write_line('}  // namespace ' + ns)
+
+        if idents:
             self.write_empty_line()
+
+    def _gen_config_function_declaration(self, spec):
+        # type: (ast.IDLAST) -> None
+        """Generate function declarations for config initializers."""
+
+        initializer = spec.globals.configs and spec.globals.configs.initializer
+        if not initializer:
+            return
+
+        if initializer.register:
+            self._writer.write_line('Status %s(optionenvironment::OptionSection*);' %
+                                    (initializer.register))
+        if initializer.store:
+            self._writer.write_line('Status %s(const optionenvironment::Environment&);' %
+                                    (initializer.store))
+
+        if initializer.register or initializer.store:
+            self.write_empty_line()
+
+    def gen_server_parameter_class(self, scp):
+        # type: (ast.ServerParameter) -> None
+        """Generate a C++ class definition for a ServerParameter."""
+        if scp.cpp_class is None:
+            return
+
+        cls = scp.cpp_class
+
+        with self._block('class %s : public ServerParameter {' % (cls.name), '};'):
+            self._writer.write_unindented_line('public:')
+            if scp.default is not None:
+                self._writer.write_line('static constexpr auto kDataDefault = %s;' %
+                                        (scp.default.expr))
+
+            if cls.override_ctor:
+                # Explicit custom constructor.
+                self._writer.write_line(cls.name + '(StringData name, ServerParameterType spt);')
+            else:
+                #Inherit base constructor.
+                self._writer.write_line('using ServerParameter::ServerParameter;')
+            self.write_empty_line()
+
+            self._writer.write_line(
+                'void append(OperationContext*, BSONObjBuilder&, const std::string&) final;')
+            self._writer.write_line('Status set(const BSONElement&) final;')
+            self._writer.write_line('Status setFromString(const std::string&) final;')
+
+            if cls.data is not None:
+                self.write_empty_line()
+                if scp.default is not None:
+                    self._writer.write_line('%s _data{kDataDefault};' % (cls.data))
+                else:
+                    self._writer.write_line('%s _data;' % (cls.data))
+
+        self.write_empty_line()
 
     def generate(self, spec):
         # type: (ast.IDLAST) -> None
@@ -734,11 +927,21 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
             'mongo/base/data_range.h',
             'mongo/bson/bsonobj.h',
             'mongo/bson/bsonobjbuilder.h',
+            'mongo/bson/simple_bsonobj_comparator.h',
             'mongo/idl/idl_parser.h',
-            'mongo/idl/server_parameter.h',
-            'mongo/idl/server_parameter_with_storage.h',
             'mongo/rpc/op_msg.h',
         ] + spec.globals.cpp_includes
+
+        if spec.configs:
+            header_list.append('mongo/util/options_parser/option_description.h')
+            config_init = spec.globals.configs and spec.globals.configs.initializer
+            if config_init and (config_init.register or config_init.store):
+                header_list.append('mongo/util/options_parser/option_section.h')
+                header_list.append('mongo/util/options_parser/environment.h')
+
+        if spec.server_parameters:
+            header_list.append('mongo/idl/server_parameter.h')
+            header_list.append('mongo/idl/server_parameter_with_storage.h')
 
         header_list.sort()
 
@@ -788,7 +991,6 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
                                 self.gen_description_comment(field.description)
                             self.gen_getter(struct, field)
                             if not struct.immutable and not field.chained_struct_field:
-                                self.gen_validator(field)
                                 self.gen_setter(field)
 
                     if struct.generate_comparison_operators:
@@ -796,6 +998,14 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
 
                     self.write_unindented_line('protected:')
                     self.gen_protected_serializer_methods(struct)
+
+                    # Write private validators
+                    if [field for field in struct.fields if field.validator]:
+                        self.write_unindented_line('private:')
+                        for field in struct.fields:
+                            if not field.ignore and not struct.immutable and \
+                                not field.chained_struct_field and field.validator:
+                                self.gen_validators(field)
 
                     self.write_unindented_line('private:')
 
@@ -820,7 +1030,17 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
 
                 self.write_empty_line()
 
-            self.gen_extern_server_parameters(spec.server_parameters)
+            for scp in spec.server_parameters:
+                if scp.cpp_class is None:
+                    self._gen_exported_constexpr(scp.name, 'Default', scp.default, scp.condition)
+                self._gen_extern_declaration(scp.cpp_vartype, scp.cpp_varname, scp.condition)
+                self.gen_server_parameter_class(scp)
+
+            if spec.configs:
+                for opt in spec.configs:
+                    self._gen_exported_constexpr(opt.name, 'Default', opt.default, opt.condition)
+                    self._gen_extern_declaration(opt.cpp_vartype, opt.cpp_varname, opt.condition)
+                self._gen_config_function_declaration(spec)
 
 
 class _CppSourceFileWriter(_CppFileWriterBase):
@@ -916,14 +1136,7 @@ class _CppSourceFileWriter(_CppFileWriterBase):
 
                 with self._predicate(_get_bson_type_check('arrayElement', 'arrayCtxt', field)):
                     array_value = self._gen_field_deserializer_expression('arrayElement', field)
-
-                    # HACK - SERVER-32431
-                    # GCC 5.4.0 on s390x has a code gen bug, work around it by not using std::move
-                    if self._target_arch == "s390x":
-                        self._writer.write_line('auto localValue = %s;' % (array_value))
-                        self._writer.write_line('values.push_back(localValue);')
-                    else:
-                        self._writer.write_line('values.emplace_back(%s);' % (array_value))
+                    self._writer.write_line('values.emplace_back(%s);' % (array_value))
 
             with self._block('else {', '}'):
                 self._writer.write_line('arrayCtxt.throwBadArrayFieldNumberValue(arrayFieldName);')
@@ -965,8 +1178,7 @@ class _CppSourceFileWriter(_CppFileWriterBase):
 
             with self._block('{', '}'):
                 self._writer.write_line('auto value = %s;' % (expression))
-                self._writer.write_line('uassertStatusOK(%s(value));' %
-                                        (_get_field_member_validator_name(field)))
+                self._writer.write_line('%s(value);' % (_get_field_member_validator_name(field)))
                 self._writer.write_line('%s = std::move(value);' % (field_name))
 
         if field.chained:
@@ -1233,6 +1445,48 @@ class _CppSourceFileWriter(_CppFileWriterBase):
             self._writer.write_line(method_info.get_call('object'))
             self._writer.write_line('return object;')
 
+    def _compare_and_return_status(self, op, limit, field, optional_param):
+        # type: (unicode, ast.Expression, ast.Field, unicode) -> None
+        """Throw an error on comparison failure."""
+        with self._block('if (!(value %s %s)) {' % (op, _get_expression(limit)), '}'):
+            self._writer.write_line('throwComparisonError<%s>(%s"%s", "%s"_sd, value, %s);' %
+                                    (field.cpp_type, optional_param, field.name, op,
+                                     _get_expression(limit)))
+
+    def _gen_field_validator(self, struct, field, optional_params):
+        # type: (ast.Struct, ast.Field, Tuple[unicode, unicode]) -> None
+        """Generate non-trivial field validators."""
+        validator = field.validator
+
+        param_type = field.cpp_type
+        if not cpp_types.is_primitive_type(param_type):
+            param_type += '&'
+
+        method_template = {
+            'class_name': common.title_case(struct.name),
+            'method_name': _get_field_member_validator_name(field),
+            'param_type': param_type,
+            'optional_param': optional_params[0],
+        }
+
+        with self._with_template(method_template):
+            self._writer.write_template(
+                'void ${class_name}::${method_name}(${optional_param}const ${param_type} value)')
+            with self._block('{', '}'):
+                if validator.gt is not None:
+                    self._compare_and_return_status('>', validator.gt, field, optional_params[1])
+                if validator.gte is not None:
+                    self._compare_and_return_status('>=', validator.gte, field, optional_params[1])
+                if validator.lt is not None:
+                    self._compare_and_return_status('<', validator.lt, field, optional_params[1])
+                if validator.lte is not None:
+                    self._compare_and_return_status('<=', validator.lte, field, optional_params[1])
+
+                if validator.callback is not None:
+                    self._writer.write_line('uassertStatusOK(%s(value));' % (validator.callback))
+
+        self._writer.write_empty_line()
+
     def gen_field_validators(self, struct):
         # type: (ast.Struct) -> None
         """Generate non-trivial field validators."""
@@ -1241,44 +1495,8 @@ class _CppSourceFileWriter(_CppFileWriterBase):
                 # Fields without validators are implemented in the header.
                 continue
 
-            cpp_type = cpp_types.get_cpp_type(field)
-
-            method_template = {
-                'class_name': common.title_case(struct.name),
-                'method_name': _get_field_member_validator_name(field),
-                'param_type': cpp_type.get_getter_setter_type(),
-            }
-
-            def compare_and_return_status(op, limit):
-                # type: (unicode, Union[int, float]) -> None
-                """Emit a comparison which returns an BadValue Status on failure."""
-                with self._block('if (!(value %s %s)) {' % (op, repr(limit)), '}'):
-                    self._writer.write_line(
-                        'return {::mongo::ErrorCodes::BadValue, str::stream() << ' +
-                        '"Value must be %s %s, \'" << value << "\' provided"};' % (op, limit))
-
-            validator = field.validator
-            with self._with_template(method_template):
-                self._writer.write_template(
-                    'Status ${class_name}::${method_name}(${param_type} value)')
-                with self._block('{', '}'):
-                    if validator.gt is not None:
-                        compare_and_return_status('>', validator.gt)
-                    if validator.gte is not None:
-                        compare_and_return_status('>=', validator.gte)
-                    if validator.lt is not None:
-                        compare_and_return_status('<', validator.lt)
-                    if validator.lte is not None:
-                        compare_and_return_status('<=', validator.lte)
-
-                    if validator.callback is not None:
-                        with self._block('{', '}'):
-                            self._writer.write_line('Status status = %s(value);' %
-                                                    (validator.callback))
-                            with self._block('if (!status.isOK()) {', '}'):
-                                self._writer.write_line('return status;')
-
-                    self._writer.write_line('return Status::OK();')
+            for optional_params in [('IDLParserErrorContext& ctxt, ', 'ctxt, '), ('', '')]:
+                self._gen_field_validator(struct, field, optional_params)
 
     def gen_bson_deserializer_methods(self, struct):
         # type: (ast.Struct) -> None
@@ -1675,68 +1893,304 @@ class _CppSourceFileWriter(_CppFileWriterBase):
                 common.template_args('${class_name}::kCommandName,', class_name=common.title_case(
                     struct.cpp_name)))
 
-    def gen_server_parameter(self, params):
-        # type: (List[ast.ServerParameter]) -> None
+    def _gen_server_parameter_specialized(self, param):
+        # type: (ast.ServerParameter) -> None
+        """Generate a specialized ServerParameter."""
+        self._writer.write_line('return new %s(%s, %s);' % (param.cpp_class.name,
+                                                            _encaps(param.name), param.set_at))
+
+    def _gen_server_parameter_class_definitions(self, param):
+        # type: (ast.ServerParameter) -> None
+        """Generate storage for default and/or append method for a specialized ServerParameter."""
+        cls = param.cpp_class
+
+        if param.default or param.redact or not cls.override_set:
+            self.gen_description_comment("%s: %s" % (param.name, param.description))
+
+        if param.default:
+            self._writer.write_line('constexpr decltype(%s::kDataDefault) %s::kDataDefault;' %
+                                    (cls.name, cls.name))
+            self.write_empty_line()
+
+        if param.redact:
+            with self._block(
+                    'void %s::append(OperationContext*, BSONObjBuilder& b, const std::string& name) {'
+                    % (cls.name), '}'):
+                self._writer.write_line('b << name << "###";')
+            self.write_empty_line()
+
+        if not cls.override_set:
+            with self._block('Status %s::set(const BSONElement& newValueElement) {' % (cls.name),
+                             '}'):
+                self._writer.write_line('std::string strval;')
+                with self._predicate('!newValueElement.coerce(&strval)'):
+                    value = '' if param.redact else '" << newValueElement << " '
+                    self._writer.write_line(
+                        'return {ErrorCodes::BadValue, str::stream() << "Invalid value ' + value +
+                        'for setParameter \'" << name() << "\'"};')
+                self._writer.write_line('return setFromString(strval);')
+            self.write_empty_line()
+
+    def _gen_server_parameter_with_storage(self, param):
+        # type: (ast.ServerParameter) -> None
+        """Generate a single IDLServerParameterWithStorage."""
+        self._writer.write_line(
+            common.template_args(
+                'auto* ret = makeIDLServerParameterWithStorage<${spt}>(${name}, ${storage});',
+                storage=param.cpp_varname, spt=param.set_at, name=_encaps(param.name)))
+
+        if param.on_update is not None:
+            self._writer.write_line('ret->setOnUpdate(%s);' % (param.on_update))
+        if param.validator is not None:
+            if param.validator.callback is not None:
+                self._writer.write_line('ret->addValidator(%s);' % (param.validator.callback))
+
+            for pred in ['lt', 'gt', 'lte', 'gte']:
+                bound = getattr(param.validator, pred)
+                if bound is not None:
+                    self._writer.write_line('ret->addBound<idl_server_parameter_detail::%s>(%s);' %
+                                            (pred.upper(), _get_expression(bound)))
+
+        if param.redact:
+            self._writer.write_line('ret->setRedact();')
+
+        if param.default is not None:
+            self._writer.write_line('uassertStatusOK(ret->setValue(%s));' %
+                                    (_get_expression(param.default)))
+
+        self._writer.write_line('return ret;')
+
+    def _gen_server_parameter(self, param):
+        # type: (ast.ServerParameter) -> None
+        """Generate a single IDLServerParameter(WithStorage)."""
+        if param.cpp_class is not None:
+            self._gen_server_parameter_specialized(param)
+        else:
+            self._gen_server_parameter_with_storage(param)
+
+    def _gen_server_parameter_deprecated_aliases(self, param_no, param):
+        # type: (int, ast.ServerParameter) -> None
+        """Generate IDLServerParamterDeprecatedAlias instance."""
+
+        for alias_no, alias in enumerate(param.deprecated_name):
+            self._writer.write_line(
+                common.template_args(
+                    '${unused} auto* ${alias_var} = new IDLServerParameterDeprecatedAlias(${name}, ${param_var});',
+                    unused='MONGO_COMPILER_VARIABLE_UNUSED', alias_var='scp_%d_%d' %
+                    (param_no, alias_no), name=_encaps(alias), param_var='scp_%d' % (param_no)))
+
+    def gen_server_parameters(self, params, header_file_name):
+        # type: (List[ast.ServerParameter], unicode) -> None
         """Generate IDLServerParameter instances."""
-        # pylint: disable=too-many-branches
 
         for param in params:
-            # Optiona storage declarations.
-            if (param.cpp_vartype is not None) and (param.cpp_varname is not None):
-                self._writer.write_line('%s %s;' % (param.cpp_vartype, param.cpp_varname))
+            # Definitions for specialized server parameters.
+            if param.cpp_class:
+                self._gen_server_parameter_class_definitions(param)
 
-        with self.gen_namespace_block(''):
+            # Optional storage declarations.
+            elif (param.cpp_vartype is not None) and (param.cpp_varname is not None):
+                with self._condition(param.condition, preprocessor_only=True):
+                    init = ('{%s}' % (param.default.expr)) if param.default else ''
+                    self._writer.write_line('%s %s%s;' % (param.cpp_vartype, param.cpp_varname,
+                                                          init))
+
+        blockname = 'idl_' + hashlib.sha1(header_file_name).hexdigest()
+        with self._block('MONGO_SERVER_PARAMETER_REGISTER(%s)(InitializerContext*) {' % (blockname),
+                         '}'):
             # ServerParameter instances.
             for param_no, param in enumerate(params):
                 self.gen_description_comment(param.description)
+                with self._condition(param.condition):
+                    unused = not (param.test_only or param.deprecated_name)
+                    with self.get_initializer_lambda('auto* scp_%d' % (param_no), unused=unused,
+                                                     return_type='ServerParameter*'):
+                        self._gen_server_parameter(param)
 
-                with self.get_initializer_lambda('auto* scp_%d' % (param_no), unused=(len(
-                        param.deprecated_name) == 0)):
-                    if param.cpp_varname is not None:
-                        self._writer.write_line(
-                            common.template_args(
-                                'auto* ret = makeIDLServerParameterWithStorage(${name}, ${storage}, ${spt});',
-                                storage=param.cpp_varname, spt=param.set_at, name=_encaps(
-                                    param.name)))
+                    if param.test_only:
+                        self._writer.write_line('scp_%d->setTestOnly();' % (param_no))
 
-                        if param.on_update is not None:
-                            self._writer.write_line('ret->setOnUpdate(%s);' % (param.on_update))
-                        if param.validator is not None:
-                            if param.validator.callback is not None:
-                                self._writer.write_line('ret->addValidator(%s);' %
-                                                        (param.validator.callback))
-                            for pred in ['lt', 'gt', 'lte', 'gte']:
-                                bound = getattr(param.validator, pred)
-                                if bound is not None:
-                                    self._writer.write_line(
-                                        'ret->addBound<idl_server_parameter_detail::%s>(%s);' %
-                                        (pred.upper(), bound))
-                    else:
-                        self._writer.write_line(
-                            common.template_args(
-                                'auto* ret = new IDLServerParameter(${name}, ${spt});',
-                                spt=param.set_at, name=_encaps(param.name)))
-                        if param.from_bson:
-                            self._writer.write_line('ret->setFromBSON(%s);' % (param.from_bson))
-                        self._writer.write_line('ret->setAppendBSON(%s);' % (param.append_bson))
-                        self._writer.write_line('ret->setFromString(%s);' % (param.from_string))
-
-                    if param.default is not None:
-                        self._writer.write_line('uassertStatusOK(ret->setFromString(%s));' %
-                                                (_encaps(param.default)))
-
-                    self._writer.write_line('return ret;')
-
-                # Deprecated aliases...
-                for alias_no, alias in enumerate(param.deprecated_name):
-                    self._writer.write_line(
-                        common.template_args(
-                            'MONGO_COMPILER_VARIABLE_UNUSED auto* scp_${param_no}_${alias_no} = ' +
-                            'new IDLServerParameterDeprecatedAlias(${alias}, scp_${param_no});',
-                            param_no=unicode(param_no), alias_no=unicode(alias_no),
-                            alias=_encaps(alias)))
-
+                    self._gen_server_parameter_deprecated_aliases(param_no, param)
                 self.write_empty_line()
+
+            self._writer.write_line('return Status::OK();')
+
+    def gen_config_option(self, opt, section):
+        # type: (ast.ConfigOption, unicode) -> None
+        """Generate Config Option instance."""
+
+        # Derive cpp_vartype from arg_vartype if needed.
+        vartype = ("moe::OptionTypeMap<moe::%s>::type" %
+                   (opt.arg_vartype)) if opt.cpp_vartype is None else opt.cpp_vartype
+
+        with self._condition(opt.condition):
+            with self._block(section, ';'):
+                self._writer.write_line(
+                    common.template_format(
+                        '.addOptionChaining(${name}, ${short}, moe::${argtype}, ${desc}, ${deprname}, ${deprshortname})',
+                        {
+                            'name': _encaps(opt.name),
+                            'short': _encaps(opt.short_name),
+                            'argtype': opt.arg_vartype,
+                            'desc': _get_expression(opt.description),
+                            'deprname': _encaps_list(opt.deprecated_name),
+                            'deprshortname': _encaps_list(opt.deprecated_short_name),
+                        }))
+                self._writer.write_line('.setSources(moe::%s)' % (opt.source))
+                if opt.hidden:
+                    self._writer.write_line('.hidden()')
+                if opt.redact:
+                    self._writer.write_line('.redact()')
+                for requires in opt.requires:
+                    self._writer.write_line('.requires(%s)' % (_encaps(requires)))
+                for conflicts in opt.conflicts:
+                    self._writer.write_line('.incompatibleWith(%s)' % (_encaps(conflicts)))
+                if opt.default:
+                    self._writer.write_line('.setDefault(moe::Value(%s))' %
+                                            (_get_expression(opt.default)))
+                if opt.implicit:
+                    self._writer.write_line('.setImplicit(moe::Value(%s))' %
+                                            (_get_expression(opt.implicit)))
+                if opt.duplicates_append:
+                    self._writer.write_line('.composing()')
+                if (opt.positional_start is not None) and (opt.positional_end is not None):
+                    self._writer.write_line('.positional(%d, %d)' % (opt.positional_start,
+                                                                     opt.positional_end))
+                if opt.canonicalize:
+                    self._writer.write_line('.canonicalize(%s)' % opt.canonicalize)
+
+                if opt.validator:
+                    if opt.validator.callback:
+                        self._writer.write_line(
+                            common.template_args(
+                                '.addConstraint(new moe::CallbackKeyConstraint<${argtype}>(${key}, ${callback}))',
+                                argtype=vartype, key=_encaps(
+                                    opt.name), callback=opt.validator.callback))
+
+                    if (opt.validator.gt is not None) or (opt.validator.lt is not None) or (
+                            opt.validator.gte is not None) or (opt.validator.lte is not None):
+                        self._writer.write_line(
+                            common.template_args(
+                                '.addConstraint(new moe::BoundaryKeyConstraint<${argtype}>(${key}, ${gt}, ${lt}, ${gte}, ${lte}))',
+                                argtype=vartype, key=_encaps(opt.name), gt='boost::none'
+                                if opt.validator.gt is None else _get_expression(opt.validator.gt),
+                                lt='boost::none' if opt.validator.lt is None else _get_expression(
+                                    opt.validator.lt), gte='boost::none'
+                                if opt.validator.gte is None else _get_expression(
+                                    opt.validator.gte), lte='boost::none'
+                                if opt.validator.lte is None else _get_expression(
+                                    opt.validator.lte)))
+
+        self.write_empty_line()
+
+    def _gen_config_options_register(self, root_opts, sections):
+        self._writer.write_line('namespace moe = ::mongo::optionenvironment;')
+        self.write_empty_line()
+
+        for opt in root_opts:
+            self.gen_config_option(opt, 'options')
+
+        for section_name, section_opts in sections.iteritems():
+            with self._block('{', '}'):
+                self._writer.write_line('moe::OptionSection section(%s);' % (_encaps(section_name)))
+                self.write_empty_line()
+
+                for opt in section_opts:
+                    self.gen_config_option(opt, 'section')
+
+                self._writer.write_line('auto status = options.addSection(section);')
+                with self._block('if (!status.isOK()) {', '}'):
+                    self._writer.write_line('return status;')
+            self.write_empty_line()
+
+        self._writer.write_line('return Status::OK();')
+
+    def _gen_config_options_store(self, configs):
+        # Setup initializer for storing configured options in their variables.
+        self._writer.write_line('namespace moe = ::mongo::optionenvironment;')
+        self.write_empty_line()
+
+        for opt in configs:
+            if opt.cpp_varname is None:
+                continue
+
+            vartype = ("moe::OptionTypeMap<moe::%s>::type" %
+                       (opt.arg_vartype)) if opt.cpp_vartype is None else opt.cpp_vartype
+            with self._condition(opt.condition):
+                with self._block('if (params.count(%s)) {' % (_encaps(opt.name)), '}'):
+                    self._writer.write_line('%s = params[%s].as<%s>();' % (opt.cpp_varname,
+                                                                           _encaps(opt.name),
+                                                                           vartype))
+            self.write_empty_line()
+
+        self._writer.write_line('return Status::OK();')
+
+    def gen_config_options(self, spec, header_file_name):
+        # type: (ast.IDLAST, unicode) -> None
+        """Generate Config Option instances."""
+
+        # pylint: disable=too-many-branches,too-many-statements
+
+        has_storage_targets = False
+        for opt in spec.configs:
+            if opt.cpp_varname is not None:
+                has_storage_targets = True
+                if opt.cpp_vartype is not None:
+                    with self._condition(opt.condition, preprocessor_only=True):
+                        init = ('{%s}' % (opt.default.expr)) if opt.default else ''
+                        self._writer.write_line('%s %s%s;' % (opt.cpp_vartype, opt.cpp_varname,
+                                                              init))
+
+        self.write_empty_line()
+
+        root_opts = []  # type: List[ast.ConfigOption]
+        sections = {}  # type: Dict[unicode, List[ast.ConfigOption]]
+        for opt in spec.configs:
+            if opt.section:
+                try:
+                    sections[opt.section].append(opt)
+                except KeyError:
+                    sections[opt.section] = [opt]
+            else:
+                root_opts.append(opt)
+
+        initializer = spec.globals.configs and spec.globals.configs.initializer
+
+        # pylint: disable=consider-using-ternary
+        blockname = (initializer
+                     and initializer.name) or ('idl_' + hashlib.sha1(header_file_name).hexdigest())
+
+        if initializer and initializer.register:
+            with self._block('Status %s(optionenvironment::OptionSection* options_ptr) {' %
+                             initializer.register, '}'):
+                self._writer.write_line('auto& options = *options_ptr;')
+                self._gen_config_options_register(root_opts, sections)
+        else:
+            with self.gen_namespace_block(''):
+                with self._block(
+                        'MONGO_MODULE_STARTUP_OPTIONS_REGISTER(%s)(InitializerContext*) {' %
+                    (blockname), '}'):
+                    self._writer.write_line('auto& options = optionenvironment::startupOptions;')
+                    self._gen_config_options_register(root_opts, sections)
+
+        self.write_empty_line()
+
+        if has_storage_targets:
+            if initializer and initializer.store:
+                with self._block('Status %s(const optionenvironment::Environment& params) {' %
+                                 initializer.store, '}'):
+                    self._gen_config_options_store(spec.configs)
+            else:
+                with self.gen_namespace_block(''):
+                    with self._block('MONGO_STARTUP_OPTIONS_STORE(%s)(InitializerContext*) {' %
+                                     (blockname), '}'):
+                        # If all options are guarded by non-passing #ifdefs, then params will be unused.
+                        self._writer.write_line(
+                            'MONGO_COMPILER_VARIABLE_UNUSED const auto& params = optionenvironment::startupOptionsParsed;'
+                        )
+                        self._gen_config_options_store(spec.configs)
+
+            self.write_empty_line()
 
     def generate(self, spec, header_file_name):
         # type: (ast.IDLAST, unicode) -> None
@@ -1768,6 +2222,16 @@ class _CppSourceFileWriter(_CppFileWriterBase):
             'mongo/db/command_generic_argument.h',
             'mongo/db/commands.h',
         ]
+
+        if spec.server_parameters:
+            header_list.append('mongo/idl/server_parameter.h')
+            header_list.append('mongo/idl/server_parameter_with_storage.h')
+
+        if spec.configs:
+            header_list.append('mongo/util/options_parser/option_section.h')
+            header_list.append('mongo/util/options_parser/startup_option_init.h')
+            header_list.append('mongo/util/options_parser/startup_options.h')
+
         header_list.sort()
 
         for include in header_list:
@@ -1818,7 +2282,10 @@ class _CppSourceFileWriter(_CppFileWriterBase):
                 self.gen_to_bson_serializer_method(struct)
                 self.write_empty_line()
 
-            self.gen_server_parameter(spec.server_parameters or [])
+            if spec.server_parameters:
+                self.gen_server_parameters(spec.server_parameters, header_file_name)
+            if spec.configs:
+                self.gen_config_options(spec, header_file_name)
 
 
 def generate_header_str(spec):

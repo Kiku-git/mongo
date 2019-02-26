@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2018 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -182,6 +182,22 @@ __log_wait_for_earlier_slot(WT_SESSION_IMPL *session, WT_LOGSLOT *slot)
 }
 
 /*
+ * __log_fs_read --
+ *	Wrapper when reading from a log file.
+ */
+static int
+__log_fs_read(WT_SESSION_IMPL *session,
+    WT_FH *fh, wt_off_t offset, size_t len, void *buf)
+{
+	WT_DECL_RET;
+
+	__wt_capacity_throttle(session, len, WT_THROTTLE_LOG);
+	if ((ret = __wt_read(session, fh, offset, len, buf)) != 0)
+		WT_RET_MSG(session, ret, "%s: log read failure", fh->name);
+	return (ret);
+}
+
+/*
  * __log_fs_write --
  *	Wrapper when writing to a log file.  If we're writing to a new log
  *	file for the first time wait for writes to the previous log file.
@@ -207,6 +223,7 @@ __log_fs_write(WT_SESSION_IMPL *session,
 		__log_wait_for_earlier_slot(session, slot);
 		WT_RET(__wt_log_force_sync(session, &slot->slot_release_lsn));
 	}
+	__wt_capacity_throttle(session, len, WT_THROTTLE_LOG);
 	if ((ret = __wt_write(session, slot->slot_fh, offset, len, buf)) != 0)
 		WT_PANIC_RET(session, ret,
 		    "%s: fatal log failure", slot->slot_fh->name);
@@ -663,6 +680,7 @@ __log_zero(WT_SESSION_IMPL *session,
 		 */
 		if ((uint32_t)len - off < bufsz)
 			wrlen = (uint32_t)len - off;
+		__wt_capacity_throttle(session, wrlen, WT_THROTTLE_LOG);
 		WT_ERR(__wt_write(session,
 		    fh, (wt_off_t)off, wrlen, zerobuf->mem));
 		off += wrlen;
@@ -989,7 +1007,7 @@ __log_open_verify(WT_SESSION_IMPL *session, uint32_t id, WT_FH **fhp,
 	 * Read in the log file header and verify it.
 	 */
 	WT_ERR(__log_openfile(session, id, 0, &fh));
-	WT_ERR(__wt_read(session, fh, 0, allocsize, buf->mem));
+	WT_ERR(__log_fs_read(session, fh, 0, allocsize, buf->mem));
 	logrec = (WT_LOG_RECORD *)buf->mem;
 	__wt_log_record_byteswap(logrec);
 	desc = (WT_LOG_DESC *)logrec->record;
@@ -1053,7 +1071,7 @@ __log_open_verify(WT_SESSION_IMPL *session, uint32_t id, WT_FH **fhp,
 		goto err;
 
 	memset(buf->mem, 0, allocsize);
-	WT_ERR(__wt_read(session, fh, allocsize, allocsize, buf->mem));
+	WT_ERR(__log_fs_read(session, fh, allocsize, allocsize, buf->mem));
 	logrec = (WT_LOG_RECORD *)buf->mem;
 	/*
 	 * We have a valid header but the system record is not there.
@@ -1348,6 +1366,7 @@ __log_newfile(WT_SESSION_IMPL *session, bool conn_open, bool *created)
 		log->write_lsn = end_lsn;
 		log->write_start_lsn = end_lsn;
 	}
+	log->dirty_lsn = log->alloc_lsn;
 	if (created != NULL)
 		*created = create_log;
 	return (0);
@@ -1931,7 +1950,7 @@ __log_has_hole(WT_SESSION_IMPL *session, WT_FH *fh, wt_off_t log_size,
 	for (off = offset; remainder > 0;
 	    remainder -= (wt_off_t)rdlen, off += (wt_off_t)rdlen) {
 		rdlen = WT_MIN(bufsz, (size_t)remainder);
-		WT_ERR(__wt_read(session, fh, off, rdlen, buf));
+		WT_ERR(__log_fs_read(session, fh, off, rdlen, buf));
 		allocsize = (log == NULL ? WT_LOG_ALIGN : log->allocsize);
 		if (memcmp(buf, zerobuf, rdlen) != 0) {
 			/*
@@ -2053,7 +2072,7 @@ __wt_log_release(WT_SESSION_IMPL *session, WT_LOGSLOT *slot, bool *freep)
 	 * responsible for freeing the slot in that case.  Otherwise the
 	 * worker thread will free it.
 	 */
-	if (!F_ISSET(slot, WT_SLOT_FLUSH | WT_SLOT_SYNC | WT_SLOT_SYNC_DIR)) {
+	if (!F_ISSET(slot, WT_SLOT_FLUSH | WT_SLOT_SYNC_FLAGS)) {
 		if (freep != NULL)
 			*freep = 0;
 		slot->slot_state = WT_LOG_SLOT_WRITTEN;
@@ -2089,6 +2108,16 @@ __wt_log_release(WT_SESSION_IMPL *session, WT_LOGSLOT *slot, bool *freep)
 	 */
 	if (F_ISSET(slot, WT_SLOT_CLOSEFH))
 		__wt_cond_signal(session, conn->log_file_cond);
+
+	if (F_ISSET(slot, WT_SLOT_SYNC_DIRTY) && !F_ISSET(slot, WT_SLOT_SYNC) &&
+	    (ret = __wt_fsync(session, log->log_fh, false)) != 0) {
+		/*
+		 * Ignore ENOTSUP, but don't try again.
+		 */
+		if (ret != ENOTSUP)
+			WT_ERR(ret);
+		conn->log_dirty_max = 0;
+	}
 
 	/*
 	 * Try to consolidate calls to fsync to wait less.  Acquire a spin lock
@@ -2439,7 +2468,7 @@ advance:
 		 */
 		WT_ASSERT(session, buf->memsize >= allocsize);
 		need_salvage = F_ISSET(conn, WT_CONN_SALVAGE);
-		WT_ERR(__wt_read(session,
+		WT_ERR(__log_fs_read(session,
 		    log_fh, rd_lsn.l.offset, (size_t)allocsize, buf->mem));
 		need_salvage = false;
 		/*
@@ -2493,7 +2522,7 @@ advance:
 			 * record, especially for direct I/O.
 			 */
 			WT_ERR(__wt_buf_grow(session, buf, rdup_len));
-			WT_ERR(__wt_read(session, log_fh,
+			WT_ERR(__log_fs_read(session, log_fh,
 			    rd_lsn.l.offset, (size_t)rdup_len, buf->mem));
 			WT_STAT_CONN_INCR(session, log_scan_rereads);
 		}

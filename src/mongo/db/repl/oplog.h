@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -105,7 +104,6 @@ void createOplog(OperationContext* opCtx);
 std::vector<OpTime> logInsertOps(OperationContext* opCtx,
                                  const NamespaceString& nss,
                                  OptionalCollectionUUID uuid,
-                                 Session* session,
                                  std::vector<InsertStatement>::const_iterator begin,
                                  std::vector<InsertStatement>::const_iterator end,
                                  bool fromMigrate,
@@ -130,6 +128,7 @@ std::vector<OpTime> logInsertOps(OperationContext* opCtx,
  *   linked via prevTs, and the timestamps of the oplog entry that contains the document
  *   before/after update was applied. The timestamps are ignored if isNull() is true.
  * prepare this specifies if the oplog entry should be put into a 'prepare' state.
+ * inTxn this specifies that the oplog entry is part of a transaction in progress.
  * oplogSlot If non-null, use this reserved oplog slot instead of a new one.
  *
  * Returns the optime of the oplog entry written to the oplog.
@@ -147,6 +146,7 @@ OpTime logOp(OperationContext* opCtx,
              StmtId stmtId,
              const OplogLink& oplogLink,
              bool prepare,
+             bool inTxn,
              const OplogSlot& oplogSlot);
 
 // Flush out the cached pointer to the oplog.
@@ -231,7 +231,8 @@ Status applyOperation_inlock(OperationContext* opCtx,
 Status applyCommand_inlock(OperationContext* opCtx,
                            const BSONObj& op,
                            const OplogEntry& entry,
-                           OplogApplication::Mode mode);
+                           OplogApplication::Mode mode,
+                           boost::optional<Timestamp> stableTimestampForRecovery);
 
 /**
  * Initializes the global Timestamp with the value from the timestamp of the last oplog entry.

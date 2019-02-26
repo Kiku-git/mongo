@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -66,22 +65,9 @@ LogicalSessionIdSet ServiceLiaisonMongod::getActiveOpSessions() const {
     return activeSessions;
 }
 
-LogicalSessionIdSet ServiceLiaisonMongod::getOpenCursorSessions() const {
+LogicalSessionIdSet ServiceLiaisonMongod::getOpenCursorSessions(OperationContext* opCtx) const {
     LogicalSessionIdSet cursorSessions;
-    // Append any in-use session ids from the global and collection-level cursor managers
-    boost::optional<ServiceContext::UniqueOperationContext> uniqueCtx;
-    auto client = Client::getCurrent();
-
-    auto* const opCtx = [&client, &uniqueCtx] {
-        if (client->getOperationContext()) {
-            return client->getOperationContext();
-        }
-
-        uniqueCtx.emplace(client->makeOperationContext());
-        return uniqueCtx->get();
-    }();
-
-    CursorManager::appendAllActiveSessions(opCtx, &cursorSessions);
+    CursorManager::get(opCtx)->appendActiveSessions(&cursorSessions);
     return cursorSessions;
 }
 
@@ -111,7 +97,7 @@ ServiceContext* ServiceLiaisonMongod::_context() {
 
 std::pair<Status, int> ServiceLiaisonMongod::killCursorsWithMatchingSessions(
     OperationContext* opCtx, const SessionKiller::Matcher& matcher) {
-    return CursorManager::getGlobalCursorManager()->killCursorsWithMatchingSessions(opCtx, matcher);
+    return CursorManager::get(opCtx)->killCursorsWithMatchingSessions(opCtx, matcher);
 }
 
 }  // namespace mongo

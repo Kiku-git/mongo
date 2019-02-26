@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -77,7 +76,7 @@ boost::intrusive_ptr<Expression> parseGroupByExpression(
  * places, rather than compiled in one place and linked, and so cannot provide a globally unique ID.
  */
 std::string nextFileName() {
-    static AtomicUInt32 documentSourceBucketAutoFileCounter;
+    static AtomicWord<unsigned> documentSourceBucketAutoFileCounter;
     return "extsort-doc-bucket." +
         std::to_string(documentSourceBucketAutoFileCounter.fetchAndAdd(1));
 }

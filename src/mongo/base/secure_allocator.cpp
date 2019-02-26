@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -89,7 +88,7 @@ void EnablePrivilege(const wchar_t* name) {
         return;
     }
 
-    const auto accessTokenGuard = MakeGuard([&] { CloseHandle(accessToken); });
+    const auto accessTokenGuard = makeGuard([&] { CloseHandle(accessToken); });
 
     TOKEN_PRIVILEGES privileges = {0};
 

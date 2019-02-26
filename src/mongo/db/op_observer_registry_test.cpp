@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -57,6 +56,7 @@ struct TestObserver : public OpObserverNoop {
     repl::OpTime onDropCollection(OperationContext* opCtx,
                                   const NamespaceString& collectionName,
                                   OptionalCollectionUUID uuid,
+                                  std::uint64_t numRecords,
                                   const CollectionDropType dropType) {
         drops++;
         OpObserver::Times::get(opCtx).reservedOpTimes.push_back(opTime);
@@ -67,8 +67,10 @@ struct TestObserver : public OpObserverNoop {
                             const NamespaceString& toCollection,
                             OptionalCollectionUUID uuid,
                             OptionalCollectionUUID dropTargetUUID,
+                            std::uint64_t numRecords,
                             bool stayTemp) {
-        preRenameCollection(opCtx, fromCollection, toCollection, uuid, dropTargetUUID, stayTemp);
+        preRenameCollection(
+            opCtx, fromCollection, toCollection, uuid, dropTargetUUID, numRecords, stayTemp);
         postRenameCollection(opCtx, fromCollection, toCollection, uuid, dropTargetUUID, stayTemp);
     }
     repl::OpTime preRenameCollection(OperationContext* opCtx,
@@ -76,6 +78,7 @@ struct TestObserver : public OpObserverNoop {
                                      const NamespaceString& toCollection,
                                      OptionalCollectionUUID uuid,
                                      OptionalCollectionUUID dropTargetUUID,
+                                     std::uint64_t numRecords,
                                      bool stayTemp) {
         OpObserver::Times::get(opCtx).reservedOpTimes.push_back(opTime);
         return {};
@@ -172,7 +175,7 @@ TEST_F(OpObserverRegistryTest, OnDropCollectionObserverResultReturnsRightTime) {
     registry.addObserver(std::make_unique<OpObserverNoop>());
     auto op = [&]() -> repl::OpTime {
         return registry.onDropCollection(
-            &opCtx, testNss, {}, OpObserver::CollectionDropType::kOnePhase);
+            &opCtx, testNss, {}, 0U, OpObserver::CollectionDropType::kOnePhase);
     };
     checkConsistentOpTime(op);
 }
@@ -182,7 +185,7 @@ TEST_F(OpObserverRegistryTest, PreRenameCollectionObserverResultReturnsRightTime
     registry.addObserver(std::move(unique1));
     registry.addObserver(std::make_unique<OpObserverNoop>());
     auto op = [&]() -> repl::OpTime {
-        auto opTime = registry.preRenameCollection(&opCtx, testNss, testNss, {}, {}, false);
+        auto opTime = registry.preRenameCollection(&opCtx, testNss, testNss, {}, {}, 0U, false);
         registry.postRenameCollection(&opCtx, testNss, testNss, {}, {}, false);
         return opTime;
     };
@@ -195,7 +198,7 @@ DEATH_TEST_F(OpObserverRegistryTest, OnDropCollectionReturnsInconsistentTime, "i
     registry.addObserver(std::move(unique2));
     auto op = [&]() -> repl::OpTime {
         return registry.onDropCollection(
-            &opCtx, testNss, {}, OpObserver::CollectionDropType::kOnePhase);
+            &opCtx, testNss, {}, 0U, OpObserver::CollectionDropType::kOnePhase);
     };
     checkInconsistentOpTime(op);
 }
@@ -205,7 +208,7 @@ DEATH_TEST_F(OpObserverRegistryTest, PreRenameCollectionReturnsInconsistentTime,
     registry.addObserver(std::move(unique1));
     registry.addObserver(std::move(unique2));
     auto op = [&]() -> repl::OpTime {
-        auto opTime = registry.preRenameCollection(&opCtx, testNss, testNss, {}, {}, false);
+        auto opTime = registry.preRenameCollection(&opCtx, testNss, testNss, {}, {}, 0U, false);
         registry.postRenameCollection(&opCtx, testNss, testNss, {}, {}, false);
         return opTime;
     };

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -33,6 +32,7 @@
 #include "mongo/db/exec/requires_collection_stage.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/logical_session_id.h"
+#include "mongo/db/storage/remove_saver.h"
 
 namespace mongo {
 
@@ -75,6 +75,15 @@ struct DeleteStageParams {
 
     // Optional. When not null, delete metrics are recorded here.
     OpDebug* opDebug;
+
+    // Optional. When not null, send document about to be deleted to removeSaver.
+    // RemoveSaver is called before actual deletes are executed.
+    // Note: the differentiating factor between this and returnDeleted is that the caller will get
+    // the deleted document after it was already deleted. That means that if the caller would have
+    // to use the removeSaver at that point, they miss the document if the process dies before it
+    // reaches the removeSaver. However, this is still best effort since the RemoveSaver
+    // operates on a different persistence system from the the database storage engine.
+    std::unique_ptr<RemoveSaver> removeSaver;
 };
 
 /**
@@ -90,7 +99,7 @@ class DeleteStage final : public RequiresMutableCollectionStage {
 
 public:
     DeleteStage(OperationContext* opCtx,
-                const DeleteStageParams& params,
+                std::unique_ptr<DeleteStageParams> params,
                 WorkingSet* ws,
                 Collection* collection,
                 PlanStage* child);
@@ -116,9 +125,9 @@ public:
     static long long getNumDeleted(const PlanExecutor& exec);
 
 protected:
-    void saveState(RequiresCollTag) final {}
+    void doSaveStateRequiresCollection() final {}
 
-    void restoreState(RequiresCollTag) final;
+    void doRestoreStateRequiresCollection() final;
 
 private:
     /**
@@ -127,7 +136,7 @@ private:
      */
     StageState prepareToRetryWSM(WorkingSetID idToRetry, WorkingSetID* out);
 
-    DeleteStageParams _params;
+    std::unique_ptr<DeleteStageParams> _params;
 
     // Not owned by us.
     WorkingSet* _ws;

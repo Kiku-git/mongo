@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -68,6 +67,14 @@ public:
         // For initial sync only. If an update fails, the missing document is fetched from
         // this sync source to insert into the local collection.
         boost::optional<HostAndPort> missingDocumentSourceForInitialSync;
+
+        // Used to determine which operations should be applied. Only initial sync will set this to
+        // be something other than the null optime.
+        OpTime beginApplyingOpTime = OpTime();
+
+        // For replication recovery only. During replication rollback, this is used to keep track
+        // of the stable timestamp from which we replay the oplog.
+        boost::optional<Timestamp> stableTimestampForRecovery;
     };
 
     /**

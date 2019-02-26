@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -39,12 +38,12 @@
 #include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/document_validation.h"
-#include "mongo/db/catalog/multi_index_block.h"
-#include "mongo/db/catalog/multi_index_block_impl.h"
+#include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/db_raii.h"
+#include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -130,23 +129,21 @@ void createCollection(OperationContext* opCtx,
 }
 
 /**
- * Create an index on the given collection. Returns the number of indexes that exist on the
+ * Create an index on an empty collection. Returns the number of indexes that exist on the
  * collection after the given index is created.
  */
-int createIndexForColl(OperationContext* opCtx, NamespaceString nss, BSONObj indexSpec) {
+int _createIndexOnEmptyCollection(OperationContext* opCtx, NamespaceString nss, BSONObj indexSpec) {
     Lock::DBLock dbLock(opCtx, nss.db(), MODE_X);
     AutoGetCollection autoColl(opCtx, nss, MODE_X);
     auto coll = autoColl.getCollection();
 
-    MultiIndexBlockImpl indexer(opCtx, coll);
-    ASSERT_OK(indexer.init(indexSpec).getStatus());
-
-    WriteUnitOfWork wunit(opCtx);
-    indexer.commit();
-    wunit.commit();
-
     auto indexCatalog = coll->getIndexCatalog();
     ASSERT(indexCatalog);
+
+    WriteUnitOfWork wunit(opCtx);
+    ASSERT_OK(indexCatalog->createIndexOnEmptyCollection(opCtx, indexSpec).getStatus());
+    wunit.commit();
+
     return indexCatalog->numIndexesReady(opCtx);
 }
 
@@ -155,7 +152,6 @@ int createIndexForColl(OperationContext* opCtx, NamespaceString nss, BSONObj ind
  */
 TimestampedBSONObj makeOplogEntry(OpTime opTime) {
     BSONObjBuilder bob(opTime.toBSON());
-    bob.append("h", 1LL);
     bob.append("op", "c");
     bob.append("ns", "test.t");
     return {bob.obj(), opTime.getTimestamp()};
@@ -164,8 +160,8 @@ TimestampedBSONObj makeOplogEntry(OpTime opTime) {
 /**
  * Counts the number of keys in an index using an IndexAccessMethod::validate call.
  */
-int64_t getIndexKeyCount(OperationContext* opCtx, IndexCatalog* cat, IndexDescriptor* desc) {
-    auto idx = cat->getIndex(desc);
+int64_t getIndexKeyCount(OperationContext* opCtx, IndexCatalog* cat, const IndexDescriptor* desc) {
+    auto idx = cat->getEntry(desc)->accessMethod();
     int64_t numKeys;
     ValidateResults fullRes;
     idx->validate(opCtx, &numKeys, &fullRes);
@@ -2688,7 +2684,7 @@ TEST_F(StorageInterfaceImplTest, SetIndexIsMultikeySucceeds) {
     auto indexSpec =
         BSON("name" << indexName << "ns" << nss.ns() << "key" << BSON("a.b" << 1) << "v"
                     << static_cast<int>(kIndexVersion));
-    ASSERT_EQUALS(createIndexForColl(opCtx, nss, indexSpec), 2);
+    ASSERT_EQUALS(_createIndexOnEmptyCollection(opCtx, nss, indexSpec), 2);
 
     MultikeyPaths paths = {{1}};
     ASSERT_OK(storage.setIndexIsMultikey(opCtx, nss, indexName, paths, Timestamp(3, 3)));

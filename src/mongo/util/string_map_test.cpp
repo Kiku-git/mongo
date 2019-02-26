@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -41,7 +40,7 @@ namespace {
 using namespace mongo;
 
 TEST(StringMapTest, Hash1) {
-    auto hash = StringMapTraits::hash;
+    StringSet::hasher hash;
     ASSERT_EQUALS(hash(""), hash(""));
     ASSERT_EQUALS(hash("a"), hash("a"));
     ASSERT_EQUALS(hash("abc"), hash("abc"));
@@ -61,7 +60,7 @@ TEST(StringMapTest, Hash1) {
     ASSERT_FALSE(equals((b), (a)));
 
 TEST(StringMapTest, Equals1) {
-    auto equals = StringMapTraits::equals;
+    StringSet::key_equal equals;
 
     equalsBothWays("", "");
     equalsBothWays("a", "a");

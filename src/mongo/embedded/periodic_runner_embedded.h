@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -83,6 +82,8 @@ private:
         enum class ExecutionStatus { kNotScheduled, kRunning, kPaused, kCanceled };
 
     private:
+        void _stopWithMasterAndJobLock(WithLock masterLock, WithLock jobLock);
+
         PeriodicJob _job;
         ClockSource* _clockSource;
         PeriodicRunnerEmbedded* _periodicRunner;

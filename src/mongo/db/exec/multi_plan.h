@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -154,9 +153,9 @@ public:
     static const char* kStageType;
 
 protected:
-    void saveState(RequiresCollTag) final {}
+    void doSaveStateRequiresCollection() final {}
 
-    void restoreState(RequiresCollTag) final {}
+    void doRestoreStateRequiresCollection() final {}
 
 private:
     //

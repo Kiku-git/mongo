@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -75,9 +74,11 @@ public:
 
     virtual const IndexAccessMethod* accessMethod() const = 0;
 
-    virtual bool isBuilding() const = 0;
+    virtual bool isHybridBuilding() const = 0;
 
     virtual IndexBuildInterceptor* indexBuildInterceptor() = 0;
+
+    virtual const IndexBuildInterceptor* indexBuildInterceptor() const = 0;
 
     virtual void setIndexBuildInterceptor(IndexBuildInterceptor* interceptor) = 0;
 
@@ -156,8 +157,8 @@ public:
 
 class IndexCatalogEntryContainer {
 public:
-    typedef std::vector<std::unique_ptr<IndexCatalogEntry>>::const_iterator const_iterator;
-    typedef std::vector<std::unique_ptr<IndexCatalogEntry>>::const_iterator iterator;
+    typedef std::vector<std::shared_ptr<IndexCatalogEntry>>::const_iterator const_iterator;
+    typedef std::vector<std::shared_ptr<IndexCatalogEntry>>::const_iterator iterator;
 
     const_iterator begin() const {
         return _entries.begin();
@@ -182,6 +183,11 @@ public:
 
     IndexCatalogEntry* find(const std::string& name);
 
+    /**
+     * Returns a pointer to the IndexCatalogEntry corresponding to 'desc', where the caller assumes
+     * shared ownership of the catalog object. Returns null if the entry does not exist.
+     */
+    std::shared_ptr<IndexCatalogEntry> findShared(const IndexDescriptor* desc) const;
 
     unsigned size() const {
         return _entries.size();
@@ -192,20 +198,21 @@ public:
     /**
      * Removes from _entries and returns the matching entry or NULL if none matches.
      */
-    IndexCatalogEntry* release(const IndexDescriptor* desc);
+    std::shared_ptr<IndexCatalogEntry> release(const IndexDescriptor* desc);
 
     bool remove(const IndexDescriptor* desc) {
-        IndexCatalogEntry* entry = release(desc);
-        delete entry;
-        return entry;
+        return static_cast<bool>(release(desc));
     }
 
-    // pass ownership to EntryContainer
-    void add(IndexCatalogEntry* entry) {
-        _entries.push_back(std::unique_ptr<IndexCatalogEntry>{entry});
+    void add(std::shared_ptr<IndexCatalogEntry>&& entry) {
+        _entries.push_back(std::move(entry));
+    }
+
+    std::vector<std::shared_ptr<const IndexCatalogEntry>> getAllEntries() const {
+        return {_entries.begin(), _entries.end()};
     }
 
 private:
-    std::vector<std::unique_ptr<IndexCatalogEntry>> _entries;
+    std::vector<std::shared_ptr<IndexCatalogEntry>> _entries;
 };
 }  // namespace mongo

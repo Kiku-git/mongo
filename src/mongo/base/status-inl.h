@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -74,7 +73,7 @@ inline std::string Status::codeString() const {
     return ErrorCodes::errorString(code());
 }
 
-inline AtomicUInt32::WordType Status::refCount() const {
+inline unsigned Status::refCount() const {
     return _error ? _error->refs.load() : 0;
 }
 

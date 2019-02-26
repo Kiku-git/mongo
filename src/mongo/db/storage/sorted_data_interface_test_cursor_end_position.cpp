@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -43,6 +42,7 @@ void testSetEndPosition_Next_Forward(bool unique, bool inclusive) {
     auto opCtx = harnessHelper->newOperationContext();
     auto sorted = harnessHelper->newSortedDataInterface(
         unique,
+        /*partial=*/false,
         {
             {key1, loc1}, {key2, loc1}, {key3, loc1}, {key4, loc1}, {key5, loc1},
         });
@@ -82,6 +82,7 @@ void testSetEndPosition_Next_Reverse(bool unique, bool inclusive) {
     auto opCtx = harnessHelper->newOperationContext();
     auto sorted = harnessHelper->newSortedDataInterface(
         unique,
+        /*partial=*/false,
         {
             {key1, loc1}, {key2, loc1}, {key3, loc1}, {key4, loc1}, {key5, loc1},
         });
@@ -121,6 +122,7 @@ void testSetEndPosition_Seek_Forward(bool unique, bool inclusive) {
     const auto harnessHelper = newSortedDataInterfaceHarnessHelper();
     auto opCtx = harnessHelper->newOperationContext();
     auto sorted = harnessHelper->newSortedDataInterface(unique,
+                                                        /*partial=*/false,
                                                         {
                                                             {key1, loc1},
                                                             // No key2
@@ -169,6 +171,7 @@ void testSetEndPosition_Seek_Reverse(bool unique, bool inclusive) {
     const auto harnessHelper = newSortedDataInterfaceHarnessHelper();
     auto opCtx = harnessHelper->newOperationContext();
     auto sorted = harnessHelper->newSortedDataInterface(unique,
+                                                        /*partial=*/false,
                                                         {
                                                             {key1, loc1},
                                                             {key2, loc1},
@@ -219,6 +222,7 @@ void testSetEndPosition_Restore_Forward(bool unique) {
     auto opCtx = harnessHelper->newOperationContext();
     auto sorted = harnessHelper->newSortedDataInterface(
         unique,
+        /*partial=*/false,
         {
             {key1, loc1}, {key2, loc1}, {key3, loc1}, {key4, loc1},
         });
@@ -255,6 +259,7 @@ void testSetEndPosition_Restore_Reverse(bool unique) {
     auto opCtx = harnessHelper->newOperationContext();
     auto sorted = harnessHelper->newSortedDataInterface(
         unique,
+        /*partial=*/false,
         {
             {key1, loc1}, {key2, loc1}, {key3, loc1}, {key4, loc1},
         });
@@ -295,6 +300,7 @@ void testSetEndPosition_RestoreEndCursor_Forward(bool unique) {
     const auto harnessHelper = newSortedDataInterfaceHarnessHelper();
     auto opCtx = harnessHelper->newOperationContext();
     auto sorted = harnessHelper->newSortedDataInterface(unique,
+                                                        /*partial=*/false,
                                                         {
                                                             {key1, loc1}, {key4, loc1},
                                                         });
@@ -329,6 +335,7 @@ void testSetEndPosition_RestoreEndCursor_Reverse(bool unique) {
     const auto harnessHelper = newSortedDataInterfaceHarnessHelper();
     auto opCtx = harnessHelper->newOperationContext();
     auto sorted = harnessHelper->newSortedDataInterface(unique,
+                                                        /*partial=*/false,
                                                         {
                                                             {key1, loc1}, {key4, loc1},
                                                         });
@@ -365,6 +372,7 @@ void testSetEndPosition_Empty_Forward(bool unique, bool inclusive) {
     auto opCtx = harnessHelper->newOperationContext();
     auto sorted =
         harnessHelper->newSortedDataInterface(unique,
+                                              /*partial=*/false,
                                               {
                                                   {key1, loc1}, {key2, loc1}, {key3, loc1},
                                               });
@@ -395,6 +403,7 @@ void testSetEndPosition_Empty_Reverse(bool unique, bool inclusive) {
     auto opCtx = harnessHelper->newOperationContext();
     auto sorted =
         harnessHelper->newSortedDataInterface(unique,
+                                              /*partial=*/false,
                                               {
                                                   {key1, loc1}, {key2, loc1}, {key3, loc1},
                                               });
@@ -419,5 +428,48 @@ TEST(SortedDataInterface, SetEndPosition_Empty_Reverse_Standard_Inclusive) {
 TEST(SortedDataInterface, SetEndPosition_Empty_Reverse_Standard_Exclusive) {
     testSetEndPosition_Empty_Reverse(false, false);
 }
+
+void testSetEndPosition_Character_Limits(bool unique, bool inclusive) {
+    const auto harnessHelper = newSortedDataInterfaceHarnessHelper();
+    auto opCtx = harnessHelper->newOperationContext();
+    auto sorted = harnessHelper->newSortedDataInterface(
+        unique, /*partial=*/false, {{key7, loc1}, {key8, loc1}});
+
+    auto cursor = sorted->newCursor(opCtx.get());
+    cursor->setEndPosition(key7, inclusive);
+
+    if (inclusive) {
+        ASSERT_EQ(cursor->seek(key7, true), IndexKeyEntry(key7, loc1));
+        ASSERT_EQ(cursor->next(), boost::none);
+    } else {
+        ASSERT_EQ(cursor->seek(key7, true), boost::none);
+    }
+
+    cursor = sorted->newCursor(opCtx.get());
+    cursor->setEndPosition(key8, inclusive);
+
+    if (inclusive) {
+        ASSERT_EQ(cursor->seek(key7, true), IndexKeyEntry(key7, loc1));
+        ASSERT_EQ(cursor->next(), IndexKeyEntry(key8, loc1));
+        ASSERT_EQ(cursor->next(), boost::none);
+    } else {
+        ASSERT_EQ(cursor->seek(key7, true), IndexKeyEntry(key7, loc1));
+        ASSERT_EQ(cursor->next(), boost::none);
+    }
+}
+
+TEST(SortedDataInterface, SetEndPosition_Character_Limits_Unique_Inclusive) {
+    testSetEndPosition_Character_Limits(true, true);
+}
+TEST(SortedDataInterface, SetEndPosition_Character_Limits_Unique_Exclusive) {
+    testSetEndPosition_Character_Limits(true, false);
+}
+TEST(SortedDataInterface, SetEndPosition_Character_Limits_Standard_Inclusive) {
+    testSetEndPosition_Character_Limits(false, true);
+}
+TEST(SortedDataInterface, SetEndPosition_Character_Limits_Standard_Exclusive) {
+    testSetEndPosition_Character_Limits(false, false);
+}
+
 }  // namespace
 }  // namespace mongo

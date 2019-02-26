@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -33,16 +32,17 @@
 #include "mongo/platform/basic.h"
 
 #include "mongo/client/remote_command_targeter.h"
+#include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/txn_two_phase_commit_cmds_gen.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/s/sharding_state.h"
-#include "mongo/db/session_catalog_mongod.h"
-#include "mongo/db/transaction_coordinator_service.h"
+#include "mongo/db/s/transaction_coordinator_service.h"
 #include "mongo/db/transaction_participant.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/executor/task_executor_pool.h"
-#include "mongo/s/grid.h"
+#include "mongo/rpc/get_status_from_command_result.h"
+#include "mongo/transport/service_entry_point.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
@@ -83,8 +83,7 @@ public:
                     serverGlobalParams.enableMajorityReadConcern);
 
             // We do not allow preparing a transaction if the replica set has any arbiters.
-            auto replCoord =
-                repl::ReplicationCoordinator::get(opCtx->getClient()->getServiceContext());
+            const auto replCoord = repl::ReplicationCoordinator::get(opCtx);
             uassert(50995,
                     "'prepareTransaction' is not supported for replica sets with arbiters",
                     !replCoord->setContainsArbiter());
@@ -106,13 +105,14 @@ public:
 
             uassert(ErrorCodes::NoSuchTransaction,
                     "Transaction isn't in progress",
-                    txnParticipant->inMultiDocumentTransaction());
+                    txnParticipant.inMultiDocumentTransaction());
 
-            if (txnParticipant->transactionIsPrepared()) {
+            if (txnParticipant.transactionIsPrepared()) {
                 auto& replClient = repl::ReplClientInfo::forClient(opCtx->getClient());
-                auto prepareOpTime = txnParticipant->getPrepareOpTime();
+                auto prepareOpTime = txnParticipant.getPrepareOpTime();
+
                 // Set the client optime to be prepareOpTime if it's not already later than
-                // prepareOpTime. his ensures that we wait for writeConcern and that prepareOpTime
+                // prepareOpTime. This ensures that we wait for writeConcern and that prepareOpTime
                 // will be committed.
                 if (prepareOpTime > replClient.getLastOp()) {
                     replClient.setLastOp(prepareOpTime);
@@ -127,16 +127,16 @@ public:
 
                 if (MONGO_FAIL_POINT(
                         participantReturnNetworkErrorForPrepareAfterExecutingPrepareLogic)) {
-                    uasserted(ErrorCodes::SocketException,
+                    uasserted(ErrorCodes::HostUnreachable,
                               "returning network error because failpoint is on");
                 }
                 return PrepareTimestamp(prepareOpTime.getTimestamp());
             }
 
-            const auto prepareTimestamp = txnParticipant->prepareTransaction(opCtx, {});
+            const auto prepareTimestamp = txnParticipant.prepareTransaction(opCtx, {});
             if (MONGO_FAIL_POINT(
                     participantReturnNetworkErrorForPrepareAfterExecutingPrepareLogic)) {
-                uasserted(ErrorCodes::SocketException,
+                uasserted(ErrorCodes::HostUnreachable,
                           "returning network error because failpoint is on");
             }
             return PrepareTimestamp(std::move(prepareTimestamp));
@@ -154,7 +154,7 @@ public:
         void doCheckAuthorization(OperationContext* opCtx) const override {}
     };
 
-    virtual bool adminOnly() const {
+    bool adminOnly() const override {
         return true;
     }
 
@@ -166,12 +166,13 @@ public:
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
         return AllowedOnSecondary::kNever;
     }
+
 } prepareTransactionCmd;
 
-// TODO (SERVER-37440): Make coordinateCommit idempotent.
 class CoordinateCommitTransactionCmd : public TypedCommand<CoordinateCommitTransactionCmd> {
 public:
     using Request = CoordinateCommitTransaction;
+
     class Invocation final : public InvocationBase {
     public:
         using InvocationBase::InvocationBase;
@@ -189,40 +190,135 @@ public:
                      ServerGlobalParams::FeatureCompatibility::Version::kFullyUpgradedTo42));
 
             const auto& cmd = request();
+            const auto tcs = TransactionCoordinatorService::get(opCtx);
 
-            // Convert the participant list array into a set, and assert that all participants in
-            // the list are unique.
-            // TODO (PM-564): Propagate the 'readOnly' flag down into the TransactionCoordinator.
-            std::set<ShardId> participantList;
-            StringBuilder ss;
-            ss << "[";
-            for (const auto& participant : cmd.getParticipants()) {
-                const auto shardId = participant.getShardId();
-                uassert(ErrorCodes::InvalidOptions,
-                        str::stream() << "participant list contained duplicate shardId " << shardId,
-                        std::find(participantList.begin(), participantList.end(), shardId) ==
-                            participantList.end());
-                participantList.insert(shardId);
-                ss << shardId << " ";
+            boost::optional<Future<txn::CommitDecision>> commitDecisionFuture;
+
+            if (!cmd.getParticipants().empty()) {
+                // Convert the participant list array into a set, and assert that all participants
+                // in the list are unique.
+                // TODO (PM-564): Propagate the 'readOnly' flag down into the
+                // TransactionCoordinator.
+                std::set<ShardId> participantList;
+                StringBuilder ss;
+                ss << "[";
+                for (const auto& participant : cmd.getParticipants()) {
+                    const auto& shardId = participant.getShardId();
+                    uassert(ErrorCodes::InvalidOptions,
+                            str::stream() << "participant list contained duplicate shardId "
+                                          << shardId,
+                            std::find(participantList.begin(), participantList.end(), shardId) ==
+                                participantList.end());
+                    participantList.insert(shardId);
+                    ss << shardId << " ";
+                }
+                ss << "]";
+                LOG(3) << "Coordinator shard received request to coordinate commit with "
+                          "participant list "
+                       << ss.str() << " for transaction " << opCtx->getTxnNumber() << " on session "
+                       << opCtx->getLogicalSessionId()->toBSON();
+
+                commitDecisionFuture = tcs->coordinateCommit(
+                    opCtx, *opCtx->getLogicalSessionId(), *opCtx->getTxnNumber(), participantList);
+            } else {
+                LOG(3) << "Coordinator shard received request to recover commit decision for "
+                          "transaction "
+                       << opCtx->getTxnNumber() << " on session "
+                       << opCtx->getLogicalSessionId()->toBSON();
+
+                commitDecisionFuture = tcs->recoverCommit(
+                    opCtx, *opCtx->getLogicalSessionId(), *opCtx->getTxnNumber());
             }
-            ss << "]";
-            LOG(3) << "Coordinator shard received participant list with shards " << ss.str()
-                   << " for transaction " << opCtx->getTxnNumber() << " on session "
+
+            ON_BLOCK_EXIT([opCtx] {
+                // Since a commit decision will have been written from another OperationContext (by
+                // either the coordinator or participant), ensure waiting for the client's
+                // writeConcern of the decision.
+                repl::ReplClientInfo::forClient(opCtx->getClient())
+                    .setLastOpToSystemLastOpTime(opCtx);
+            });
+
+            if (commitDecisionFuture) {
+                // The commit coordination is still ongoing. Block waiting for the decision.
+                auto commitDecision = commitDecisionFuture->get(opCtx);
+                switch (commitDecision) {
+                    case txn::CommitDecision::kCanceled:
+                        // Continue on to recover the commit decision from disk.
+                        break;
+                    case txn::CommitDecision::kAbort:
+                        uasserted(ErrorCodes::NoSuchTransaction, "Transaction was aborted");
+                    case txn::CommitDecision::kCommit:
+                        return;
+                }
+            }
+
+            // No coordinator was found in memory. Either the commit coordination already completed,
+            // the original primary on which the coordinator was created stepped down, or this
+            // coordinateCommit request was a byzantine message.
+
+            LOG(3) << "Coordinator shard going to attempt to recover decision from local "
+                      "participant for transaction "
+                   << opCtx->getTxnNumber() << " on session "
                    << opCtx->getLogicalSessionId()->toBSON();
 
-            auto commitDecisionFuture = TransactionCoordinatorService::get(opCtx)->coordinateCommit(
-                opCtx,
-                opCtx->getLogicalSessionId().get(),
-                opCtx->getTxnNumber().get(),
-                participantList);
+            // Recover the decision from the local participant by sending abortTransaction to this
+            // node and inverting the response (i.e., a success response is converted to
+            // NoSuchTransaction; a TransactionCommitted response is converted to success). Do not
+            // pass writeConcern; if the coordinateCommitTransaction command ends up throwing
+            // NoSuchTransaction and the client sent a non-default writeConcern, the
+            // coordinateCommitTransaction command's post-amble will do a no-op write and wait for
+            // the client's writeConcern.
+            BSONObj abortRequestObj =
+                BSON("abortTransaction" << 1 << "lsid" << opCtx->getLogicalSessionId()->toBSON()
+                                        << "txnNumber"
+                                        << *opCtx->getTxnNumber()
+                                        << "autocommit"
+                                        << false);
 
-            // Block waiting for the commit decision.
-            auto commitDecision = commitDecisionFuture.get(opCtx);
+            BSONObj abortResponseObj;
 
-            // If the decision was abort, propagate NoSuchTransaction exception back to mongos.
-            uassert(ErrorCodes::NoSuchTransaction,
-                    "Transaction was aborted",
-                    commitDecision != TransactionCoordinator::CommitDecision::kAbort);
+            const auto executor = Grid::get(opCtx)->getExecutorPool()->getFixedExecutor();
+            auto cbHandle = uassertStatusOK(executor->scheduleWork([
+                serviceContext = opCtx->getServiceContext(),
+                &abortResponseObj,
+                abortRequestObj = abortRequestObj.getOwned()
+            ](const executor::TaskExecutor::CallbackArgs& cbArgs) {
+                ThreadClient threadClient(serviceContext);
+                auto uniqueOpCtx = Client::getCurrent()->makeOperationContext();
+                auto opCtx = uniqueOpCtx.get();
+
+                AuthorizationSession::get(opCtx->getClient())->grantInternalAuthorization();
+
+                auto requestOpMsg =
+                    OpMsgRequest::fromDBAndBody(NamespaceString::kAdminDb, abortRequestObj)
+                        .serialize();
+                const auto replyOpMsg = OpMsg::parseOwned(serviceContext->getServiceEntryPoint()
+                                                              ->handleRequest(opCtx, requestOpMsg)
+                                                              .response);
+
+                invariant(replyOpMsg.sequences.empty());
+                abortResponseObj = replyOpMsg.body.getOwned();
+            }));
+            executor->wait(cbHandle, opCtx);
+
+            const auto abortStatus = getStatusFromCommandResult(abortResponseObj);
+
+            // Since the abortTransaction was sent without writeConcern, there should not be a
+            // writeConcern error.
+            invariant(getWriteConcernStatusFromCommandResult(abortResponseObj).isOK());
+
+            LOG(3) << "coordinateCommitTransaction got response " << abortStatus << " for "
+                   << abortRequestObj << " used to recover decision from local participant";
+
+            // If the abortTransaction succeeded, return that the transaction aborted.
+            uassert(ErrorCodes::NoSuchTransaction, "transaction aborted", !abortStatus.isOK());
+
+            // If the abortTransaction returned that the transaction committed, return
+            // ok, otherwise return whatever the abortTransaction errored with (which may be
+            // NoSuchTransaction).
+            uassert(abortStatus.code(),
+                    abortStatus.reason(),
+                    abortStatus.code() == ErrorCodes::TransactionCommitted);
         }
 
     private:
@@ -248,6 +344,7 @@ public:
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
         return AllowedOnSecondary::kNever;
     }
+
 } coordinateCommitTransactionCmd;
 
 }  // namespace

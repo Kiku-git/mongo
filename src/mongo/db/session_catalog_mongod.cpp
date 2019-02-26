@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -28,7 +27,7 @@
  *    it in the license file.
  */
 
-#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kWrite
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kTransaction
 
 #include "mongo/platform/basic.h"
 
@@ -43,6 +42,7 @@
 #include "mongo/db/transaction_participant.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/util/concurrency/thread_pool.h"
+#include "mongo/util/log.h"
 
 namespace mongo {
 namespace {
@@ -74,10 +74,73 @@ auto getThreadPool(OperationContext* opCtx) {
     return &sessionTasksExecutor(opCtx->getServiceContext()).threadPool;
 }
 
+void killSessionTokensFunction(
+    OperationContext* opCtx,
+    std::shared_ptr<std::vector<SessionCatalog::KillToken>> sessionKillTokens) {
+    if (sessionKillTokens->empty())
+        return;
+
+    uassertStatusOK(getThreadPool(opCtx)->schedule([
+        service = opCtx->getServiceContext(),
+        sessionKillTokens = std::move(sessionKillTokens)
+    ]() mutable {
+        auto uniqueClient = service->makeClient("Kill-Session");
+        auto uniqueOpCtx = uniqueClient->makeOperationContext();
+        const auto opCtx = uniqueOpCtx.get();
+        const auto catalog = SessionCatalog::get(opCtx);
+
+        for (auto& sessionKillToken : *sessionKillTokens) {
+            auto session = catalog->checkOutSessionForKill(opCtx, std::move(sessionKillToken));
+
+            TransactionParticipant::get(session).invalidate(opCtx);
+        }
+    }));
+}
+
 }  // namespace
 
 void MongoDSessionCatalog::onStepUp(OperationContext* opCtx) {
-    invalidateSessions(opCtx, boost::none);
+    // Invalidate sessions that could have a retryable write on it, so that we can refresh from disk
+    // in case the in-memory state was out of sync.
+    const auto catalog = SessionCatalog::get(opCtx);
+    // The use of shared_ptr here is in order to work around the limitation of stdx::function that
+    // the functor must be copyable.
+    auto sessionKillTokens = std::make_shared<std::vector<SessionCatalog::KillToken>>();
+
+    // Scan all sessions and reacquire locks for prepared transactions.
+    // There may be sessions that are checked out during this scan, but none of them
+    // can be prepared transactions, since only oplog application can make transactions
+    // prepared on secondaries and oplog application has been stopped at this moment.
+    std::vector<LogicalSessionId> sessionIdToReacquireLocks;
+
+    SessionKiller::Matcher matcher(
+        KillAllSessionsByPatternSet{makeKillAllSessionsByPattern(opCtx)});
+    catalog->scanSessions(matcher, [&](const ObservableSession& session) {
+        const auto txnParticipant = TransactionParticipant::get(session);
+        if (!txnParticipant.inMultiDocumentTransaction()) {
+            sessionKillTokens->emplace_back(session.kill());
+        }
+
+        if (txnParticipant.transactionIsPrepared()) {
+            sessionIdToReacquireLocks.emplace_back(session.getSessionId());
+        }
+    });
+    killSessionTokensFunction(opCtx, sessionKillTokens);
+
+    {
+        // Create a new opCtx because we need an empty locker to refresh the locks.
+        auto newClient = opCtx->getServiceContext()->makeClient("restore-prepared-txn");
+        AlternativeClientRegion acr(newClient);
+        for (const auto& sessionId : sessionIdToReacquireLocks) {
+            auto newOpCtx = cc().makeOperationContext();
+            newOpCtx->setLogicalSessionId(sessionId);
+            MongoDOperationContextSession ocs(newOpCtx.get());
+            auto txnParticipant = TransactionParticipant::get(newOpCtx.get());
+            LOG(3) << "Restoring locks of prepared transaction. SessionId: " << sessionId.getId()
+                   << " TxnNumber: " << txnParticipant.getActiveTxnNumber();
+            txnParticipant.refreshLocksForPreparedTransaction(newOpCtx.get(), false);
+        }
+    }
 
     const size_t initialExtentSize = 0;
     const bool capped = false;
@@ -133,9 +196,9 @@ void MongoDSessionCatalog::invalidateSessions(OperationContext* opCtx,
 
     const auto catalog = SessionCatalog::get(opCtx);
 
-    // The use of shared_ptr here is in order to work around the limition of stdx::function that the
-    // functor must be copyable
-    auto sessionKillTokens = std::make_shared<std::vector<Session::KillToken>>();
+    // The use of shared_ptr here is in order to work around the limitation of stdx::function that
+    // the functor must be copyable.
+    auto sessionKillTokens = std::make_shared<std::vector<SessionCatalog::KillToken>>();
 
     if (singleSessionDoc) {
         sessionKillTokens->emplace_back(catalog->killSession(LogicalSessionId::parse(
@@ -143,51 +206,56 @@ void MongoDSessionCatalog::invalidateSessions(OperationContext* opCtx,
     } else {
         SessionKiller::Matcher matcher(
             KillAllSessionsByPatternSet{makeKillAllSessionsByPattern(opCtx)});
-        catalog->scanSessions(
-            matcher, [&sessionKillTokens](WithLock sessionCatalogLock, Session* session) {
-                sessionKillTokens->emplace_back(session->kill(sessionCatalogLock));
-            });
+        catalog->scanSessions(matcher, [&sessionKillTokens](const ObservableSession& session) {
+            sessionKillTokens->emplace_back(session.kill());
+        });
     }
 
-    if (sessionKillTokens->empty())
-        return;
-
-    uassertStatusOK(getThreadPool(opCtx)->schedule([
-        service = opCtx->getServiceContext(),
-        sessionKillTokens = std::move(sessionKillTokens)
-    ]() mutable {
-        auto uniqueClient = service->makeClient("Kill-Session");
-        auto uniqueOpCtx = uniqueClient->makeOperationContext();
-        const auto opCtx = uniqueOpCtx.get();
-        const auto catalog = SessionCatalog::get(opCtx);
-
-        for (auto& sessionKillToken : *sessionKillTokens) {
-            auto session = catalog->checkOutSessionForKill(opCtx, std::move(sessionKillToken));
-
-            auto const txnParticipant =
-                TransactionParticipant::getFromNonCheckedOutSession(session.get());
-            txnParticipant->invalidate();
-        }
-    }));
+    killSessionTokensFunction(opCtx, sessionKillTokens);
 }
-
 
 MongoDOperationContextSession::MongoDOperationContextSession(OperationContext* opCtx)
     : _operationContextSession(opCtx) {
-    if (!opCtx->getClient()->isInDirectClient()) {
-        const auto txnParticipant = TransactionParticipant::get(opCtx);
-        txnParticipant->refreshFromStorageIfNeeded(opCtx);
+    invariant(!opCtx->getClient()->isInDirectClient());
+
+    auto txnParticipant = TransactionParticipant::get(opCtx);
+    txnParticipant.refreshFromStorageIfNeeded(opCtx);
+}
+
+MongoDOperationContextSession::~MongoDOperationContextSession() = default;
+
+void MongoDOperationContextSession::checkIn(OperationContext* opCtx) {
+    if (auto txnParticipant = TransactionParticipant::get(opCtx)) {
+        txnParticipant.stashTransactionResources(opCtx);
+    }
+
+    OperationContextSession::checkIn(opCtx);
+}
+
+void MongoDOperationContextSession::checkOut(OperationContext* opCtx, const std::string& cmdName) {
+    OperationContextSession::checkOut(opCtx);
+
+    if (auto txnParticipant = TransactionParticipant::get(opCtx)) {
+        txnParticipant.unstashTransactionResources(opCtx, cmdName);
     }
 }
 
 MongoDOperationContextSessionWithoutRefresh::MongoDOperationContextSessionWithoutRefresh(
     OperationContext* opCtx)
-    : _operationContextSession(opCtx) {
+    : _operationContextSession(opCtx), _opCtx(opCtx) {
     invariant(!opCtx->getClient()->isInDirectClient());
     const auto clientTxnNumber = *opCtx->getTxnNumber();
 
-    const auto txnParticipant = TransactionParticipant::get(opCtx);
-    txnParticipant->beginOrContinueTransactionUnconditionally(clientTxnNumber);
+    auto txnParticipant = TransactionParticipant::get(opCtx);
+    txnParticipant.beginOrContinueTransactionUnconditionally(opCtx, clientTxnNumber);
+}
+
+MongoDOperationContextSessionWithoutRefresh::~MongoDOperationContextSessionWithoutRefresh() {
+    const auto txnParticipant = TransactionParticipant::get(_opCtx);
+    // A session on secondaries should never be checked back in with a TransactionParticipant that
+    // isn't prepared, aborted, or committed.
+    invariant(!txnParticipant.inMultiDocumentTransaction() ||
+              txnParticipant.transactionIsPrepared());
 }
 
 }  // namespace mongo

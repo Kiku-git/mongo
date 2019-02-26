@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -30,6 +29,7 @@
 
 #include "mongo/db/read_concern.h"
 #include "mongo/db/repl/read_concern_args.h"
+#include "mongo/db/repl/speculative_majority_read_info.h"
 
 namespace mongo {
 
@@ -50,8 +50,13 @@ MONGO_REGISTER_SHIM(waitForReadConcern)
 
     return Status::OK();
 }
+MONGO_REGISTER_SHIM(waitForSpeculativeMajorityReadConcern)
+(OperationContext* opCtx, repl::SpeculativeMajorityReadInfo speculativeReadInfo)->Status {
+    return Status::OK();
+}
 
-MONGO_REGISTER_SHIM(waitForLinearizableReadConcern)(OperationContext* opCtx)->Status {
+MONGO_REGISTER_SHIM(waitForLinearizableReadConcern)
+(OperationContext* opCtx, const int readConcernTimeout)->Status {
     return Status::OK();
 }
 

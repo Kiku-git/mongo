@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -45,6 +44,36 @@ namespace mongo {
 
 class BSONObjBuilder;
 class OperationContext;
+
+/**
+ * Storage statistics management class, with interfaces to provide the statistics in the BSON format
+ * and an operator to add the statistics values.
+ */
+class StorageStats {
+    MONGO_DISALLOW_COPYING(StorageStats);
+
+public:
+    StorageStats() = default;
+
+    virtual ~StorageStats(){};
+
+    /**
+     * Provides the storage statistics in the form of a BSONObj.
+     */
+    virtual BSONObj toBSON() = 0;
+
+    /**
+     * Add the statistics values.
+     */
+    virtual StorageStats& operator+=(const StorageStats&) = 0;
+
+    /**
+     * Provides the ability to create an instance of this class outside of the storage integration
+     * layer.
+     */
+    virtual std::shared_ptr<StorageStats> getCopy() = 0;
+};
+
 
 /**
  * A RecoveryUnit is responsible for ensuring that data is persisted.
@@ -160,17 +189,18 @@ public:
      * Returns the Timestamp being used by this recovery unit or boost::none if not reading from
      * a point in time. Any point in time returned will reflect one of the following:
      *  - when using ReadSource::kProvided, the timestamp provided.
-     *  - when using ReadSource::kLastAppliedSnapshot, the timestamp chosen using the storage
-     * engine's last applied timestamp.
+     *  - when using ReadSource::kNoOverlap, the timestamp chosen by the storage engine.
      *  - when using ReadSource::kAllCommittedSnapshot, the timestamp chosen using the storage
      * engine's all-committed timestamp.
-     *  - when using ReadSource::kLastApplied, the last applied timestamp at which the current
-     * storage transaction was opened, if one is open.
+     *  - when using ReadSource::kLastApplied, the timestamp chosen using the storage engine's last
+     * applied timestamp. Can return boost::none if no timestamp has been established.
      *  - when using ReadSource::kMajorityCommitted, the majority committed timestamp chosen by the
      * storage engine after a transaction has been opened or after a call to
      * obtainMajorityCommittedSnapshot().
+     *
+     * This may passively start a storage engine transaction to establish a read timestamp.
      */
-    virtual boost::optional<Timestamp> getPointInTimeReadTimestamp() const {
+    virtual boost::optional<Timestamp> getPointInTimeReadTimestamp() {
         return boost::none;
     }
 
@@ -208,6 +238,12 @@ public:
     virtual void setCommitTimestamp(Timestamp timestamp) {}
 
     /**
+     * Sets a timestamp that decides when all the future writes on this RecoveryUnit will be
+     * durable.
+     */
+    virtual void setDurableTimestamp(Timestamp timestamp) {}
+
+    /**
      * Clears the commit timestamp that was set by setCommitTimestamp(). This must be called outside
      * of a WUOW. This must be called when a commit timestamp is set.
      */
@@ -217,6 +253,13 @@ public:
      * Returns the commit timestamp. Can be called at any time.
      */
     virtual Timestamp getCommitTimestamp() const {
+        return {};
+    }
+
+    /**
+     * Returns the durable timestamp.
+     */
+    virtual Timestamp getDurableTimestamp() const {
         return {};
     }
 
@@ -242,7 +285,14 @@ public:
     }
 
     /**
-     * The ReadSource indicates which exteral or provided timestamp to read from for future
+     * Fetches the storage level statistics.
+     */
+    virtual std::shared_ptr<StorageStats> getOperationStatistics() const {
+        return (nullptr);
+    }
+
+    /**
+     * The ReadSource indicates which external or provided timestamp to read from for future
      * transactions.
      */
     enum ReadSource {
@@ -259,15 +309,14 @@ public:
          */
         kMajorityCommitted,
         /**
+         * Read from the latest timestamp where no future transactions will commit at or before.
+         */
+        kNoOverlap,
+        /**
          * Read from the last applied timestamp. New transactions start at the most up-to-date
          * timestamp.
          */
         kLastApplied,
-        /**
-         * Read from the last applied timestamp. New transactions will always read from the same
-         * timestamp and never advance.
-         */
-        kLastAppliedSnapshot,
         /**
          * Read from the all-committed timestamp. New transactions will always read from the same
          * timestamp and never advance.

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -33,6 +32,7 @@
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/commands.h"
+#include "mongo/db/commands/txn_cmds_gen.h"
 #include "mongo/s/cluster_commands_helpers.h"
 #include "mongo/s/transaction_router.h"
 
@@ -50,7 +50,7 @@ public:
         return AllowedOnSecondary::kAlways;
     }
 
-    virtual bool adminOnly() const {
+    bool adminOnly() const override {
         return true;
     }
 
@@ -74,13 +74,15 @@ public:
              BSONObjBuilder& result) override {
         auto txnRouter = TransactionRouter::get(opCtx);
         uassert(ErrorCodes::InvalidOptions,
-                "commitTransaction can only be run within a context of a session",
+                "commitTransaction can only be run within a session",
                 txnRouter != nullptr);
 
-        auto cmdResponse = txnRouter->commitTransaction(opCtx);
+        auto commitCmd = CommitTransaction::parse(IDLParserErrorContext("commit cmd"), cmdObj);
+        auto cmdResponse = txnRouter->commitTransaction(opCtx, commitCmd.getRecoveryToken());
         CommandHelpers::filterCommandReplyForPassthrough(cmdResponse.response, &result);
         return true;
     }
+
 } clusterCommitTransactionCmd;
 
 }  // namespace

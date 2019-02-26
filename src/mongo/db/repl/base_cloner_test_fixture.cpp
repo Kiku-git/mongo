@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -98,7 +97,7 @@ BSONObj BaseClonerTest::createListCollectionsResponse(CursorId cursorId, const B
 BSONObj BaseClonerTest::createListIndexesResponse(CursorId cursorId,
                                                   const BSONArray& specs,
                                                   const char* batchFieldName) {
-    return createCursorResponse(cursorId, "test.$cmd.listIndexes.coll", specs, batchFieldName);
+    return createCursorResponse(cursorId, "test.coll", specs, batchFieldName);
 }
 
 // static

@@ -3,7 +3,7 @@
 /**
  *  Performs repeated reads of the documents in the collection to test snapshot isolation.
  *
- * @tags: [uses_transactions]
+ * @tags: [uses_transactions, assumes_snapshot_transactions]
  */
 
 load('jstests/concurrency/fsm_libs/extend_workload.js');  // for extendWorkload
@@ -19,22 +19,24 @@ var $config = extendWorkload($config, function($config, $super) {
         // collection in order to stress the behavior of reading from the same snapshot over the
         // course of multiple network roundtrips.
         const batchSize = Math.max(2, Math.floor(this.numDocs / 5));
-        let prevDocuments;
         const collection = this.session.getDatabase(db.getName()).getCollection(collName);
         withTxnAndAutoRetry(this.session, () => {
+            let prevDocuments = undefined;
             for (let i = 0; i < this.numReads; i++) {
                 const collectionDocs = collection.find().batchSize(batchSize).toArray();
-                assertWhenOwnColl.eq(
-                    this.numDocs, collectionDocs.length, () => tojson(collectionDocs));
+                assertWhenOwnColl.eq(this.numDocs, collectionDocs.length, () => {
+                    return "txnNumber: " + tojson(this.session.getTxnNumber_forTesting()) +
+                        ", session id: " + tojson(this.session.getSessionId()) + ", read number: " +
+                        i + ", collection docs: " + tojson(collectionDocs);
+                });
                 if (prevDocuments) {
-                    assertAlways.eq(prevDocuments.length, collectionDocs.length);
-                    for (let j = 0; j < prevDocuments.length; j++) {
-                        assertAlways(bsonBinaryEqual(prevDocuments[j], collectionDocs[j]),
-                                     () => "Document mismatch for read " + i + " document index " +
-                                         j + " Previous documents: " +
-                                         tojsononeline(prevDocuments) + " Current documents: " +
-                                         tojsononeline(collectionDocs));
-                    }
+                    assertAlways.sameMembers(prevDocuments,
+                                             collectionDocs,
+                                             () => "Document mismatch - previous documents: " +
+                                                 tojsononeline(prevDocuments) +
+                                                 ", current documents: " +
+                                                 tojsononeline(collectionDocs),
+                                             bsonBinaryEqual);  // Exact document matches.
                 }
                 prevDocuments = collectionDocs;
             }

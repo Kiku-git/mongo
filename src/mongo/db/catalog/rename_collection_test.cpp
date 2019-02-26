@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -37,13 +36,13 @@
 #include "mongo/db/catalog/collection_catalog_entry.h"
 #include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/catalog/database_holder.h"
-#include "mongo/db/catalog/multi_index_block.h"
-#include "mongo/db/catalog/multi_index_block_impl.h"
+#include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/rename_collection.h"
 #include "mongo/db/catalog/uuid_catalog.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/db_raii.h"
+#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer.h"
@@ -98,6 +97,7 @@ public:
     repl::OpTime onDropCollection(OperationContext* opCtx,
                                   const NamespaceString& collectionName,
                                   OptionalCollectionUUID uuid,
+                                  std::uint64_t numRecords,
                                   CollectionDropType dropType) override;
 
     void onRenameCollection(OperationContext* opCtx,
@@ -105,6 +105,7 @@ public:
                             const NamespaceString& toCollection,
                             OptionalCollectionUUID uuid,
                             OptionalCollectionUUID dropTargetUUID,
+                            std::uint64_t numRecords,
                             bool stayTemp) override;
 
     repl::OpTime preRenameCollection(OperationContext* opCtx,
@@ -112,6 +113,7 @@ public:
                                      const NamespaceString& toCollection,
                                      OptionalCollectionUUID uuid,
                                      OptionalCollectionUUID dropTargetUUID,
+                                     std::uint64_t numRecords,
                                      bool stayTemp) override;
     void postRenameCollection(OperationContext* opCtx,
                               const NamespaceString& fromCollection,
@@ -182,6 +184,7 @@ void OpObserverMock::onCreateCollection(OperationContext* opCtx,
 repl::OpTime OpObserverMock::onDropCollection(OperationContext* opCtx,
                                               const NamespaceString& collectionName,
                                               OptionalCollectionUUID uuid,
+                                              std::uint64_t numRecords,
                                               const CollectionDropType dropType) {
     _logOp(opCtx, collectionName, "drop");
     // If the oplog is not disabled for this namespace, then we need to reserve an op time for the
@@ -189,7 +192,8 @@ repl::OpTime OpObserverMock::onDropCollection(OperationContext* opCtx,
     if (!repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, collectionName)) {
         OpObserver::Times::get(opCtx).reservedOpTimes.push_back(dropOpTime);
     }
-    auto noopOptime = OpObserverNoop::onDropCollection(opCtx, collectionName, uuid, dropType);
+    auto noopOptime =
+        OpObserverNoop::onDropCollection(opCtx, collectionName, uuid, numRecords, dropType);
     invariant(noopOptime.isNull());
     return {};
 }
@@ -199,10 +203,12 @@ void OpObserverMock::onRenameCollection(OperationContext* opCtx,
                                         const NamespaceString& toCollection,
                                         OptionalCollectionUUID uuid,
                                         OptionalCollectionUUID dropTargetUUID,
+                                        std::uint64_t numRecords,
                                         bool stayTemp) {
-    preRenameCollection(opCtx, fromCollection, toCollection, uuid, dropTargetUUID, stayTemp);
+    preRenameCollection(
+        opCtx, fromCollection, toCollection, uuid, dropTargetUUID, numRecords, stayTemp);
     OpObserverNoop::onRenameCollection(
-        opCtx, fromCollection, toCollection, uuid, dropTargetUUID, stayTemp);
+        opCtx, fromCollection, toCollection, uuid, dropTargetUUID, numRecords, stayTemp);
     onRenameCollectionCalled = true;
     onRenameCollectionDropTarget = dropTargetUUID;
 }
@@ -224,11 +230,12 @@ repl::OpTime OpObserverMock::preRenameCollection(OperationContext* opCtx,
                                                  const NamespaceString& toCollection,
                                                  OptionalCollectionUUID uuid,
                                                  OptionalCollectionUUID dropTargetUUID,
+                                                 std::uint64_t numRecords,
                                                  bool stayTemp) {
     _logOp(opCtx, fromCollection, "rename");
     OpObserver::Times::get(opCtx).reservedOpTimes.push_back(renameOpTime);
     OpObserverNoop::preRenameCollection(
-        opCtx, fromCollection, toCollection, uuid, dropTargetUUID, stayTemp);
+        opCtx, fromCollection, toCollection, uuid, dropTargetUUID, numRecords, stayTemp);
     return {};
 }
 void OpObserverMock::_logOp(OperationContext* opCtx,
@@ -400,16 +407,16 @@ bool _isTempCollection(OperationContext* opCtx, const NamespaceString& nss) {
 }
 
 /**
- * Creates an index using the given index name with a bogus key spec.
+ * Creates an index on an empty collection using the given index name with a bogus key spec.
  */
-void _createIndex(OperationContext* opCtx,
-                  const NamespaceString& nss,
-                  const std::string& indexName) {
-    writeConflictRetry(opCtx, "_createIndex", nss.ns(), [=] {
+void _createIndexOnEmptyCollection(OperationContext* opCtx,
+                                   const NamespaceString& nss,
+                                   const std::string& indexName) {
+    writeConflictRetry(opCtx, "_createIndexOnEmptyCollection", nss.ns(), [=] {
         AutoGetCollection autoColl(opCtx, nss, MODE_X);
         auto collection = autoColl.getCollection();
-        ASSERT_TRUE(collection) << "Cannot create index in collection " << nss
-                                << " because collection " << nss.ns() << " does not exist.";
+        ASSERT_TRUE(collection) << "Cannot create index on empty collection " << nss
+                                << " because collection " << nss << " does not exist.";
 
         auto indexInfoObj = BSON(
             "v" << int(IndexDescriptor::kLatestIndexVersion) << "key" << BSON("a" << 1) << "name"
@@ -417,10 +424,9 @@ void _createIndex(OperationContext* opCtx,
                 << "ns"
                 << nss.ns());
 
-        MultiIndexBlockImpl indexer(opCtx, collection);
-        ASSERT_OK(indexer.init(indexInfoObj).getStatus());
+        auto indexCatalog = collection->getIndexCatalog();
         WriteUnitOfWork wuow(opCtx);
-        indexer.commit();
+        ASSERT_OK(indexCatalog->createIndexOnEmptyCollection(opCtx, indexInfoObj).getStatus());
         wuow.commit();
     });
 
@@ -435,7 +441,7 @@ void _insertDocument(OperationContext* opCtx, const NamespaceString& nss, const 
         AutoGetCollection autoColl(opCtx, nss, MODE_X);
         auto collection = autoColl.getCollection();
         ASSERT_TRUE(collection) << "Cannot insert document " << doc << " into collection " << nss
-                                << " because collection " << nss.ns() << " does not exist.";
+                                << " because collection " << nss << " does not exist.";
 
         WriteUnitOfWork wuow(opCtx);
         OpDebug* const opDebug = nullptr;
@@ -450,7 +456,8 @@ void _insertDocument(OperationContext* opCtx, const NamespaceString& nss, const 
  */
 Collection* _getCollection_inlock(OperationContext* opCtx, const NamespaceString& nss) {
     invariant(opCtx->lockState()->isCollectionLockedForMode(nss.ns(), MODE_IS));
-    auto* db = DatabaseHolder::getDatabaseHolder().get(opCtx, nss.db());
+    auto databaseHolder = DatabaseHolder::get(opCtx);
+    auto* db = databaseHolder->getDb(opCtx, nss.db());
     if (!db) {
         return nullptr;
     }
@@ -504,7 +511,7 @@ TEST_F(RenameCollectionTest, LongIndexNameAllowedForTargetCollection) {
 
     _createCollection(_opCtx.get(), _sourceNss);
     const std::string indexName(longestIndexNameAllowedForSource, 'a');
-    _createIndex(_opCtx.get(), _sourceNss, indexName);
+    _createIndexOnEmptyCollection(_opCtx.get(), _sourceNss, indexName);
     ASSERT_OK(renameCollection(_opCtx.get(), _sourceNss, _targetNssDifferentDb, {}));
 }
 
@@ -523,7 +530,7 @@ TEST_F(RenameCollectionTest, LongIndexNameAllowedForTemporaryCollectionForRename
 
     _createCollection(_opCtx.get(), _sourceNss);
     const std::string indexName(longestIndexNameAllowedForTarget, 'a');
-    _createIndex(_opCtx.get(), _sourceNss, indexName);
+    _createIndexOnEmptyCollection(_opCtx.get(), _sourceNss, indexName);
     ASSERT_OK(renameCollection(_opCtx.get(), _sourceNss, _targetNssDifferentDb, {}));
 }
 
@@ -532,7 +539,8 @@ TEST_F(RenameCollectionTest, RenameCollectionAcrossDatabaseWithUuid) {
     _createCollection(_opCtx.get(), _sourceNss, options);
     ASSERT_OK(renameCollection(_opCtx.get(), _sourceNss, _targetNssDifferentDb, {}));
     ASSERT_FALSE(_collectionExists(_opCtx.get(), _sourceNss));
-    ASSERT_NOT_EQUALS(options.uuid, _getCollectionUuid(_opCtx.get(), _targetNssDifferentDb));
+    ASSERT(options.uuid);
+    ASSERT_NOT_EQUALS(*options.uuid, _getCollectionUuid(_opCtx.get(), _targetNssDifferentDb));
 }
 
 TEST_F(RenameCollectionTest,
@@ -746,7 +754,8 @@ TEST_F(RenameCollectionTest, RenameCollectionMakesTargetCollectionDropPendingIfD
                                                              << " missing after successful rename";
 
     ASSERT_TRUE(_opObserver->onRenameCollectionCalled);
-    ASSERT_EQUALS(targetUUID, _opObserver->onRenameCollectionDropTarget);
+    ASSERT(_opObserver->onRenameCollectionDropTarget);
+    ASSERT_EQUALS(targetUUID, *_opObserver->onRenameCollectionDropTarget);
 
     auto renameOpTime = _opObserver->renameOpTime;
     ASSERT_GREATER_THAN(renameOpTime, repl::OpTime());
@@ -1006,7 +1015,7 @@ void _testRenameCollectionAcrossDatabaseOplogEntries(
     const std::vector<std::string>& expectedOplogEntries) {
     ASSERT_NOT_EQUALS(sourceNss.db(), targetNss.db());
     _createCollection(opCtx, sourceNss);
-    _createIndex(opCtx, sourceNss, "a_1");
+    _createIndexOnEmptyCollection(opCtx, sourceNss, "a_1");
     _insertDocument(opCtx, sourceNss, BSON("_id" << 0));
     oplogEntries->clear();
     if (forApplyOps) {
@@ -1092,7 +1101,7 @@ TEST_F(RenameCollectionTest,
 
 TEST_F(RenameCollectionTest, RenameCollectionAcrossDatabaseDropsTemporaryCollectionOnException) {
     _createCollection(_opCtx.get(), _sourceNss);
-    _createIndex(_opCtx.get(), _sourceNss, "a_1");
+    _createIndexOnEmptyCollection(_opCtx.get(), _sourceNss, "a_1");
     _insertDocument(_opCtx.get(), _sourceNss, BSON("_id" << 0));
     _opObserver->onInsertsThrows = true;
     _opObserver->oplogEntries.clear();

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -111,6 +110,11 @@ public:
 
     bool operator<(const UserName& rhs) const {
         return getUser() < rhs.getUser() || (getUser() == rhs.getUser() && getDB() < rhs.getDB());
+    }
+
+    template <typename H>
+    friend H AbslHashValue(H h, const UserName& userName) {
+        return H::combine(std::move(h), userName.getFullName());
     }
 
 private:

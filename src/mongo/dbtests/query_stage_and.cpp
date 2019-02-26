@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -74,8 +73,8 @@ public:
         ASSERT_OK(dbtests::createIndex(&_opCtx, ns(), obj));
     }
 
-    IndexDescriptor* getIndex(const BSONObj& obj, Collection* coll) {
-        std::vector<IndexDescriptor*> indexes;
+    const IndexDescriptor* getIndex(const BSONObj& obj, Collection* coll) {
+        std::vector<const IndexDescriptor*> indexes;
         coll->getIndexCatalog()->findIndexesByKeyPattern(&_opCtx, obj, false, &indexes);
         if (indexes.empty()) {
             FAIL(mongoutils::str::stream() << "Unable to find index with key pattern " << obj);
@@ -85,7 +84,7 @@ public:
 
     IndexScanParams makeIndexScanParams(OperationContext* opCtx,
                                         const IndexDescriptor* descriptor) {
-        IndexScanParams params(opCtx, *descriptor);
+        IndexScanParams params(opCtx, descriptor);
         params.bounds.isSimpleRange = true;
         params.bounds.endKey = BSONObj();
         params.bounds.boundInclusion = BoundInclusion::kIncludeBothStartAndEndKeys;
@@ -132,7 +131,7 @@ public:
     /**
      * Gets the next result from 'stage'.
      *
-     * Fails if the stage fails or returns DEAD, if the returned working
+     * Fails if the stage fails or returns FAILURE, if the returned working
      * set member is not fetched, or if there are no more results.
      */
     BSONObj getNext(PlanStage* stage, WorkingSet* ws) {
@@ -142,7 +141,6 @@ public:
 
             // We shouldn't fail or be dead.
             ASSERT(PlanStage::FAILURE != status);
-            ASSERT(PlanStage::DEAD != status);
 
             if (PlanStage::ADVANCED != status) {
                 continue;
@@ -805,9 +803,9 @@ public:
 
         const BSONObj dataObj = fromjson("{'foo': 'bar'}");
 
-        // Confirm PlanStage::DEAD when children contain the following WorkingSetMembers:
+        // Confirm PlanStage::FAILURE when children contain the following WorkingSetMembers:
         //     Child1:  Data
-        //     Child2:  NEED_TIME, DEAD
+        //     Child2:  NEED_TIME, FAILURE
         {
             WorkingSet ws;
             const auto andHashStage = make_unique<AndHashStage>(&_opCtx, &ws);
@@ -824,7 +822,7 @@ public:
 
             auto childStage2 = make_unique<QueuedDataStage>(&_opCtx, &ws);
             childStage2->pushBack(PlanStage::NEED_TIME);
-            childStage2->pushBack(PlanStage::DEAD);
+            childStage2->pushBack(PlanStage::FAILURE);
 
             andHashStage->addChild(childStage1.release());
             andHashStage->addChild(childStage2.release());
@@ -835,11 +833,11 @@ public:
                 state = andHashStage->work(&id);
             }
 
-            ASSERT_EQ(PlanStage::DEAD, state);
+            ASSERT_EQ(PlanStage::FAILURE, state);
         }
 
-        // Confirm PlanStage::DEAD when children contain the following WorkingSetMembers:
-        //     Child1:  Data, DEAD
+        // Confirm PlanStage::FAILURE when children contain the following WorkingSetMembers:
+        //     Child1:  Data, FAILURE
         //     Child2:  Data
         {
             WorkingSet ws;
@@ -855,7 +853,7 @@ public:
                 ws.transitionToRecordIdAndObj(id);
                 childStage1->pushBack(id);
             }
-            childStage1->pushBack(PlanStage::DEAD);
+            childStage1->pushBack(PlanStage::FAILURE);
 
             auto childStage2 = make_unique<QueuedDataStage>(&_opCtx, &ws);
             {
@@ -876,12 +874,12 @@ public:
                 state = andHashStage->work(&id);
             }
 
-            ASSERT_EQ(PlanStage::DEAD, state);
+            ASSERT_EQ(PlanStage::FAILURE, state);
         }
 
-        // Confirm PlanStage::DEAD when children contain the following WorkingSetMembers:
+        // Confirm PlanStage::FAILURE when children contain the following WorkingSetMembers:
         //     Child1:  Data
-        //     Child2:  Data, DEAD
+        //     Child2:  Data, FAILURE
         {
             WorkingSet ws;
             const auto andHashStage = make_unique<AndHashStage>(&_opCtx, &ws);
@@ -905,7 +903,7 @@ public:
                 ws.transitionToRecordIdAndObj(id);
                 childStage2->pushBack(id);
             }
-            childStage2->pushBack(PlanStage::DEAD);
+            childStage2->pushBack(PlanStage::FAILURE);
 
             andHashStage->addChild(childStage1.release());
             andHashStage->addChild(childStage2.release());
@@ -916,7 +914,7 @@ public:
                 state = andHashStage->work(&id);
             }
 
-            ASSERT_EQ(PlanStage::DEAD, state);
+            ASSERT_EQ(PlanStage::FAILURE, state);
         }
     }
 };

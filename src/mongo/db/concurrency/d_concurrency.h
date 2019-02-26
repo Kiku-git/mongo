@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -231,6 +230,7 @@ public:
                 }
                 _unlock();
             }
+            _opCtx->lockState()->unlock(resourceIdReplicationStateTransitionLock);
         }
 
         /**
@@ -317,6 +317,10 @@ public:
 
         bool isLocked() const {
             return _result == LOCK_OK;
+        }
+
+        LockMode mode() const {
+            return _mode;
         }
 
     private:

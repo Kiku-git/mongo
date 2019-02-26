@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -135,6 +134,7 @@ TEST_F(AddToSetNodeTest, ApplyNonEach) {
     ASSERT_EQUALS(fromjson("{a: [0, 1]}"), doc);
     ASSERT_FALSE(doc.isInPlaceModeEnabled());
     ASSERT_EQUALS(fromjson("{$set: {a: [0, 1]}}"), getLogDoc());
+    ASSERT_EQUALS(getModifiedPaths(), "{a}");
 }
 
 TEST_F(AddToSetNodeTest, ApplyNonEachArray) {
@@ -152,6 +152,7 @@ TEST_F(AddToSetNodeTest, ApplyNonEachArray) {
     ASSERT_EQUALS(fromjson("{a: [0, [1]]}"), doc);
     ASSERT_FALSE(doc.isInPlaceModeEnabled());
     ASSERT_EQUALS(fromjson("{$set: {a: [0, [1]]}}"), getLogDoc());
+    ASSERT_EQUALS(getModifiedPaths(), "{a}");
 }
 
 TEST_F(AddToSetNodeTest, ApplyEach) {
@@ -169,6 +170,7 @@ TEST_F(AddToSetNodeTest, ApplyEach) {
     ASSERT_EQUALS(fromjson("{a: [0, 1, 2]}"), doc);
     ASSERT_FALSE(doc.isInPlaceModeEnabled());
     ASSERT_EQUALS(fromjson("{$set: {a: [0, 1, 2]}}"), getLogDoc());
+    ASSERT_EQUALS(getModifiedPaths(), "{a}");
 }
 
 TEST_F(AddToSetNodeTest, ApplyToEmptyArray) {
@@ -186,6 +188,7 @@ TEST_F(AddToSetNodeTest, ApplyToEmptyArray) {
     ASSERT_EQUALS(fromjson("{a: [1, 2]}"), doc);
     ASSERT_FALSE(doc.isInPlaceModeEnabled());
     ASSERT_EQUALS(fromjson("{$set: {a: [1, 2]}}"), getLogDoc());
+    ASSERT_EQUALS(getModifiedPaths(), "{a}");
 }
 
 TEST_F(AddToSetNodeTest, ApplyDeduplicateElementsToAdd) {
@@ -203,6 +206,7 @@ TEST_F(AddToSetNodeTest, ApplyDeduplicateElementsToAdd) {
     ASSERT_EQUALS(fromjson("{a: [0, 1]}"), doc);
     ASSERT_FALSE(doc.isInPlaceModeEnabled());
     ASSERT_EQUALS(fromjson("{$set: {a: [0, 1]}}"), getLogDoc());
+    ASSERT_EQUALS(getModifiedPaths(), "{a}");
 }
 
 TEST_F(AddToSetNodeTest, ApplyDoNotAddExistingElements) {
@@ -220,6 +224,7 @@ TEST_F(AddToSetNodeTest, ApplyDoNotAddExistingElements) {
     ASSERT_EQUALS(fromjson("{a: [0, 1]}"), doc);
     ASSERT_FALSE(doc.isInPlaceModeEnabled());
     ASSERT_EQUALS(fromjson("{$set: {a: [0, 1]}}"), getLogDoc());
+    ASSERT_EQUALS(getModifiedPaths(), "{a}");
 }
 
 TEST_F(AddToSetNodeTest, ApplyDoNotDeduplicateExistingElements) {
@@ -237,6 +242,7 @@ TEST_F(AddToSetNodeTest, ApplyDoNotDeduplicateExistingElements) {
     ASSERT_EQUALS(fromjson("{a: [0, 0, 1]}"), doc);
     ASSERT_FALSE(doc.isInPlaceModeEnabled());
     ASSERT_EQUALS(fromjson("{$set: {a: [0, 0, 1]}}"), getLogDoc());
+    ASSERT_EQUALS(getModifiedPaths(), "{a}");
 }
 
 TEST_F(AddToSetNodeTest, ApplyNoElementsToAdd) {
@@ -254,6 +260,7 @@ TEST_F(AddToSetNodeTest, ApplyNoElementsToAdd) {
     ASSERT_EQUALS(fromjson("{a: [0]}"), doc);
     ASSERT_TRUE(doc.isInPlaceModeEnabled());
     ASSERT_EQUALS(fromjson("{}"), getLogDoc());
+    ASSERT_EQUALS(getModifiedPaths(), "{a}");
 }
 
 TEST_F(AddToSetNodeTest, ApplyNoNonDuplicateElementsToAdd) {
@@ -271,6 +278,7 @@ TEST_F(AddToSetNodeTest, ApplyNoNonDuplicateElementsToAdd) {
     ASSERT_EQUALS(fromjson("{a: [0]}"), doc);
     ASSERT_TRUE(doc.isInPlaceModeEnabled());
     ASSERT_EQUALS(fromjson("{}"), getLogDoc());
+    ASSERT_EQUALS(getModifiedPaths(), "{a}");
 }
 
 TEST_F(AddToSetNodeTest, ApplyCreateArray) {
@@ -288,6 +296,7 @@ TEST_F(AddToSetNodeTest, ApplyCreateArray) {
     ASSERT_EQUALS(fromjson("{a: [0, 1]}"), doc);
     ASSERT_FALSE(doc.isInPlaceModeEnabled());
     ASSERT_EQUALS(fromjson("{$set: {a: [0, 1]}}"), getLogDoc());
+    ASSERT_EQUALS(getModifiedPaths(), "{a}");
 }
 
 TEST_F(AddToSetNodeTest, ApplyCreateEmptyArrayIsNotNoop) {
@@ -305,6 +314,7 @@ TEST_F(AddToSetNodeTest, ApplyCreateEmptyArrayIsNotNoop) {
     ASSERT_EQUALS(fromjson("{a: []}"), doc);
     ASSERT_FALSE(doc.isInPlaceModeEnabled());
     ASSERT_EQUALS(fromjson("{$set: {a: []}}"), getLogDoc());
+    ASSERT_EQUALS(getModifiedPaths(), "{a}");
 }
 
 TEST_F(AddToSetNodeTest, ApplyDeduplicationOfElementsToAddRespectsCollation) {
@@ -324,6 +334,7 @@ TEST_F(AddToSetNodeTest, ApplyDeduplicationOfElementsToAddRespectsCollation) {
     ASSERT_EQUALS(fromjson("{a: ['abc', 'def']}"), doc);
     ASSERT_FALSE(doc.isInPlaceModeEnabled());
     ASSERT_EQUALS(fromjson("{$set: {a: ['abc', 'def']}}"), getLogDoc());
+    ASSERT_EQUALS(getModifiedPaths(), "{a}");
 }
 
 TEST_F(AddToSetNodeTest, ApplyComparisonToExistingElementsRespectsCollation) {
@@ -343,6 +354,7 @@ TEST_F(AddToSetNodeTest, ApplyComparisonToExistingElementsRespectsCollation) {
     ASSERT_EQUALS(fromjson("{a: ['ABC', 'def']}"), doc);
     ASSERT_FALSE(doc.isInPlaceModeEnabled());
     ASSERT_EQUALS(fromjson("{$set: {a: ['ABC', 'def']}}"), getLogDoc());
+    ASSERT_EQUALS(getModifiedPaths(), "{a}");
 }
 
 TEST_F(AddToSetNodeTest, ApplyRespectsCollationFromSetCollator) {
@@ -364,6 +376,7 @@ TEST_F(AddToSetNodeTest, ApplyRespectsCollationFromSetCollator) {
     ASSERT_EQUALS(fromjson("{a: ['abc', 'def']}"), doc);
     ASSERT_FALSE(doc.isInPlaceModeEnabled());
     ASSERT_EQUALS(fromjson("{$set: {a: ['abc', 'def']}}"), getLogDoc());
+    ASSERT_EQUALS(getModifiedPaths(), "{a}");
 }
 
 DEATH_TEST(AddToSetNodeTest, CannotSetCollatorIfCollatorIsNonNull, "Invariant failure !_collator") {
@@ -403,6 +416,7 @@ TEST_F(AddToSetNodeTest, ApplyNestedArray) {
     ASSERT_EQUALS(fromjson("{ _id : 1, a : [ 1, [ 1 ] ] }"), doc);
     ASSERT_FALSE(doc.isInPlaceModeEnabled());
     ASSERT_EQUALS(fromjson("{ $set : { 'a.1' : [ 1 ] } }"), getLogDoc());
+    ASSERT_EQUALS(getModifiedPaths(), "{a.1}");
 }
 
 TEST_F(AddToSetNodeTest, ApplyIndexesNotAffected) {
@@ -419,6 +433,7 @@ TEST_F(AddToSetNodeTest, ApplyIndexesNotAffected) {
     ASSERT_FALSE(result.indexesAffected);
     ASSERT_FALSE(doc.isInPlaceModeEnabled());
     ASSERT_EQUALS(fromjson("{$set: {a: [0, 1]}}"), getLogDoc());
+    ASSERT_EQUALS(getModifiedPaths(), "{a}");
 }
 
 TEST_F(AddToSetNodeTest, ApplyNoIndexDataOrLogBuilder) {
@@ -435,6 +450,7 @@ TEST_F(AddToSetNodeTest, ApplyNoIndexDataOrLogBuilder) {
     ASSERT_FALSE(result.indexesAffected);
     ASSERT_EQUALS(fromjson("{a: [0, 1]}"), doc);
     ASSERT_FALSE(doc.isInPlaceModeEnabled());
+    ASSERT_EQUALS(getModifiedPaths(), "{a}");
 }
 
 }  // namespace

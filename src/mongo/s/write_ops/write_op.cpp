@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -32,6 +31,7 @@
 
 #include "mongo/s/write_ops/write_op.h"
 
+#include "mongo/s/transaction_router.h"
 #include "mongo/util/assert_util.h"
 
 namespace mongo {
@@ -71,12 +71,13 @@ Status WriteOp::targetWrites(OperationContext* opCtx,
         }
     }();
 
-    // If we're targeting more than one endpoint with an update/delete, we have to target everywhere
-    // since we cannot currently retry partial results.
+    // Unless executing as part of a transaction, if we're targeting more than one endpoint with an
+    // update/delete, we have to target everywhere since we cannot currently retry partial results.
     //
     // NOTE: Index inserts are currently specially targeted only at the current collection to avoid
     // creating collections everywhere.
-    if (swEndpoints.isOK() && swEndpoints.getValue().size() > 1u) {
+    const bool inTransaction = TransactionRouter::get(opCtx) != nullptr;
+    if (swEndpoints.isOK() && swEndpoints.getValue().size() > 1u && !inTransaction) {
         swEndpoints = targeter.targetAllShards(opCtx);
     }
 
@@ -91,8 +92,9 @@ Status WriteOp::targetWrites(OperationContext* opCtx,
 
         WriteOpRef ref(_itemRef.getItemIndex(), _childOps.size() - 1);
 
-        // For now, multiple endpoints imply no versioning - we can't retry half a multi-write
-        if (endpoints.size() > 1u) {
+        // Outside of a transaction, multiple endpoints currently imply no versioning, since we
+        // can't retry half a regular multi-write.
+        if (endpoints.size() > 1u && !inTransaction) {
             endpoint.shardVersion = ChunkVersion::IGNORED();
         }
 
@@ -115,10 +117,21 @@ static bool isRetryErrCode(int errCode) {
         errCode == ErrorCodes::CannotImplicitlyCreateCollection;
 }
 
+static bool errorsAllSame(const vector<ChildWriteOp const*>& errOps) {
+    auto errCode = errOps.front()->error->toStatus().code();
+    if (std::all_of(++errOps.begin(), errOps.end(), [errCode](const ChildWriteOp* errOp) {
+            return errOp->error->toStatus().code() == errCode;
+        })) {
+        return true;
+    }
+
+    return false;
+}
+
 // Aggregate a bunch of errors for a single op together
 static void combineOpErrors(const vector<ChildWriteOp const*>& errOps, WriteErrorDetail* error) {
-    // Special case single response
-    if (errOps.size() == 1) {
+    // Special case single response or all errors are the same
+    if (errOps.size() == 1 || errorsAllSame(errOps)) {
         errOps.front()->error->cloneTo(error);
         return;
     }

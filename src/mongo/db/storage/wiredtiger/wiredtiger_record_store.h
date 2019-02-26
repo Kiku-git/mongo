@@ -1,6 +1,3 @@
-// wiredtiger_record_store.h
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -88,6 +85,7 @@ public:
 
     /**
      * Creates a configuration string suitable for 'config' parameter in WT_SESSION::create().
+     * It is possible for 'ns' to be an empty string, in the case of internal-only temporary tables.
      * Configuration string is constructed from:
      *     built-in defaults
      *     storageEngine.wiredTiger.configString in 'options'
@@ -105,7 +103,7 @@ public:
 
     struct Params {
         StringData ns;
-        std::string uri;
+        std::string ident;
         std::string engineName;
         bool isCapped;
         bool isEphemeral;
@@ -232,7 +230,7 @@ public:
     }
 
     const std::string& getIdent() const override {
-        return _uri;
+        return _ident;
     }
 
     uint64_t tableId() const {
@@ -333,6 +331,7 @@ private:
     int64_t _cappedDeleteAsNeeded_inlock(OperationContext* opCtx, const RecordId& justInserted);
 
     const std::string _uri;
+    const std::string _ident;
     const uint64_t _tableId;  // not persisted
 
     // Canonical engine name to use for retrieving options
@@ -347,8 +346,8 @@ private:
     const int64_t _cappedMaxSizeSlack;  // when to start applying backpressure
     const int64_t _cappedMaxDocs;
     RecordId _cappedFirstRecord;
-    AtomicInt64 _cappedSleep;
-    AtomicInt64 _cappedSleepMS;
+    AtomicWord<long long> _cappedSleep;
+    AtomicWord<long long> _cappedSleepMS;
     CappedCallback* _cappedCallback;
     bool _shuttingDown;
     mutable stdx::mutex _cappedCallbackMutex;  // guards _cappedCallback and _shuttingDown
@@ -357,7 +356,7 @@ private:
     int _cappedDeleteCheckCount;
     mutable stdx::timed_mutex _cappedDeleterMutex;
 
-    AtomicInt64 _nextIdNum;
+    AtomicWord<long long> _nextIdNum;
 
     WiredTigerSizeStorer* _sizeStorer;  // not owned, can be NULL
     std::shared_ptr<WiredTigerSizeStorer::SizeInfo> _sizeInfo;
@@ -461,6 +460,13 @@ protected:
 
 private:
     bool isVisible(const RecordId& id);
+
+    /**
+     * This value is used for visibility calculations on what oplog entries can be returned to a
+     * client. This value *must* be initialized/updated *before* a WiredTiger snapshot is
+     * established.
+     */
+    boost::optional<std::int64_t> _oplogVisibleTs = boost::none;
 };
 
 class WiredTigerRecordStoreStandardCursor final : public WiredTigerRecordStoreCursorBase {

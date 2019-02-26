@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -64,8 +63,12 @@ void registerMongoDCollectors(FTDCController* controller) {
 }  // namespace
 
 void startMongoDFTDC() {
-    boost::filesystem::path dir(storageGlobalParams.dbpath);
-    dir /= kFTDCDefaultDirectory.toString();
+    auto dir = getFTDCDirectoryPathParameter();
+
+    if (dir.empty()) {
+        dir = storageGlobalParams.dbpath;
+        dir /= kFTDCDefaultDirectory.toString();
+    }
 
     startFTDC(dir, FTDCStartMode::kStart, registerMongoDCollectors);
 }

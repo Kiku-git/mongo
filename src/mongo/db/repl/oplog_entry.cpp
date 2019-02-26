@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -64,6 +63,12 @@ OplogEntry::CommandType parseCommandType(const BSONObj& objectField) {
         return OplogEntry::CommandType::kConvertToCapped;
     } else if (commandString == "createIndexes") {
         return OplogEntry::CommandType::kCreateIndexes;
+    } else if (commandString == "startIndexBuild") {
+        return OplogEntry::CommandType::kStartIndexBuild;
+    } else if (commandString == "commitIndexBuild") {
+        return OplogEntry::CommandType::kCommitIndexBuild;
+    } else if (commandString == "abortIndexBuild") {
+        return OplogEntry::CommandType::kAbortIndexBuild;
     } else if (commandString == "dropIndexes") {
         return OplogEntry::CommandType::kDropIndexes;
     } else if (commandString == "deleteIndexes") {
@@ -85,7 +90,7 @@ OplogEntry::CommandType parseCommandType(const BSONObj& objectField) {
  * Returns a document representing an oplog entry with the given fields.
  */
 BSONObj makeOplogEntryDoc(OpTime opTime,
-                          long long hash,
+                          const boost::optional<long long> hash,
                           OpTypeEnum opType,
                           const NamespaceString& nss,
                           const boost::optional<UUID>& uuid,
@@ -104,10 +109,12 @@ BSONObj makeOplogEntryDoc(OpTime opTime,
     sessionInfo.serialize(&builder);
     builder.append(OplogEntryBase::kTimestampFieldName, opTime.getTimestamp());
     builder.append(OplogEntryBase::kTermFieldName, opTime.getTerm());
-    builder.append(OplogEntryBase::kHashFieldName, hash);
     builder.append(OplogEntryBase::kVersionFieldName, version);
     builder.append(OplogEntryBase::kOpTypeFieldName, OpType_serializer(opType));
     builder.append(OplogEntryBase::kNssFieldName, nss.toString());
+    if (hash) {
+        builder.append(OplogEntryBase::kHashFieldName, hash.get());
+    }
     if (uuid) {
         uuid->appendToBuilder(&builder, OplogEntryBase::kUuidFieldName);
     }
@@ -209,7 +216,7 @@ OplogEntry::OplogEntry(BSONObj rawInput) : raw(std::move(rawInput)) {
 }
 
 OplogEntry::OplogEntry(OpTime opTime,
-                       long long hash,
+                       const boost::optional<long long> hash,
                        OpTypeEnum opType,
                        const NamespaceString& nss,
                        const boost::optional<UUID>& uuid,

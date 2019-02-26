@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2018 MongoDB, Inc.
+ * Public Domain 2014-2019 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -26,15 +26,10 @@
  * OTHER DEALINGS IN THE SOFTWARE.
  */
 
+#include <wiredtiger_config.h>
 #include <inttypes.h>
 #include <stddef.h>
 
-/*
- * The checksum code doesn't include WiredTiger configuration or include files.
- * This means the HAVE_NO_CRC32_HARDWARE #define isn't configurable as part of
- * standalone WiredTiger configuration, there's no way to turn off the checksum
- * hardware.
- */
 #if defined(__linux__) && !defined(HAVE_NO_CRC32_HARDWARE)
 #include <asm/hwcap.h>
 #include <sys/auxv.h>

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -104,7 +103,7 @@ Status createCollection(OperationContext* opCtx,
         if (opCtx->writesAreReplicated() &&
             !repl::ReplicationCoordinator::get(opCtx)->canAcceptWritesFor(opCtx, nss)) {
             return Status(ErrorCodes::NotMaster,
-                          str::stream() << "Not primary while creating collection " << nss.ns());
+                          str::stream() << "Not primary while creating collection " << nss);
         }
 
         if (collectionOptions.isView()) {
@@ -119,8 +118,8 @@ Status createCollection(OperationContext* opCtx,
 
         // Create collection.
         const bool createDefaultIndexes = true;
-        Status status = Database::userCreateNS(
-            opCtx, ctx.db(), nss.ns(), std::move(collectionOptions), createDefaultIndexes, idIndex);
+        Status status =
+            ctx.db()->userCreateNS(opCtx, nss, collectionOptions, createDefaultIndexes, idIndex);
         if (!status.isOK()) {
             return status;
         }
@@ -153,8 +152,8 @@ Status createCollectionForApplyOps(OperationContext* opCtx,
     const NamespaceString newCollName(CommandHelpers::parseNsCollectionRequired(dbName, cmdObj));
     auto newCmd = cmdObj;
 
-    auto* const serviceContext = opCtx->getServiceContext();
-    auto* const db = DatabaseHolder::getDatabaseHolder().get(opCtx, dbName);
+    auto databaseHolder = DatabaseHolder::get(opCtx);
+    auto* const db = databaseHolder->getDb(opCtx, dbName);
 
     // If a UUID is given, see if we need to rename a collection out of the way, and whether the
     // collection already exists under a different name. If so, rename it into place. As this is
@@ -177,7 +176,8 @@ Status createCollectionForApplyOps(OperationContext* opCtx,
 
                 auto& catalog = UUIDCatalog::get(opCtx);
                 const auto currentName = catalog.lookupNSSByUUID(uuid);
-                OpObserver* const opObserver = serviceContext->getOpObserver();
+                auto serviceContext = opCtx->getServiceContext();
+                auto opObserver = serviceContext->getOpObserver();
                 if (currentName == newCollName)
                     return Result(Status::OK());
 
@@ -210,7 +210,7 @@ Status createCollectionForApplyOps(OperationContext* opCtx,
                             str::stream() << "Cannot generate temporary "
                                              "collection namespace for applyOps "
                                              "create command: collection: "
-                                          << newCollName.ns()));
+                                          << newCollName));
                     }
                     const auto& tmpName = tmpNameResult.getValue();
                     // It is ok to log this because this doesn't happen very frequently.
@@ -226,6 +226,7 @@ Status createCollectionForApplyOps(OperationContext* opCtx,
                                                    tmpName,
                                                    futureColl->uuid(),
                                                    /*dropTargetUUID*/ {},
+                                                   /*numRecords*/ 0U,
                                                    stayTemp);
                 }
 
@@ -233,9 +234,7 @@ Status createCollectionForApplyOps(OperationContext* opCtx,
                 // name, just rename it to 'newCollName'.
                 if (catalog.lookupCollectionByUUID(uuid)) {
                     uassert(40655,
-                            str::stream() << "Invalid name " << redact(newCollName.ns())
-                                          << " for UUID "
-                                          << uuid.toString(),
+                            str::stream() << "Invalid name " << newCollName << " for UUID " << uuid,
                             currentName.db() == newCollName.db());
                     Status status =
                         db->renameCollection(opCtx, currentName.ns(), newCollName.ns(), stayTemp);
@@ -246,6 +245,7 @@ Status createCollectionForApplyOps(OperationContext* opCtx,
                                                    newCollName,
                                                    uuid,
                                                    /*dropTargetUUID*/ {},
+                                                   /*numRecords*/ 0U,
                                                    stayTemp);
 
                     wunit.commit();

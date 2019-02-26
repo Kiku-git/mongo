@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -109,7 +108,7 @@ NamespaceString makeNamespace(const T& t, const char* suffix = "") {
  * Generates oplog entries with the given number used for the timestamp.
  */
 BSONObj makeOplogEntry(int t) {
-    return BSON("ts" << Timestamp(t, t) << "h" << t << "ns"
+    return BSON("ts" << Timestamp(t, t) << "ns"
                      << "a.a"
                      << "v"
                      << 2
@@ -322,7 +321,7 @@ TEST_F(OplogBufferCollectionTest, StartupWithEmptyExistingCollectionInitializesC
     _assertDocumentsInCollectionEquals(_opCtx.get(), nss, {});
 
     auto lastPushed = oplogBuffer.lastObjectPushed(_opCtx.get());
-    ASSERT_EQUALS(lastPushed, boost::none);
+    ASSERT_FALSE(lastPushed);
 
     BSONObj doc;
     ASSERT_FALSE(oplogBuffer.peek(_opCtx.get(), &doc));
@@ -723,7 +722,7 @@ TEST_F(OplogBufferCollectionTest, LastObjectPushedReturnsNoneWithNoEntries) {
     oplogBuffer.startup(_opCtx.get());
 
     auto doc = oplogBuffer.lastObjectPushed(_opCtx.get());
-    ASSERT_EQUALS(doc, boost::none);
+    ASSERT_FALSE(doc);
 }
 
 TEST_F(OplogBufferCollectionTest, IsEmptyReturnsTrueWhenEmptyAndFalseWhenNot) {

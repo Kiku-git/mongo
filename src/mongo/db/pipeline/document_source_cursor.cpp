@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -61,10 +60,14 @@ DocumentSource::GetNextResult DocumentSourceCursor::getNext() {
 
     if (_currentBatch.empty()) {
         loadBatch();
-
-        if (_currentBatch.empty())
-            return GetNextResult::makeEOF();
     }
+
+    // If we are tracking the oplog timestamp, update our cached latest optime.
+    if (_trackOplogTS && _exec)
+        _updateOplogTimestamp();
+
+    if (_currentBatch.empty())
+        return GetNextResult::makeEOF();
 
     Document out = std::move(_currentBatch.front());
     _currentBatch.pop_front();
@@ -117,10 +120,7 @@ void DocumentSourceCursor::loadBatch() {
 
                 // As long as we're waiting for inserts, we shouldn't do any batching at this level
                 // we need the whole pipeline to see each document to see if we should stop waiting.
-                // Furthermore, if we need to return the latest oplog time (in the tailable and
-                // needs-merge case), batching will result in a wrong time.
                 if (awaitDataState(pExpCtx->opCtx).shouldWaitForInserts ||
-                    (pExpCtx->isTailableAwaitData() && pExpCtx->needsMerge) ||
                     memUsageBytes > internalDocumentSourceCursorBatchSizeBytes.load()) {
                     // End this batch and prepare PlanExecutor for yielding.
                     _exec->saveState();
@@ -139,8 +139,8 @@ void DocumentSourceCursor::loadBatch() {
         // must hold a collection lock to destroy '_exec', but we can only assume that our locks are
         // still held if '_exec' did not end in an error. If '_exec' encountered an error during a
         // yield, the locks might be yielded.
-        if (state != PlanExecutor::DEAD && state != PlanExecutor::FAILURE) {
-            cleanupExecutor(autoColl);
+        if (state != PlanExecutor::FAILURE) {
+            cleanupExecutor();
         }
     }
 
@@ -148,7 +148,6 @@ void DocumentSourceCursor::loadBatch() {
         case PlanExecutor::ADVANCED:
         case PlanExecutor::IS_EOF:
             return;  // We've reached our limit or exhausted the cursor.
-        case PlanExecutor::DEAD:
         case PlanExecutor::FAILURE: {
             _execStatus = WorkingSetCommon::getMemberObjectStatus(resultObj).withContext(
                 "Error in $cursor stage");
@@ -157,6 +156,19 @@ void DocumentSourceCursor::loadBatch() {
         default:
             MONGO_UNREACHABLE;
     }
+}
+
+void DocumentSourceCursor::_updateOplogTimestamp() {
+    // If we are about to return a result, set our oplog timestamp to the optime of that result.
+    if (!_currentBatch.empty()) {
+        const auto& ts = _currentBatch.front().getField(repl::OpTime::kTimestampFieldName);
+        invariant(ts.getType() == BSONType::bsonTimestamp);
+        _latestOplogTimestamp = ts.getTimestamp();
+        return;
+    }
+
+    // If we have no more results to return, advance to the latest oplog timestamp.
+    _latestOplogTimestamp = _exec->getLatestOplogTimestamp();
 }
 
 Pipeline::SourceContainer::iterator DocumentSourceCursor::doOptimizeAt(
@@ -217,7 +229,7 @@ Value DocumentSourceCursor::serialize(boost::optional<ExplainOptions::Verbosity>
 
     {
         auto opCtx = pExpCtx->opCtx;
-        auto lockMode = getLockModeForQuery(opCtx);
+        auto lockMode = getLockModeForQuery(opCtx, _exec->nss());
         AutoGetDb dbLock(opCtx, _exec->nss().db(), lockMode);
         Lock::CollectionLock collLock(opCtx->lockState(), _exec->nss().ns(), lockMode);
         auto collection =
@@ -266,33 +278,7 @@ void DocumentSourceCursor::doDispose() {
 
 void DocumentSourceCursor::cleanupExecutor() {
     invariant(_exec);
-    auto* opCtx = pExpCtx->opCtx;
-    // We need to be careful to not use AutoGetCollection here, since we only need the lock to
-    // protect potential access to the Collection's CursorManager, and AutoGetCollection may throw
-    // if this namespace has since turned into a view. Using Database::getCollection() will simply
-    // return nullptr if the collection has since turned into a view. In this case, '_exec' will
-    // already have been marked as killed when the collection was dropped, and we won't need to
-    // access the CursorManager to properly dispose of it.
-    UninterruptibleLockGuard noInterrupt(opCtx->lockState());
-    auto lockMode = getLockModeForQuery(opCtx);
-    AutoGetDb dbLock(opCtx, _exec->nss().db(), lockMode);
-    Lock::CollectionLock collLock(opCtx->lockState(), _exec->nss().ns(), lockMode);
-    auto collection = dbLock.getDb() ? dbLock.getDb()->getCollection(opCtx, _exec->nss()) : nullptr;
-    auto cursorManager = collection ? collection->getCursorManager() : nullptr;
-    _exec->dispose(opCtx, cursorManager);
-
-    // Not freeing _exec if we're in explain mode since it will be used in serialize() to gather
-    // execution stats.
-    if (!pExpCtx->explain) {
-        _exec.reset();
-    }
-}
-
-void DocumentSourceCursor::cleanupExecutor(const AutoGetCollectionForRead& readLock) {
-    invariant(_exec);
-    auto cursorManager =
-        readLock.getCollection() ? readLock.getCollection()->getCursorManager() : nullptr;
-    _exec->dispose(pExpCtx->opCtx, cursorManager);
+    _exec->dispose(pExpCtx->opCtx);
 
     // Not freeing _exec if we're in explain mode since it will be used in serialize() to gather
     // execution stats.
@@ -312,11 +298,13 @@ DocumentSourceCursor::~DocumentSourceCursor() {
 DocumentSourceCursor::DocumentSourceCursor(
     Collection* collection,
     std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> exec,
-    const intrusive_ptr<ExpressionContext>& pCtx)
+    const intrusive_ptr<ExpressionContext>& pCtx,
+    bool trackOplogTimestamp)
     : DocumentSource(pCtx),
       _docsAddedToBatches(0),
       _exec(std::move(exec)),
-      _outputSorts(_exec->getOutputSorts()) {
+      _outputSorts(_exec->getOutputSorts()),
+      _trackOplogTS(trackOplogTimestamp) {
     // Later code in the DocumentSourceCursor lifecycle expects that '_exec' is in a saved state.
     _exec->saveState();
 
@@ -337,9 +325,10 @@ DocumentSourceCursor::DocumentSourceCursor(
 intrusive_ptr<DocumentSourceCursor> DocumentSourceCursor::create(
     Collection* collection,
     std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> exec,
-    const intrusive_ptr<ExpressionContext>& pExpCtx) {
+    const intrusive_ptr<ExpressionContext>& pExpCtx,
+    bool trackOplogTimestamp) {
     intrusive_ptr<DocumentSourceCursor> source(
-        new DocumentSourceCursor(collection, std::move(exec), pExpCtx));
+        new DocumentSourceCursor(collection, std::move(exec), pExpCtx, trackOplogTimestamp));
     return source;
 }
 }

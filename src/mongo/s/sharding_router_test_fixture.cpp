@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -236,24 +235,6 @@ OperationContext* ShardingTestFixture::operationContext() const {
     invariant(_opCtx);
 
     return _opCtx.get();
-}
-
-void ShardingTestFixture::onCommand(NetworkTestEnv::OnCommandFunction func) {
-    _networkTestEnv->onCommand(func);
-}
-
-void ShardingTestFixture::onCommandWithMetadata(
-    NetworkTestEnv::OnCommandWithMetadataFunction func) {
-    _networkTestEnv->onCommandWithMetadata(func);
-}
-
-void ShardingTestFixture::onFindCommand(NetworkTestEnv::OnFindCommandFunction func) {
-    _networkTestEnv->onFindCommand(func);
-}
-
-void ShardingTestFixture::onFindWithMetadataCommand(
-    NetworkTestEnv::OnFindCommandWithMetadataFunction func) {
-    _networkTestEnv->onFindWithMetadataCommand(func);
 }
 
 void ShardingTestFixture::onCommandForPoolExecutor(NetworkTestEnv::OnCommandFunction func) {

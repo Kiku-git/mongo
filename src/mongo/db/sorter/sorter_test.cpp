@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -59,7 +58,7 @@ namespace mongo {
  * places, rather than compiled in one place and linked, and so cannot provide a globally unique ID.
  */
 std::string nextFileName() {
-    static AtomicUInt32 sorterTestFileCounter;
+    static AtomicWord<unsigned> sorterTestFileCounter;
     return "extsort-sorter-test." + std::to_string(sorterTestFileCounter.fetchAndAdd(1));
 }
 

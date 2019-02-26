@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -266,7 +265,7 @@ TEST_F(ApplyOpsTest, AtomicApplyOpsInsertWithUuidIntoCollectionWithOtherUuid) {
     // Collection has a different UUID.
     CollectionOptions collectionOptions;
     collectionOptions.uuid = UUID::gen();
-    ASSERT_NOT_EQUALS(applyOpsUuid, collectionOptions.uuid);
+    ASSERT_NOT_EQUALS(applyOpsUuid, *collectionOptions.uuid);
     ASSERT_OK(_storage->createCollection(opCtx.get(), nss, collectionOptions));
 
     // The applyOps returns a NamespaceNotFound error because of the failed UUID lookup
@@ -353,7 +352,7 @@ TEST_F(ApplyOpsTest, ApplyOpsPropagatesOplogApplicationMode) {
  */
 OplogEntry makeOplogEntry(OpTypeEnum opType, const BSONObj& oField) {
     return OplogEntry(OpTime(Timestamp(1, 1), 1),  // optime
-                      1LL,                         // hash
+                      boost::none,                 // hash
                       opType,                      // op type
                       NamespaceString("a.a"),      // namespace
                       boost::none,                 // uuid

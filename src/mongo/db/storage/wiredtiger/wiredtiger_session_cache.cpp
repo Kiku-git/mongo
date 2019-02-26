@@ -1,6 +1,3 @@
-// wiredtiger_session_cache.cpp
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -76,7 +73,7 @@ namespace mongo {
 // will be cached in WiredTiger. Exclusive operations should only be blocked
 // for a short time, except if a cursor is held by a long running session. This
 // is a good compromise for most workloads.
-AtomicInt32 kWiredTigerCursorCacheSize(-100);
+AtomicWord<int> kWiredTigerCursorCacheSize(-100);
 
 const std::string kWTRepairMsg =
     "Please read the documentation for starting MongoDB with --repair here: "
@@ -88,7 +85,12 @@ ExportedServerParameter<std::int32_t, ServerParameterType::kStartupAndRuntime>
                                      &kWiredTigerCursorCacheSize);
 
 WiredTigerSession::WiredTigerSession(WT_CONNECTION* conn, uint64_t epoch, uint64_t cursorEpoch)
-    : _epoch(epoch), _cursorEpoch(cursorEpoch), _session(NULL), _cursorGen(0), _cursorsOut(0) {
+    : _epoch(epoch),
+      _cursorEpoch(cursorEpoch),
+      _session(NULL),
+      _cursorGen(0),
+      _cursorsOut(0),
+      _idleExpireTime(Date_t::min()) {
     invariantWTOK(conn->open_session(conn, NULL, "isolation=snapshot", &_session));
 }
 
@@ -101,7 +103,8 @@ WiredTigerSession::WiredTigerSession(WT_CONNECTION* conn,
       _cache(cache),
       _session(NULL),
       _cursorGen(0),
-      _cursorsOut(0) {
+      _cursorsOut(0),
+      _idleExpireTime(Date_t::min()) {
     invariantWTOK(conn->open_session(conn, NULL, "isolation=snapshot", &_session));
 }
 
@@ -216,7 +219,7 @@ void WiredTigerSession::closeCursorsForQueuedDrops(WiredTigerKVEngine* engine) {
 }
 
 namespace {
-AtomicUInt64 nextTableId(1);
+AtomicWord<unsigned long long> nextTableId(1);
 }
 // static
 uint64_t WiredTigerSession::genTableId() {
@@ -226,10 +229,18 @@ uint64_t WiredTigerSession::genTableId() {
 // -----------------------
 
 WiredTigerSessionCache::WiredTigerSessionCache(WiredTigerKVEngine* engine)
-    : _engine(engine), _conn(engine->getConnection()), _shuttingDown(0) {}
+    : _engine(engine),
+      _conn(engine->getConnection()),
+      _clockSource(_engine->getClockSource()),
+      _shuttingDown(0),
+      _prepareCommitOrAbortCounter(0) {}
 
-WiredTigerSessionCache::WiredTigerSessionCache(WT_CONNECTION* conn)
-    : _engine(NULL), _conn(conn), _shuttingDown(0) {}
+WiredTigerSessionCache::WiredTigerSessionCache(WT_CONNECTION* conn, ClockSource* cs)
+    : _engine(nullptr),
+      _conn(conn),
+      _clockSource(cs),
+      _shuttingDown(0),
+      _prepareCommitOrAbortCounter(0) {}
 
 WiredTigerSessionCache::~WiredTigerSessionCache() {
     shuttingDown();
@@ -329,21 +340,20 @@ void WiredTigerSessionCache::waitUntilDurable(bool forceCheckpoint, bool stableC
     _journalListener->onDurable(token);
 }
 
-void WiredTigerSessionCache::waitUntilPreparedUnitOfWorkCommitsOrAborts(OperationContext* opCtx) {
+void WiredTigerSessionCache::waitUntilPreparedUnitOfWorkCommitsOrAborts(OperationContext* opCtx,
+                                                                        std::uint64_t lastCount) {
     invariant(opCtx);
     stdx::unique_lock<stdx::mutex> lk(_prepareCommittedOrAbortedMutex);
-
-    auto lastCounter = _lastCommitOrAbortCounter;
-    opCtx->waitForConditionOrInterrupt(_prepareCommittedOrAbortedCond, lk, [&] {
-        return lastCounter != _lastCommitOrAbortCounter;
-    });
+    if (lastCount == _prepareCommitOrAbortCounter.loadRelaxed()) {
+        opCtx->waitForConditionOrInterrupt(_prepareCommittedOrAbortedCond, lk, [&] {
+            return _prepareCommitOrAbortCounter.loadRelaxed() > lastCount;
+        });
+    }
 }
 
 void WiredTigerSessionCache::notifyPreparedUnitOfWorkHasCommittedOrAborted() {
-    {
-        stdx::unique_lock<stdx::mutex> lk(_prepareCommittedOrAbortedMutex);
-        _lastCommitOrAbortCounter++;
-    }
+    stdx::unique_lock<stdx::mutex> lk(_prepareCommittedOrAbortedMutex);
+    _prepareCommitOrAbortCounter.fetchAndAdd(1);
     _prepareCommittedOrAbortedCond.notify_all();
 }
 
@@ -362,6 +372,34 @@ void WiredTigerSessionCache::closeCursorsForQueuedDrops() {
     stdx::lock_guard<stdx::mutex> lock(_cacheLock);
     for (SessionCache::iterator i = _sessions.begin(); i != _sessions.end(); i++) {
         (*i)->closeCursorsForQueuedDrops(_engine);
+    }
+}
+
+size_t WiredTigerSessionCache::getIdleSessionsCount() {
+    stdx::lock_guard<stdx::mutex> lock(_cacheLock);
+    return _sessions.size();
+}
+
+void WiredTigerSessionCache::closeExpiredIdleSessions(int64_t idleTimeMillis) {
+    // Do nothing if session close idle time is set to 0 or less
+    if (idleTimeMillis <= 0) {
+        return;
+    }
+
+    auto cutoffTime = _clockSource->now() - Milliseconds(idleTimeMillis);
+    {
+        stdx::lock_guard<stdx::mutex> lock(_cacheLock);
+        // Discard all sessions that became idle before the cutoff time
+        for (auto it = _sessions.begin(); it != _sessions.end();) {
+            auto session = *it;
+            invariant(session->getIdleExpireTime() != Date_t::min());
+            if (session->getIdleExpireTime() < cutoffTime) {
+                it = _sessions.erase(it);
+                delete (session);
+            } else {
+                ++it;
+            }
+        }
     }
 }
 
@@ -396,6 +434,8 @@ UniqueWiredTigerSession WiredTigerSessionCache::getSession() {
             // discarding older ones
             WiredTigerSession* cachedSession = _sessions.back();
             _sessions.pop_back();
+            // Reset the idle time
+            cachedSession->setIdleExpireTime(Date_t::min());
             return UniqueWiredTigerSession(cachedSession);
         }
     }
@@ -450,8 +490,9 @@ void WiredTigerSessionCache::releaseSession(WiredTigerSession* session) {
     bool dropQueuedIdentsAtSessionEnd = session->isDropQueuedIdentsAtSessionEndAllowed();
 
     // Reset this session's flag for dropping queued idents to default, before returning it to
-    // session cache.
+    // session cache. Also set the time this session got idle at.
     session->dropQueuedIdentsAtSessionEndAllowed(true);
+    session->setIdleExpireTime(_clockSource->now());
 
     if (session->_getEpoch() == currentEpoch) {  // check outside of lock to reduce contention
         stdx::lock_guard<stdx::mutex> lock(_cacheLock);

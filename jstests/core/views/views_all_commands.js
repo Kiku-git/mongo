@@ -217,6 +217,7 @@
         drop: {command: {drop: "view"}},
         dropAllRolesFromDatabase: {skip: isUnrelated},
         dropAllUsersFromDatabase: {skip: isUnrelated},
+        dropConnections: {skip: isUnrelated},
         dropDatabase: {command: {dropDatabase: 1}},
         dropIndexes: {command: {dropIndexes: "view"}, expectFailure: true},
         dropRole: {
@@ -299,7 +300,6 @@
             }
         },
         getParameter: {skip: isUnrelated},
-        getPrevError: {skip: isUnrelated},
         getShardMap: {skip: isUnrelated},
         getShardVersion: {
             command: {getShardVersion: "test.view"},
@@ -316,7 +316,6 @@
         hostInfo: {skip: isUnrelated},
         insert: {command: {insert: "view", documents: [{x: 1}]}, expectFailure: true},
         invalidateUserCache: {skip: isUnrelated},
-        invalidateViewCatalog: {command: {invalidateViewCatalog: 1}},
         isdbgrid: {skip: isUnrelated},
         isMaster: {skip: isUnrelated},
         killCursors: {
@@ -464,6 +463,7 @@
         saslContinue: {skip: isUnrelated},
         saslStart: {skip: isUnrelated},
         serverStatus: {command: {serverStatus: 1}, skip: isUnrelated},
+        setIndexCommitQuorum: {skip: isUnrelated},
         setCommittedSnapshot: {skip: isAnInternalCommand},
         setFeatureCompatibilityVersion: {skip: isUnrelated},
         setFreeMonitoring: {skip: isUnrelated},
@@ -513,10 +513,16 @@
             expectFailure: true,
         },
         stageDebug: {skip: isAnInternalCommand},
+        startRecordingTraffic: {skip: isUnrelated},
         startSession: {skip: isAnInternalCommand},
+        stopRecordingTraffic: {skip: isUnrelated},
         top: {skip: "tested in views/views_stats.js"},
         touch: {
             command: {touch: "view", data: true},
+            expectFailure: true,
+        },
+        twoPhaseCreateIndexes: {
+            command: {twoPhaseCreateIndexes: "view", indexes: [{key: {x: 1}, name: "x_1"}]},
             expectFailure: true,
         },
         unsetSharding: {skip: isAnInternalCommand},
@@ -539,6 +545,7 @@
         usersInfo: {skip: isUnrelated},
         validate: {command: {validate: "view"}, expectFailure: true},
         waitForOngoingChunkSplits: {skip: isUnrelated},
+        voteCommitIndexBuild: {skip: isUnrelated},
         voteCommitTransaction: {skip: isUnrelated},
         voteAbortTransaction: {skip: isUnrelated},
         whatsmyuri: {skip: isUnrelated}

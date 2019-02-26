@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -35,7 +34,7 @@
 
 namespace mongo {
 
-class DocumentSourceSample final : public DocumentSource, public NeedsMergerDocumentSource {
+class DocumentSourceSample final : public DocumentSource {
 public:
     static constexpr StringData kStageName = "$sample"_sd;
 
@@ -58,8 +57,7 @@ public:
         return DepsTracker::State::SEE_NEXT;
     }
 
-    boost::intrusive_ptr<DocumentSource> getShardSource() final;
-    MergingLogic mergingLogic() final;
+    boost::optional<MergingLogic> mergingLogic() final;
 
     long long getSampleSize() const {
         return _size;

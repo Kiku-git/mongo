@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2018 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -108,11 +108,11 @@ __sync_dup_walk(
 }
 
 /*
- * __sync_file --
+ * __wt_sync_file --
  *	Flush pages for a specific file.
  */
-static int
-__sync_file(WT_SESSION_IMPL *session, WT_CACHE_OP syncop)
+int
+__wt_sync_file(WT_SESSION_IMPL *session, WT_CACHE_OP syncop)
 {
 	WT_BTREE *btree;
 	WT_CONNECTION_IMPL *conn;
@@ -269,14 +269,11 @@ __sync_file(WT_SESSION_IMPL *session, WT_CACHE_OP syncop)
 				if (((mod = walk->page->modify) != NULL) &&
 				    mod->rec_max_txn > btree->rec_max_txn)
 					btree->rec_max_txn = mod->rec_max_txn;
-#ifdef HAVE_TIMESTAMPS
-				if (mod != NULL && __wt_timestamp_cmp(
-				    &btree->rec_max_timestamp,
-				    &mod->rec_max_timestamp) < 0)
-					__wt_timestamp_set(
-					    &btree->rec_max_timestamp,
-					    &mod->rec_max_timestamp);
-#endif
+				if (mod != NULL &&
+				    btree->rec_max_timestamp <
+				    mod->rec_max_timestamp)
+					btree->rec_max_timestamp =
+					    mod->rec_max_timestamp;
 				continue;
 			}
 
@@ -401,43 +398,5 @@ err:	/* On error, clear any left-over tree walk. */
 	    syncop == WT_SYNC_WRITE_LEAVES && F_ISSET(conn, WT_CONN_CKPT_SYNC))
 		WT_RET(btree->bm->sync(btree->bm, session, false));
 
-	return (ret);
-}
-
-/*
- * __wt_cache_op --
- *	Cache operations.
- */
-int
-__wt_cache_op(WT_SESSION_IMPL *session, WT_CACHE_OP op)
-{
-	WT_DECL_RET;
-
-	switch (op) {
-	case WT_SYNC_CHECKPOINT:
-	case WT_SYNC_CLOSE:
-		/*
-		 * Make sure the checkpoint reference is set for
-		 * reconciliation; it's ugly, but drilling a function parameter
-		 * path from our callers to the reconciliation of the tree's
-		 * root page is going to be worse.
-		 */
-		WT_ASSERT(session, S2BT(session)->ckpt != NULL);
-		break;
-	case WT_SYNC_DISCARD:
-	case WT_SYNC_WRITE_LEAVES:
-		break;
-	}
-
-	switch (op) {
-	case WT_SYNC_CHECKPOINT:
-	case WT_SYNC_WRITE_LEAVES:
-		ret = __sync_file(session, op);
-		break;
-	case WT_SYNC_CLOSE:
-	case WT_SYNC_DISCARD:
-		ret = __wt_evict_file(session, op);
-		break;
-	}
 	return (ret);
 }

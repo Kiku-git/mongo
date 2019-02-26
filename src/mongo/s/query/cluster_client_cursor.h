@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -113,9 +112,22 @@ public:
     virtual BSONObj getOriginatingCommand() const = 0;
 
     /**
+     * Returns the privileges required to run a getMore against this cursor. This is the same as the
+     * set of privileges which would have been required to create the cursor in the first place.
+     */
+    virtual const PrivilegeVector& getOriginatingPrivileges() const& = 0;
+    void getOriginatingPrivileges() && = delete;
+
+    /**
      * Returns a reference to the vector of remote hosts involved in this operation.
      */
     virtual std::size_t getNumRemotes() const = 0;
+
+    /**
+     * Returns the current most-recent resume token for this cursor, or an empty object if this is
+     * not a $changeStream cursor.
+     */
+    virtual BSONObj getPostBatchResumeToken() const = 0;
 
     /**
      * Returns the number of result documents returned so far by this cursor via the next() method.

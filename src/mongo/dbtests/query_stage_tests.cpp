@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -120,17 +119,17 @@ public:
         }
     }
 
-    IndexDescriptor* getIndex(const BSONObj& obj) {
+    const IndexDescriptor* getIndex(const BSONObj& obj) {
         AutoGetCollectionForReadCommand ctx(&_opCtx, NamespaceString(ns()));
         Collection* collection = ctx.getCollection();
-        std::vector<IndexDescriptor*> indexes;
+        std::vector<const IndexDescriptor*> indexes;
         collection->getIndexCatalog()->findIndexesByKeyPattern(&_opCtx, obj, false, &indexes);
         return indexes.empty() ? nullptr : indexes[0];
     }
 
     IndexScanParams makeIndexScanParams(OperationContext* opCtx,
                                         const IndexDescriptor* descriptor) {
-        IndexScanParams params(opCtx, *descriptor);
+        IndexScanParams params(opCtx, descriptor);
         params.bounds.isSimpleRange = true;
         params.bounds.endKey = BSONObj();
         params.bounds.boundInclusion = BoundInclusion::kIncludeBothStartAndEndKeys;

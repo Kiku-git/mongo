@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2018 MongoDB, Inc.
+ * Public Domain 2014-2019 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -45,20 +45,11 @@ compressor(uint32_t compress_flag)
 	case COMPRESS_LZ4:
 		p ="lz4";
 		break;
-	case COMPRESS_LZ4_NO_RAW:
-		p ="lz4-noraw";
-		break;
-	case COMPRESS_LZO:
-		p ="LZO1B-6";
-		break;
 	case COMPRESS_SNAPPY:
 		p ="snappy";
 		break;
 	case COMPRESS_ZLIB:
 		p ="zlib";
-		break;
-	case COMPRESS_ZLIB_NO_RAW:
-		p ="zlib-noraw";
 		break;
 	case COMPRESS_ZSTD:
 		p ="zstd";
@@ -244,6 +235,8 @@ wts_open(const char *home, bool set_api, WT_CONNECTION **connp)
 
 	/* Optionally stress operations. */
 	CONFIG_APPEND(p, ",timing_stress_for_test=[");
+	if (g.c_timing_stress_aggressive_sweep)
+		CONFIG_APPEND(p, ",aggressive_sweep");
 	if (g.c_timing_stress_checkpoint)
 		CONFIG_APPEND(p, ",checkpoint_slow");
 	if (g.c_timing_stress_lookaside_sweep)
@@ -269,10 +262,9 @@ wts_open(const char *home, bool set_api, WT_CONNECTION **connp)
 	/* Extensions. */
 	CONFIG_APPEND(p,
 	    ",extensions=["
-	    "\"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"%s\"],",
+	    "\"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"%s\"],",
 	    g.c_reverse ? REVERSE_PATH : "",
 	    access(LZ4_PATH, R_OK) == 0 ? LZ4_PATH : "",
-	    access(LZO_PATH, R_OK) == 0 ? LZO_PATH : "",
 	    access(ROTN_PATH, R_OK) == 0 ? ROTN_PATH : "",
 	    access(SNAPPY_PATH, R_OK) == 0 ? SNAPPY_PATH : "",
 	    access(ZLIB_PATH, R_OK) == 0 ? ZLIB_PATH : "",

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -72,6 +71,19 @@ public:
      * (BadValue, TypeMismatch, etc).
      */
     static StatusWith<ChunkVersion> parseWithField(const BSONObj& obj, StringData field);
+
+    /**
+     * Parses 'obj', which is expected to have two elements: the timestamp and the object id. The
+     * field names don't matter, so 'obj' can be a BSONArray.
+     */
+    static StatusWith<ChunkVersion> fromBSON(const BSONObj& obj);
+
+    /**
+     * A throwing version of 'fromBSON'.
+     */
+    static ChunkVersion fromBSONThrowing(const BSONObj& obj) {
+        return uassertStatusOK(fromBSON(obj));
+    }
 
     /**
      * NOTE: This format is being phased out. Use parseWithField instead.

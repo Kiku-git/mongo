@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -249,6 +248,7 @@ void mergeChunks(OperationContext* opCtx,
         checkMetadataForSuccess(opCtx, nss, epoch, ChunkRange(minKey, maxKey))) {
         LOG(1) << "mergeChunk [" << redact(minKey) << "," << redact(maxKey)
                << ") has already been committed.";
+        return;
     }
 
     uassertStatusOKWithContext(commandStatus, "Failed to commit chunk merge");

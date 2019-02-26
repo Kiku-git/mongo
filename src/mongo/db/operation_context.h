@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -45,6 +44,7 @@
 #include "mongo/platform/atomic_word.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
+#include "mongo/transport/session.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/interruptible.h"
 #include "mongo/util/time_support.h"
@@ -78,8 +78,7 @@ class OperationContext : public Interruptible, public Decorable<OperationContext
 
 public:
     OperationContext(Client* client, unsigned int opId);
-
-    virtual ~OperationContext() = default;
+    virtual ~OperationContext();
 
     /**
      * Interface for durability.  Caller DOES NOT own pointer.
@@ -163,7 +162,7 @@ public:
     /**
      * Returns the session ID associated with this operation, if there is one.
      */
-    boost::optional<LogicalSessionId> getLogicalSessionId() const {
+    const boost::optional<LogicalSessionId>& getLogicalSessionId() const {
         return _lsid;
     }
 
@@ -184,14 +183,14 @@ public:
     /**
      * Sets a transport Baton on the operation.  This will trigger the Baton on markKilled.
      */
-    void setBaton(const transport::BatonHandle& baton) {
+    void setBaton(const BatonHandle& baton) {
         _baton = baton;
     }
 
     /**
      * Retrieves the baton associated with the operation.
      */
-    const transport::BatonHandle& getBaton() const {
+    const BatonHandle& getBaton() const {
         return _baton;
     }
 
@@ -236,6 +235,8 @@ public:
     bool writesAreReplicated() const {
         return _writesAreReplicated;
     }
+
+    void markKillOnClientDisconnect();
 
     /**
      * Marks this operation as killed so that subsequent calls to checkForInterrupt and
@@ -310,6 +311,11 @@ public:
     Date_t getDeadline() const override {
         return _deadline;
     }
+
+    /**
+     * Returns the error code used when this operation's time limit is reached.
+     */
+    ErrorCodes::Error getTimeoutError() const;
 
     /**
      * Returns the number of milliseconds remaining for this operation's time limit or
@@ -406,7 +412,9 @@ private:
 
     friend class WriteUnitOfWork;
     friend class repl::UnreplicatedWritesBlock;
+
     Client* const _client;
+
     const unsigned int _opId;
 
     boost::optional<LogicalSessionId> _lsid;
@@ -429,13 +437,17 @@ private:
 
     // A transport Baton associated with the operation. The presence of this object implies that a
     // client thread is doing it's own async networking by blocking on it's own thread.
-    transport::BatonHandle _baton;
+    BatonHandle _baton;
 
     // If non-null, _waitMutex and _waitCV are the (mutex, condition variable) pair that the
     // operation is currently waiting on inside a call to waitForConditionOrInterrupt...().
+    //
+    // _waitThread is the calling thread's thread id.
+    //
     // All access guarded by the Client's lock.
     stdx::mutex* _waitMutex = nullptr;
     stdx::condition_variable* _waitCV = nullptr;
+    stdx::thread::id _waitThread;
 
     // If _waitMutex and _waitCV are non-null, this is the number of threads in a call to markKilled
     // actively attempting to kill the operation. If this value is non-zero, the operation is inside
@@ -446,12 +458,14 @@ private:
 
     WriteConcernOptions _writeConcern;
 
-    Date_t _deadline =
-        Date_t::max();  // The timepoint at which this operation exceeds its time limit.
+    // The timepoint at which this operation exceeds its time limit.
+    Date_t _deadline = Date_t::max();
 
     ErrorCodes::Error _timeoutError = ErrorCodes::ExceededTimeLimit;
     bool _ignoreInterrupts = false;
     bool _hasArtificialDeadline = false;
+    bool _markKillOnClientDisconnect = false;
+    Date_t _lastClientCheck;
 
     // Max operation time requested by the user or by the cursor in the case of a getMore with no
     // user-specified maxTime. This is tracked with microsecond granularity for the purpose of

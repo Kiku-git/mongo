@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -64,7 +63,11 @@ public:
 
     virtual BackupCursorState openBackupCursor(OperationContext* opCtx);
 
-    virtual void closeBackupCursor(OperationContext* opCtx, UUID backupId);
+    virtual void closeBackupCursor(OperationContext* opCtx, const UUID& backupId);
+
+    virtual BackupCursorExtendState extendBackupCursor(OperationContext* opCtx,
+                                                       const UUID& backupId,
+                                                       const Timestamp& extendTo);
 
     virtual bool isBackupCursorOpen() const;
 };

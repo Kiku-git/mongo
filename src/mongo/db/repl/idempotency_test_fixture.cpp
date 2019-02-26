@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -76,7 +75,7 @@ repl::OplogEntry makeOplogEntry(repl::OpTime opTime,
                                 boost::optional<StmtId> stmtId = boost::none,
                                 boost::optional<UUID> uuid = boost::none) {
     return repl::OplogEntry(opTime,                           // optime
-                            1LL,                              // hash
+                            boost::none,                      // hash
                             opType,                           // opType
                             nss,                              // namespace
                             uuid,                             // uuid
@@ -398,12 +397,12 @@ OplogEntry IdempotencyTest::buildIndex(const BSONObj& indexSpec,
 }
 
 OplogEntry IdempotencyTest::dropIndex(const std::string& indexName) {
-    auto cmd = BSON("deleteIndexes" << nss.coll() << "index" << indexName);
+    auto cmd = BSON("dropIndexes" << nss.coll() << "index" << indexName);
     return makeCommandOplogEntry(nextOpTime(), nss, cmd);
 }
 
 std::string IdempotencyTest::computeDataHash(Collection* collection) {
-    IndexDescriptor* desc = collection->getIndexCatalog()->findIdIndex(_opCtx.get());
+    auto desc = collection->getIndexCatalog()->findIdIndex(_opCtx.get());
     ASSERT_TRUE(desc);
     auto exec = InternalPlanner::indexScan(_opCtx.get(),
                                            collection,

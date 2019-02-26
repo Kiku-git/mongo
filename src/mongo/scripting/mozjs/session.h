@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -43,14 +42,19 @@ namespace mozjs {
  * from C++. Current callers are all via the Mongo object.
  */
 struct SessionInfo : public BaseInfo {
-    static void finalize(JSFreeOp* fop, JSObject* obj);
+    static void finalize(js::FreeOp* fop, JSObject* obj);
 
     struct Functions {
         MONGO_DECLARE_JS_FUNCTION(end);
         MONGO_DECLARE_JS_FUNCTION(getId);
+        MONGO_DECLARE_JS_FUNCTION(getTxnState);
+        MONGO_DECLARE_JS_FUNCTION(setTxnState);
+        MONGO_DECLARE_JS_FUNCTION(getTxnNumber);
+        MONGO_DECLARE_JS_FUNCTION(setTxnNumber);
+        MONGO_DECLARE_JS_FUNCTION(incrementTxnNumber);
     };
 
-    static const JSFunctionSpec methods[3];
+    static const JSFunctionSpec methods[8];
 
     static const char* const className;
     static const unsigned classFlags = JSCLASS_HAS_PRIVATE;

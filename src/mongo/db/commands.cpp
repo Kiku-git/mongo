@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -55,6 +54,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/server_parameters.h"
 #include "mongo/rpc/factory.h"
+#include "mongo/rpc/metadata/client_metadata_ismaster.h"
 #include "mongo/rpc/op_msg_rpc_impls.h"
 #include "mongo/rpc/protocol.h"
 #include "mongo/rpc/write_concern_error_detail.h"
@@ -127,10 +127,6 @@ const StringMap<int> txnCmdWhitelist = {{"abortTransaction", 1},
                                         {"update", 1},
                                         {"voteAbortTransaction", 1},
                                         {"voteCommitTransaction", 1}};
-
-// The command names that are allowed in a multi-document transaction only when test commands are
-// enabled.
-const StringMap<int> txnCmdForTestingWhitelist = {{"dbHash", 1}};
 
 
 // The commands that can be run on the 'admin' database in multi-document transactions.
@@ -243,6 +239,12 @@ NamespaceString CommandHelpers::parseNsCollectionRequired(StringData dbname,
     // Accepts both BSON String and Symbol for collection name per SERVER-16260
     // TODO(kangas) remove Symbol support in MongoDB 3.0 after Ruby driver audit
     BSONElement first = cmdObj.firstElement();
+    const bool isUUID = (first.canonicalType() == canonicalizeBSONType(mongo::BinData) &&
+                         first.binDataType() == BinDataType::newUUID);
+    uassert(ErrorCodes::InvalidNamespace,
+            str::stream() << "Collection name must be provided. UUID is not valid in this "
+                          << "context",
+            !isUUID);
     uassert(ErrorCodes::InvalidNamespace,
             str::stream() << "collection name has invalid type " << typeName(first.type()),
             first.canonicalType() == canonicalizeBSONType(mongo::String));
@@ -444,9 +446,7 @@ Status CommandHelpers::canUseTransactions(StringData dbName, StringData cmdName)
                 "http://dochub.mongodb.org/core/transaction-count for a recommended alternative."};
     }
 
-    if (txnCmdWhitelist.find(cmdName) == txnCmdWhitelist.cend() &&
-        !(getTestCommandsEnabled() &&
-          txnCmdForTestingWhitelist.find(cmdName) != txnCmdForTestingWhitelist.cend())) {
+    if (txnCmdWhitelist.find(cmdName) == txnCmdWhitelist.cend()) {
         return {ErrorCodes::OperationNotSupportedInTransaction,
                 str::stream() << "Cannot run '" << cmdName << "' in a multi-document transaction."};
     }
@@ -464,6 +464,7 @@ Status CommandHelpers::canUseTransactions(StringData dbName, StringData cmdName)
 constexpr StringData CommandHelpers::kHelpFieldName;
 
 MONGO_FAIL_POINT_DEFINE(failCommand);
+MONGO_FAIL_POINT_DEFINE(waitInCommandMarkKillOnClientDisconnect);
 
 bool CommandHelpers::shouldActivateFailCommandFailPoint(const BSONObj& data,
                                                         StringData cmdName,
@@ -478,6 +479,12 @@ bool CommandHelpers::shouldActivateFailCommandFailPoint(const BSONObj& data,
         return false;
     }
 
+    if (client->session() && (client->session()->getTags() & transport::Session::kInternalClient)) {
+        if (!data.hasField("failInternalCommands") || !data.getBoolField("failInternalCommands")) {
+            return false;
+        }
+    }
+
     for (auto&& failCommand : data.getObjectField("failCommands")) {
         if (failCommand.type() == String && failCommand.valueStringData() == cmdName) {
             return true;
@@ -488,27 +495,55 @@ bool CommandHelpers::shouldActivateFailCommandFailPoint(const BSONObj& data,
 }
 
 void CommandHelpers::evaluateFailCommandFailPoint(OperationContext* opCtx, StringData commandName) {
+    bool closeConnection, hasErrorCode;
+    long long errorCode;
+
     MONGO_FAIL_POINT_BLOCK_IF(failCommand, data, [&](const BSONObj& data) {
+        closeConnection = data.hasField("closeConnection") &&
+            bsonExtractBooleanField(data, "closeConnection", &closeConnection).isOK() &&
+            closeConnection;
+        hasErrorCode = data.hasField("errorCode") &&
+            bsonExtractIntegerField(data, "errorCode", &errorCode).isOK();
+
         return shouldActivateFailCommandFailPoint(data, commandName, opCtx->getClient()) &&
-            (data.hasField("closeConnection") || data.hasField("errorCode"));
+            (closeConnection || hasErrorCode);
     }) {
-        bool closeConnection;
-        if (bsonExtractBooleanField(data.getData(), "closeConnection", &closeConnection).isOK() &&
-            closeConnection) {
+        if (closeConnection) {
             opCtx->getClient()->session()->end();
             log() << "Failing command '" << commandName
                   << "' via 'failCommand' failpoint. Action: closing connection.";
             uasserted(50985, "Failing command due to 'failCommand' failpoint");
         }
 
-        long long errorCode;
-        if (bsonExtractIntegerField(data.getData(), "errorCode", &errorCode).isOK()) {
+        if (hasErrorCode) {
             log() << "Failing command '" << commandName
                   << "' via 'failCommand' failpoint. Action: returning error code " << errorCode
                   << ".";
             uasserted(ErrorCodes::Error(errorCode),
                       "Failing command due to 'failCommand' failpoint");
         }
+    }
+}
+
+void CommandHelpers::handleMarkKillOnClientDisconnect(OperationContext* opCtx,
+                                                      bool shouldMarkKill) {
+    if (opCtx->getClient()->isInDirectClient()) {
+        return;
+    }
+
+    if (shouldMarkKill) {
+        opCtx->markKillOnClientDisconnect();
+    }
+
+    MONGO_FAIL_POINT_BLOCK_IF(
+        waitInCommandMarkKillOnClientDisconnect, options, [&](const BSONObj& obj) {
+            const auto& clientMetadata =
+                ClientMetadataIsMasterState::get(opCtx->getClient()).getClientMetadata();
+
+            return clientMetadata && (clientMetadata->getApplicationName() == obj["appName"].str());
+        }) {
+        MONGO_FAIL_POINT_PAUSE_WHILE_SET_OR_INTERRUPTED(opCtx,
+                                                        waitInCommandMarkKillOnClientDisconnect);
     }
 }
 
@@ -683,10 +718,9 @@ void CommandRegistry::registerCommand(Command* command, StringData name, StringD
         if (key.empty()) {
             continue;
         }
-        auto hashedKey = CommandMap::HashedKey(key);
-        auto iter = _commands.find(hashedKey);
-        invariant(iter == _commands.end(), str::stream() << "command name collision: " << key);
-        _commands[hashedKey] = command;
+
+        auto result = _commands.try_emplace(key, command);
+        invariant(result.second, str::stream() << "command name collision: " << key);
     }
 }
 

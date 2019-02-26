@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -79,6 +78,7 @@
 #include "mongo/util/password_digest.h"
 #include "mongo/util/sequence_util.h"
 #include "mongo/util/time_support.h"
+#include "mongo/util/uuid.h"
 
 namespace mongo {
 
@@ -704,7 +704,7 @@ Status buildCredentials(BSONObjBuilder* builder, const auth::CreateOrUpdateUserA
         if (!args.digestPassword) {
             return {ErrorCodes::BadValue, "Use of SCRAM-SHA-256 requires undigested passwords"};
         }
-        const auto swPwd = saslPrep(args.password);
+        const auto swPwd = icuSaslPrep(args.password);
         if (!swPwd.isOK()) {
             return swPwd.getStatus();
         }
@@ -770,10 +770,6 @@ class CmdCreateUser : public BasicCommand {
 public:
     CmdCreateUser() : BasicCommand("createUser") {}
 
-    bool isUserManagementCommand() const override {
-        return true;
-    }
-
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
         return AllowedOnSecondary::kNever;
     }
@@ -833,6 +829,7 @@ public:
         BSONObjBuilder userObjBuilder;
         userObjBuilder.append(
             "_id", str::stream() << args.userName.getDB() << "." << args.userName.getUser());
+        UUID::gen().appendToBuilder(&userObjBuilder, AuthorizationManager::USERID_FIELD_NAME);
         userObjBuilder.append(AuthorizationManager::USER_NAME_FIELD_NAME, args.userName.getUser());
         userObjBuilder.append(AuthorizationManager::USER_DB_FIELD_NAME, args.userName.getDB());
 
@@ -894,10 +891,6 @@ public:
 class CmdUpdateUser : public BasicCommand {
 public:
     CmdUpdateUser() : BasicCommand("updateUser") {}
-
-    bool isUserManagementCommand() const override {
-        return true;
-    }
 
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
         return AllowedOnSecondary::kNever;
@@ -1022,10 +1015,6 @@ class CmdDropUser : public BasicCommand {
 public:
     CmdDropUser() : BasicCommand("dropUser") {}
 
-    bool isUserManagementCommand() const override {
-        return true;
-    }
-
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
         return AllowedOnSecondary::kNever;
     }
@@ -1084,10 +1073,6 @@ class CmdDropAllUsersFromDatabase : public BasicCommand {
 public:
     CmdDropAllUsersFromDatabase() : BasicCommand("dropAllUsersFromDatabase") {}
 
-    bool isUserManagementCommand() const override {
-        return true;
-    }
-
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
         return AllowedOnSecondary::kNever;
     }
@@ -1135,10 +1120,6 @@ public:
 class CmdGrantRolesToUser : public BasicCommand {
 public:
     CmdGrantRolesToUser() : BasicCommand("grantRolesToUser") {}
-
-    bool isUserManagementCommand() const override {
-        return true;
-    }
 
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
         return AllowedOnSecondary::kNever;
@@ -1202,10 +1183,6 @@ public:
 class CmdRevokeRolesFromUser : public BasicCommand {
 public:
     CmdRevokeRolesFromUser() : BasicCommand("revokeRolesFromUser") {}
-
-    bool isUserManagementCommand() const override {
-        return true;
-    }
 
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
         return AllowedOnSecondary::kNever;
@@ -1398,10 +1375,12 @@ public:
             rpc::OpMsgReplyBuilder replyBuilder;
             AggregationRequest aggRequest(AuthorizationManager::usersCollectionNamespace,
                                           std::move(pipeline));
+            // Impose no cursor privilege requirements, as cursor is drained internally
             uassertStatusOK(runAggregate(opCtx,
                                          AuthorizationManager::usersCollectionNamespace,
                                          aggRequest,
                                          aggRequest.serializeToCommandObj().toBson(),
+                                         PrivilegeVector(),
                                          &replyBuilder));
             auto bodyBuilder = replyBuilder.getBodyBuilder();
             CommandHelpers::appendSimpleCommandStatus(bodyBuilder, true);
@@ -1423,10 +1402,6 @@ public:
 class CmdCreateRole : public BasicCommand {
 public:
     CmdCreateRole() : BasicCommand("createRole") {}
-
-    bool isUserManagementCommand() const override {
-        return true;
-    }
 
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
         return AllowedOnSecondary::kNever;
@@ -1527,10 +1502,6 @@ public:
 class CmdUpdateRole : public BasicCommand {
 public:
     CmdUpdateRole() : BasicCommand("updateRole") {}
-
-    bool isUserManagementCommand() const override {
-        return true;
-    }
 
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
         return AllowedOnSecondary::kNever;
@@ -1634,10 +1605,6 @@ class CmdGrantPrivilegesToRole : public BasicCommand {
 public:
     CmdGrantPrivilegesToRole() : BasicCommand("grantPrivilegesToRole") {}
 
-    bool isUserManagementCommand() const override {
-        return true;
-    }
-
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
         return AllowedOnSecondary::kNever;
     }
@@ -1728,10 +1695,6 @@ public:
 class CmdRevokePrivilegesFromRole : public BasicCommand {
 public:
     CmdRevokePrivilegesFromRole() : BasicCommand("revokePrivilegesFromRole") {}
-
-    bool isUserManagementCommand() const override {
-        return true;
-    }
 
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
         return AllowedOnSecondary::kNever;
@@ -1827,10 +1790,6 @@ class CmdGrantRolesToRole : public BasicCommand {
 public:
     CmdGrantRolesToRole() : BasicCommand("grantRolesToRole") {}
 
-    bool isUserManagementCommand() const override {
-        return true;
-    }
-
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
         return AllowedOnSecondary::kNever;
     }
@@ -1907,10 +1866,6 @@ class CmdRevokeRolesFromRole : public BasicCommand {
 public:
     CmdRevokeRolesFromRole() : BasicCommand("revokeRolesFromRole") {}
 
-    bool isUserManagementCommand() const override {
-        return true;
-    }
-
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
         return AllowedOnSecondary::kNever;
     }
@@ -1984,10 +1939,6 @@ class CmdDropRole : public BasicCommand {
 public:
     CmdDropRole() : BasicCommand("dropRole") {}
 
-    bool isUserManagementCommand() const override {
-        return true;
-    }
-
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
         return AllowedOnSecondary::kNever;
     }
@@ -2033,7 +1984,7 @@ public:
         uassertStatusOK(status);
 
         // From here on, we always want to invalidate the user cache before returning.
-        auto invalidateGuard = MakeGuard([&] {
+        auto invalidateGuard = makeGuard([&] {
             try {
                 authzManager->invalidateUserCache(opCtx);
             } catch (const DBException& e) {
@@ -2120,10 +2071,6 @@ class CmdDropAllRolesFromDatabase : public BasicCommand {
 public:
     CmdDropAllRolesFromDatabase() : BasicCommand("dropAllRolesFromDatabase") {}
 
-    bool isUserManagementCommand() const override {
-        return true;
-    }
-
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
         return AllowedOnSecondary::kNever;
     }
@@ -2158,7 +2105,7 @@ public:
 
         auto lk = uassertStatusOK(requireWritableAuthSchema28SCRAM(opCtx, authzManager));
         // From here on, we always want to invalidate the user cache before returning.
-        auto invalidateGuard = MakeGuard([&] {
+        auto invalidateGuard = makeGuard([&] {
             try {
                 authzManager->invalidateUserCache(opCtx);
             } catch (const DBException& e) {
@@ -2409,10 +2356,6 @@ public:
 class CmdMergeAuthzCollections : public BasicCommand {
 public:
     CmdMergeAuthzCollections() : BasicCommand("_mergeAuthzCollections") {}
-
-    bool isUserManagementCommand() const override {
-        return true;
-    }
 
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
         return AllowedOnSecondary::kNever;
@@ -2772,7 +2715,7 @@ public:
 
         auto lk = uassertStatusOK(requireWritableAuthSchema28SCRAM(opCtx, authzManager));
         // From here on, we always want to invalidate the user cache before returning.
-        auto invalidateGuard = MakeGuard([&] {
+        auto invalidateGuard = makeGuard([&] {
             try {
                 authzManager->invalidateUserCache(opCtx);
             } catch (const DBException& e) {

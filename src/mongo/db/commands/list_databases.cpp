@@ -1,6 +1,3 @@
-// list_databases.cpp
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -39,6 +36,7 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/list_databases_gen.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/curop_failpoint_helpers.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
@@ -49,6 +47,9 @@ namespace {
 static const StringData kFilterField{"filter"};
 static const StringData kNameField{"name"};
 static const StringData kNameOnlyField{"nameOnly"};
+
+// Failpoint which causes to hang "listDatabases" cmd after acquiring global lock in IS mode.
+MONGO_FAIL_POINT_DEFINE(hangBeforeListDatabases);
 }  // namespace
 
 using std::set;
@@ -92,6 +93,7 @@ public:
              const string& dbname,
              const BSONObj& cmdObj,
              BSONObjBuilder& result) final {
+        CommandHelpers::handleMarkKillOnClientDisconnect(opCtx);
         IDLParserErrorContext ctx("listDatabases");
         auto cmd = ListDatabasesCommand::parse(ctx, cmdObj);
         auto* as = AuthorizationSession::get(opCtx->getClient());
@@ -132,6 +134,8 @@ public:
         StorageEngine* storageEngine = getGlobalServiceContext()->getStorageEngine();
         {
             Lock::GlobalLock lk(opCtx, MODE_IS);
+            CurOpFailpointHelpers::waitWhileFailPointEnabled(
+                &hangBeforeListDatabases, opCtx, "hangBeforeListDatabases", []() {});
             storageEngine->listDatabases(&dbNames);
         }
 
@@ -142,9 +146,7 @@ public:
             filter->path() == kNameField;
         intmax_t totalSize = 0;
         for (const auto& dbname : dbNames) {
-            if (authorizedDatabases &&
-                !as->isAuthorizedForActionsOnResource(ResourcePattern::forDatabaseName(dbname),
-                                                      ActionType::find)) {
+            if (authorizedDatabases && !as->isAuthorizedForAnyActionOnAnyResourceInDB(dbname)) {
                 // We don't have listDatabases on the cluser or find on this database.
                 continue;
             }

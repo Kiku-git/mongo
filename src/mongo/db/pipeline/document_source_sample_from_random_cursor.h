@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -53,6 +52,10 @@ public:
                 DiskUseRequirement::kNoDiskUse,
                 FacetRequirement::kNotAllowed,
                 TransactionRequirement::kAllowed};
+    }
+
+    boost::optional<MergingLogic> mergingLogic() final {
+        return boost::none;
     }
 
     static boost::intrusive_ptr<DocumentSourceSampleFromRandomCursor> create(

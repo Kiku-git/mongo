@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -38,6 +37,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/locker_noop.h"
+#include "mongo/db/default_baton.h"
 #include "mongo/db/op_observer.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/storage/recovery_unit_noop.h"
@@ -58,6 +58,8 @@ namespace {
 using ConstructorActionList = stdx::list<ServiceContext::ConstructorDestructorActions>;
 
 ServiceContext* globalServiceContext = nullptr;
+
+AtomicWord<int> _numCurrentOps{0};
 
 }  // namespace
 
@@ -151,7 +153,6 @@ void onCreate(T* object, const ObserversContainer& observers) {
     onCreate(object, observers.cbegin(), observers.cend());
 }
 
-
 }  // namespace
 
 ServiceContext::UniqueClient ServiceContext::makeClient(std::string desc,
@@ -225,6 +226,9 @@ void ServiceContext::ClientDeleter::operator()(Client* client) const {
     {
         stdx::lock_guard<stdx::mutex> lk(service->_mutex);
         invariant(service->_clients.erase(client));
+        if (service->_clients.empty()) {
+            service->_clientsEmptyCondVar.notify_all();
+        }
     }
     onDestroy(client, service->_clientObservers);
     delete client;
@@ -232,6 +236,10 @@ void ServiceContext::ClientDeleter::operator()(Client* client) const {
 
 ServiceContext::UniqueOperationContext ServiceContext::makeOperationContext(Client* client) {
     auto opCtx = std::make_unique<OperationContext>(client, _nextOpId.fetchAndAdd(1));
+    if (client && client->session()) {
+        _numCurrentOps.addAndFetch(1);
+    }
+
     onCreate(opCtx.get(), _clientObservers);
     if (!opCtx->lockState()) {
         opCtx->setLockState(std::make_unique<LockerNoop>());
@@ -244,11 +252,21 @@ ServiceContext::UniqueOperationContext ServiceContext::makeOperationContext(Clie
         stdx::lock_guard<Client> lk(*client);
         client->setOperationContext(opCtx.get());
     }
+    if (_transportLayer) {
+        _transportLayer->makeBaton(opCtx.get());
+    } else {
+        makeBaton(opCtx.get());
+    }
     return UniqueOperationContext(opCtx.release());
 };
 
 void ServiceContext::OperationContextDeleter::operator()(OperationContext* opCtx) const {
+    opCtx->getBaton()->detach();
+
     auto client = opCtx->getClient();
+    if (client && client->session()) {
+        _numCurrentOps.subtractAndFetch(1);
+    }
     auto service = client->getServiceContext();
     {
         stdx::lock_guard<Client> lk(*client);
@@ -284,7 +302,7 @@ void ServiceContext::setKillAllOperations() {
         stdx::lock_guard<Client> lk(*client);
         auto opCtxToKill = client->getOperationContext();
         if (opCtxToKill) {
-            killOperation(opCtxToKill, ErrorCodes::InterruptedAtShutdown);
+            killOperation(lk, opCtxToKill, ErrorCodes::InterruptedAtShutdown);
         }
     }
 
@@ -298,7 +316,7 @@ void ServiceContext::setKillAllOperations() {
     }
 }
 
-void ServiceContext::killOperation(OperationContext* opCtx, ErrorCodes::Error killCode) {
+void ServiceContext::killOperation(WithLock, OperationContext* opCtx, ErrorCodes::Error killCode) {
     opCtx->markKilled(killCode);
 
     for (const auto listener : _killOpListeners) {
@@ -306,24 +324,6 @@ void ServiceContext::killOperation(OperationContext* opCtx, ErrorCodes::Error ki
             listener->interrupt(opCtx->getOpID());
         } catch (...) {
             std::terminate();
-        }
-    }
-}
-
-void ServiceContext::killAllUserOperations(const OperationContext* opCtx,
-                                           ErrorCodes::Error killCode) {
-    for (LockedClientsCursor cursor(this); Client* client = cursor.next();) {
-        if (!client->isFromUserConnection()) {
-            // Don't kill system operations.
-            continue;
-        }
-
-        stdx::lock_guard<Client> lk(*client);
-        OperationContext* toKill = client->getOperationContext();
-
-        // Don't kill ourself.
-        if (toKill && toKill->getOpID() != opCtx->getOpID()) {
-            killOperation(toKill, killCode);
         }
     }
 }
@@ -342,11 +342,23 @@ void ServiceContext::waitForStartupComplete() {
     _startupCompleteCondVar.wait(lk, [this] { return _startupComplete; });
 }
 
+void ServiceContext::waitForClientsToFinish() {
+    stdx::unique_lock<stdx::mutex> lk(_mutex);
+    for (const auto& client : _clients) {
+        log() << "Waiting for client " << client->desc() << " to exit";
+    }
+    _clientsEmptyCondVar.wait(lk, [this] { return _clients.empty(); });
+}
+
 void ServiceContext::notifyStartupComplete() {
     stdx::unique_lock<stdx::mutex> lk(_mutex);
     _startupComplete = true;
     lk.unlock();
     _startupCompleteCondVar.notify_all();
+}
+
+int ServiceContext::getActiveClientOperations() {
+    return _numCurrentOps.load();
 }
 
 namespace {
@@ -398,6 +410,18 @@ ServiceContext::UniqueServiceContext ServiceContext::make() {
 void ServiceContext::ServiceContextDeleter::operator()(ServiceContext* service) const {
     onDestroy(service, registeredConstructorActions());
     delete service;
+}
+
+BatonHandle ServiceContext::makeBaton(OperationContext* opCtx) const {
+    auto baton = std::make_shared<DefaultBaton>(opCtx);
+
+    {
+        stdx::lock_guard<Client> lk(*opCtx->getClient());
+        invariant(!opCtx->getBaton());
+        opCtx->setBaton(baton);
+    }
+
+    return baton;
 }
 
 }  // namespace mongo

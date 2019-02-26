@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2018 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -72,6 +72,7 @@ struct __wt_cache {
 	uint64_t bytes_dirty_intl;	/* Bytes/pages currently dirty */
 	uint64_t pages_dirty_intl;
 	uint64_t bytes_dirty_leaf;
+	uint64_t bytes_dirty_total;
 	uint64_t pages_dirty_leaf;
 	uint64_t bytes_evict;		/* Bytes/pages discarded by eviction */
 	uint64_t pages_evicted;

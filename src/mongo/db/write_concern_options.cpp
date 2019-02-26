@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -62,11 +61,14 @@ constexpr StringData kWElectionIdFieldName = "wElectionId"_sd;
 
 }  // namespace
 
-const int WriteConcernOptions::kNoTimeout(0);
-const int WriteConcernOptions::kNoWaiting(-1);
+constexpr int WriteConcernOptions::kNoTimeout;
+constexpr int WriteConcernOptions::kNoWaiting;
 
-const StringData WriteConcernOptions::kWriteConcernField = "writeConcern"_sd;
+constexpr StringData WriteConcernOptions::kWriteConcernField;
 const char WriteConcernOptions::kMajority[] = "majority";
+
+// TODO (PM-1301): Remove once the stable Timestamp is allowed to advance past the oldest prepare
+// Timestamp.
 const char WriteConcernOptions::kInternalMajorityNoSnapshot[] = "internalMajorityNoSnapshot";
 
 const BSONObj WriteConcernOptions::Default = BSONObj();
@@ -75,10 +77,10 @@ const BSONObj WriteConcernOptions::Unacknowledged(BSON("w" << W_NONE));
 const BSONObj WriteConcernOptions::InternalMajorityNoSnapshot(
     BSON("w" << WriteConcernOptions::kInternalMajorityNoSnapshot));
 const BSONObj WriteConcernOptions::Majority(BSON("w" << WriteConcernOptions::kMajority));
-const Seconds WriteConcernOptions::kWriteConcernTimeoutSystem{15};
-const Seconds WriteConcernOptions::kWriteConcernTimeoutMigration{30};
-const Seconds WriteConcernOptions::kWriteConcernTimeoutSharding{60};
-const Seconds WriteConcernOptions::kWriteConcernTimeoutUserCommand{60};
+constexpr Seconds WriteConcernOptions::kWriteConcernTimeoutSystem;
+constexpr Seconds WriteConcernOptions::kWriteConcernTimeoutMigration;
+constexpr Seconds WriteConcernOptions::kWriteConcernTimeoutSharding;
+constexpr Seconds WriteConcernOptions::kWriteConcernTimeoutUserCommand;
 
 
 WriteConcernOptions::WriteConcernOptions(int numNodes, SyncMode sync, int timeout)
@@ -150,8 +152,10 @@ Status WriteConcernOptions::parse(const BSONObj& obj) {
 
     if (wEl.isNumber()) {
         wNumNodes = wEl.numberInt();
+        usedDefaultW = false;
     } else if (wEl.type() == String) {
         wMode = wEl.valuestrsafe();
+        usedDefaultW = false;
     } else if (wEl.eoo() || wEl.type() == jstNULL || wEl.type() == Undefined) {
         wNumNodes = 1;
     } else {
@@ -171,6 +175,7 @@ StatusWith<WriteConcernOptions> WriteConcernOptions::extractWCFromCommand(
     const BSONObj& cmdObj, const WriteConcernOptions& defaultWC) {
     WriteConcernOptions writeConcern = defaultWC;
     writeConcern.usedDefault = true;
+    writeConcern.usedDefaultW = true;
     if (writeConcern.wNumNodes == 0 && writeConcern.wMode.empty()) {
         writeConcern.wNumNodes = 1;
     }

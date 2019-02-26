@@ -1,6 +1,3 @@
-// kv_catalog.h
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -94,6 +91,8 @@ public:
 
     bool isUserDataIdent(StringData ident) const;
 
+    bool isInternalIdent(StringData ident) const;
+
     bool isCollectionIdent(StringData ident) const;
 
     FeatureTracker* getFeatureTracker() const {
@@ -112,6 +111,13 @@ public:
      * have access to index catalog.
      */
     StatusWith<std::string> newOrphanedIdent(OperationContext* opCtx, std::string ident);
+
+    std::string getFilesystemPathForDb(const std::string& dbName) const;
+
+    /**
+     * Generate an internal ident name.
+     */
+    std::string newInternalIdent();
 
 private:
     class AddIdentChange;
@@ -136,7 +142,7 @@ private:
 
     // These two are only used for ident generation inside _newUniqueIdent.
     std::string _rand;  // effectively const after init() returns
-    AtomicUInt64 _next;
+    AtomicWord<unsigned long long> _next;
 
     struct Entry {
         Entry() {}

@@ -1,6 +1,3 @@
-// expression_parser_test.cpp
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -88,13 +85,13 @@ TEST(MatchExpressionParserTest, ParseIntegerElementToLongAcceptsNegative) {
 }
 
 TEST(MatchExpressionParserTest, ParseIntegerElementToNonNegativeLongRejectsTooLargeDouble) {
-    BSONObj query = BSON("" << MatchExpressionParser::kLongLongMaxPlusOneAsDouble);
+    BSONObj query = BSON("" << BSONElement::kLongLongMaxPlusOneAsDouble);
     ASSERT_NOT_OK(
         MatchExpressionParser::parseIntegerElementToNonNegativeLong(query.firstElement()));
 }
 
 TEST(MatchExpressionParserTest, ParseIntegerElementToLongRejectsTooLargeDouble) {
-    BSONObj query = BSON("" << MatchExpressionParser::kLongLongMaxPlusOneAsDouble);
+    BSONObj query = BSON("" << BSONElement::kLongLongMaxPlusOneAsDouble);
     ASSERT_NOT_OK(MatchExpressionParser::parseIntegerElementToLong(query.firstElement()));
 }
 
@@ -327,6 +324,67 @@ TEST(MatchExpressionParserTest, WhereParsesSuccessfullyWhenAllowed) {
                   .getStatus());
 }
 
+TEST(MatchExpressionParserTest, RegexParsesSuccessfullyWithoutOptions) {
+    auto query = BSON("a" << BSON("$regex" << BSONRegEx("/myRegex/", "")));
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    ASSERT_OK(MatchExpressionParser::parse(query, expCtx).getStatus());
+}
+
+TEST(MatchExpressionParserTest, RegexParsesSuccessfullyWithOptionsInline) {
+    auto query = BSON("a" << BSON("$regex" << BSONRegEx("/myRegex/", "i")));
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    ASSERT_OK(MatchExpressionParser::parse(query, expCtx).getStatus());
+}
+
+TEST(MatchExpressionParserTest, RegexParsesSuccessfullyWithoutOptionsInlineAndEmptyOptionsStr) {
+    auto query = BSON("a" << BSON("$regex" << BSONRegEx("/myRegex/", "") << "$options"
+                                           << ""));
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    ASSERT_OK(MatchExpressionParser::parse(query, expCtx).getStatus());
+}
+
+TEST(MatchExpressionParserTest, RegexDoesNotParseSuccessfullyWithOptionsInlineAndEmptyOptionsStr) {
+    auto query = BSON("a" << BSON("$regex" << BSONRegEx("/myRegex/", "i") << "$options"
+                                           << ""));
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    ASSERT_NOT_OK(MatchExpressionParser::parse(query, expCtx).getStatus());
+}
+
+TEST(MatchExpressionParserTest, RegexParsesSuccessfullyWithOptionsNotInline) {
+    auto query = BSON("a" << BSON("$regex" << BSONRegEx("/myRegex/", "") << "$options"
+                                           << "i"));
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    ASSERT_OK(MatchExpressionParser::parse(query, expCtx).getStatus());
+}
+
+TEST(MatchExpressionParserTest, RegexDoesNotParseSuccessfullyWithMultipleOptions) {
+    auto query = BSON("a" << BSON("$options"
+                                  << "s"
+                                  << "$regex"
+                                  << BSONRegEx("/myRegex/", "i")));
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    ASSERT_NOT_OK(MatchExpressionParser::parse(query, expCtx).getStatus());
+}
+
+TEST(MatchExpressionParserTest, RegexParsesSuccessfullyWithOptionsFirst) {
+    auto query = BSON("a" << BSON("$options"
+                                  << "s"
+                                  << "$regex"
+                                  << BSONRegEx("/myRegex/", "")));
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    ASSERT_OK(MatchExpressionParser::parse(query, expCtx).getStatus());
+}
+
+TEST(MatchExpressionParserTest, RegexParsesSuccessfullyWithOptionsFirstEmptyOptions) {
+    auto query = BSON("a" << BSON("$options"
+                                  << ""
+                                  << "$regex"
+                                  << BSONRegEx("/myRegex/", "")));
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    ASSERT_OK(MatchExpressionParser::parse(query, expCtx).getStatus());
+}
+
+
 TEST(MatchExpressionParserTest, NearSphereFailsToParseWhenDisallowed) {
     auto query = fromjson("{a: {$nearSphere: {$geometry: {type: 'Point', coordinates: [0, 0]}}}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
@@ -472,5 +530,55 @@ TEST(MatchesExpressionParserTest, InternalExprEqComparisonToUndefinedDoesNotPars
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     auto query = fromjson("{'a.b': {$_internalExprEq: undefined}}");
     ASSERT_EQ(MatchExpressionParser::parse(query, expCtx).getStatus(), ErrorCodes::BadValue);
+}
+
+TEST(InternalBinDataSubTypeMatchExpressionTest, SubTypeParsesCorrectly) {
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    auto query = BSON("a" << BSON("$_internalSchemaBinDataSubType" << BinDataType::bdtCustom));
+    auto statusWith = MatchExpressionParser::parse(query, expCtx);
+    ASSERT_OK(statusWith.getStatus());
+
+    uint8_t bytes[] = {0, 1, 2, 3, 4, 5};
+    BSONObj match = BSON("a" << BSONBinData(bytes, 5, BinDataType::bdtCustom));
+    BSONObj notMatch = BSON("a" << BSONBinData(bytes, 5, BinDataType::Function));
+
+    ASSERT_TRUE(statusWith.getValue()->matchesBSON(match));
+    ASSERT_FALSE(statusWith.getValue()->matchesBSON(notMatch));
+}
+
+TEST(InternalBinDataSubTypeMatchExpressionTest, SubTypeWithFloatParsesCorrectly) {
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    auto query = BSON("a" << BSON("$_internalSchemaBinDataSubType" << 5.0));
+    auto statusWith = MatchExpressionParser::parse(query, expCtx);
+    ASSERT_OK(statusWith.getStatus());
+
+    uint8_t bytes[] = {0, 1, 2, 3, 4, 5};
+    BSONObj match = BSON("a" << BSONBinData(bytes, 5, BinDataType::MD5Type));
+    BSONObj notMatch = BSON("a" << BSONBinData(bytes, 5, BinDataType::bdtCustom));
+
+    ASSERT_TRUE(statusWith.getValue()->matchesBSON(match));
+    ASSERT_FALSE(statusWith.getValue()->matchesBSON(notMatch));
+}
+
+TEST(InternalBinDataSubTypeMatchExpressionTest, InvalidSubTypeDoesNotParse) {
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    auto query1 = BSON("a" << BSON("$_internalSchemaBinDataSubType"
+                                   << "foo"));
+    auto query2 = BSON("a" << BSON("$_internalSchemaBinDataSubType"
+                                   << "5"));
+    auto statusWith1 = MatchExpressionParser::parse(query1, expCtx);
+    auto statusWith2 = MatchExpressionParser::parse(query2, expCtx);
+    ASSERT_NOT_OK(statusWith1.getStatus());
+    ASSERT_NOT_OK(statusWith2.getStatus());
+}
+
+TEST(InternalBinDataSubTypeMatchExpressionTest, InvalidNumericalSubTypeDoesNotParse) {
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    auto query1 = BSON("a" << BSON("$_internalSchemaBinDataSubType" << 99));
+    auto query2 = BSON("a" << BSON("$_ internalSchemaBinDataSubType" << 2.1));
+    auto statusWith1 = MatchExpressionParser::parse(query1, expCtx);
+    auto statusWith2 = MatchExpressionParser::parse(query2, expCtx);
+    ASSERT_NOT_OK(statusWith1.getStatus());
+    ASSERT_NOT_OK(statusWith2.getStatus());
 }
 }  // namespace mongo

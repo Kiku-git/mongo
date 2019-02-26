@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -56,7 +55,7 @@ using CollectionAndChangedChunks = CatalogCacheLoader::CollectionAndChangedChunk
 
 namespace {
 
-AtomicUInt64 taskIdGenerator{0};
+AtomicWord<unsigned long long> taskIdGenerator{0};
 
 /**
  * Constructs the options for the loader thread pool.

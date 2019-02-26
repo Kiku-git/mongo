@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -116,7 +115,7 @@ void KillOpCmdBase::killLocalOperation(OperationContext* opCtx, unsigned int opT
     std::tie(lk, opCtxToKill) = std::move(*lockAndOpCtx);
 
     invariant(lk);
-    opCtx->getServiceContext()->killOperation(opCtxToKill);
+    opCtx->getServiceContext()->killOperation(lk, opCtxToKill);
 }
 
 unsigned int KillOpCmdBase::parseOpId(const BSONObj& cmdObj) {

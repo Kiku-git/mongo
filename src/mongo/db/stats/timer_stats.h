@@ -1,6 +1,3 @@
-// timer_stats.h
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -58,8 +55,8 @@ public:
     }
 
 private:
-    AtomicInt64 _num;
-    AtomicInt64 _totalMillis;
+    AtomicWord<long long> _num;
+    AtomicWord<long long> _totalMillis;
 };
 
 /**

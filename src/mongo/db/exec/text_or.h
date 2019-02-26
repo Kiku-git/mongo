@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -32,10 +31,8 @@
 
 #include <memory>
 
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/exec/plan_stage.h"
+#include "mongo/db/exec/requires_collection_stage.h"
 #include "mongo/db/fts/fts_spec.h"
-#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/record_id.h"
 
@@ -51,7 +48,7 @@ class OperationContext;
  *
  * The WorkingSetMembers returned are fetched and in the LOC_AND_OBJ state.
  */
-class TextOrStage final : public PlanStage {
+class TextOrStage final : public RequiresCollectionStage {
 public:
     /**
      * Internal states.
@@ -74,8 +71,7 @@ public:
                 const FTSSpec& ftsSpec,
                 WorkingSet* ws,
                 const MatchExpression* filter,
-                IndexDescriptor* index);
-    ~TextOrStage();
+                const Collection* collection);
 
     void addChild(std::unique_ptr<PlanStage> child);
 
@@ -85,8 +81,6 @@ public:
 
     StageState doWork(WorkingSetID* out) final;
 
-    void doSaveState() final;
-    void doRestoreState() final;
     void doDetachFromOperationContext() final;
     void doReattachToOperationContext() final;
 
@@ -99,6 +93,11 @@ public:
     const SpecificStats* getSpecificStats() const final;
 
     static const char* kStageType;
+
+protected:
+    void doSaveStateRequiresCollection() final;
+
+    void doRestoreStateRequiresCollection() final;
 
 private:
     /**
@@ -157,6 +156,5 @@ private:
     const MatchExpression* _filter;
     WorkingSetID _idRetrying;
     std::unique_ptr<SeekableRecordCursor> _recordCursor;
-    IndexDescriptor* _index;
 };
 }  // namespace mongo

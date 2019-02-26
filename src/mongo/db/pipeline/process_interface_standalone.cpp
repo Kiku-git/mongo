@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -38,19 +37,27 @@
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/document_validation.h"
+#include "mongo/db/catalog/index_catalog_entry.h"
 #include "mongo/db/catalog/uuid_catalog.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/cursor_manager.h"
 #include "mongo/db/db_raii.h"
+#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/pipeline/document_source_cursor.h"
+#include "mongo/db/pipeline/lite_parsed_pipeline.h"
 #include "mongo/db/pipeline/pipeline_d.h"
+#include "mongo/db/repl/speculative_majority_read_info.h"
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/db/session_catalog.h"
+#include "mongo/db/session_catalog_mongod.h"
 #include "mongo/db/stats/fill_locker_info.h"
 #include "mongo/db/stats/storage_stats.h"
 #include "mongo/db/storage/backup_cursor_hooks.h"
 #include "mongo/db/transaction_participant.h"
+#include "mongo/s/cluster_commands_helpers.h"
+#include "mongo/s/query/document_source_merge_cursors.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
@@ -64,6 +71,42 @@ using write_ops::Update;
 using write_ops::UpdateOpEntry;
 
 namespace {
+
+class MongoDResourceYielder : public ResourceYielder {
+public:
+    void yield(OperationContext* opCtx) override {
+        // We're about to block. Check back in the session so that it's available to other
+        // threads. Note that we may block on a request to _ourselves_, meaning that we may have to
+        // wait for another thread which will use the same session. This step is necessary
+        // to prevent deadlocks.
+
+        Session* const session = OperationContextSession::get(opCtx);
+        if (session) {
+            MongoDOperationContextSession::checkIn(opCtx);
+        }
+        _yielded = (session != nullptr);
+    }
+
+    void unyield(OperationContext* opCtx) override {
+        if (_yielded) {
+            // This may block on a sub-operation on this node finishing. It's possible that while
+            // blocked on the network layer, another shard could have responded, theoretically
+            // unblocking this thread of execution. However, we must wait until the child operation
+            // on this shard finishes so we can get the session back. This may limit the throughput
+            // of the operation, but it's correct.
+            MongoDOperationContextSession::checkOut(opCtx,
+                                                    // Assumes this is only called from the
+                                                    // 'aggregate' or 'getMore' commands.  The code
+                                                    // which relies on this parameter does not
+                                                    // distinguish/care about the difference so we
+                                                    // simply always pass 'aggregate'.
+                                                    "aggregate");
+        }
+    }
+
+private:
+    bool _yielded = false;
+};
 
 // Returns true if the field names of 'keyPattern' are exactly those in 'uniqueKeyPaths', and each
 // of the elements of 'keyPattern' is numeric, i.e. not "text", "$**", or any other special type of
@@ -104,7 +147,8 @@ DBClientBase* MongoInterfaceStandalone::directClient() {
 }
 
 bool MongoInterfaceStandalone::isSharded(OperationContext* opCtx, const NamespaceString& nss) {
-    AutoGetCollectionForRead autoColl(opCtx, nss);
+    Lock::DBLock dbLock(opCtx, nss.db(), MODE_IS);
+    Lock::CollectionLock collLock(opCtx->lockState(), nss.ns(), MODE_IS);
     const auto metadata = CollectionShardingState::get(opCtx, nss)->getCurrentMetadata();
     return metadata->isSharded();
 }
@@ -238,7 +282,14 @@ Status MongoInterfaceStandalone::appendRecordCount(OperationContext* opCtx,
 
 BSONObj MongoInterfaceStandalone::getCollectionOptions(const NamespaceString& nss) {
     const auto infos = _client.getCollectionInfos(nss.db().toString(), BSON("name" << nss.coll()));
-    return infos.empty() ? BSONObj() : infos.front().getObjectField("options").getOwned();
+    if (infos.empty()) {
+        return BSONObj();
+    }
+    const auto& infoObj = infos.front();
+    uassert(ErrorCodes::CommandNotSupportedOnView,
+            str::stream() << nss.toString() << " is a view, not a collection",
+            infoObj["type"].valueStringData() != "view"_sd);
+    return infoObj.getObjectField("options").getOwned();
 }
 
 void MongoInterfaceStandalone::renameIfOptionsAndIndexesHaveNotChanged(
@@ -274,63 +325,48 @@ void MongoInterfaceStandalone::renameIfOptionsAndIndexesHaveNotChanged(
             _client.runCommand("admin", renameCommandObj, info));
 }
 
-StatusWith<std::unique_ptr<Pipeline, PipelineDeleter>> MongoInterfaceStandalone::makePipeline(
+std::unique_ptr<Pipeline, PipelineDeleter> MongoInterfaceStandalone::makePipeline(
     const std::vector<BSONObj>& rawPipeline,
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const MakePipelineOptions opts) {
-    auto pipeline = Pipeline::parse(rawPipeline, expCtx);
-    if (!pipeline.isOK()) {
-        return pipeline.getStatus();
-    }
+    auto pipeline = uassertStatusOK(Pipeline::parse(rawPipeline, expCtx));
 
     if (opts.optimize) {
-        pipeline.getValue()->optimizePipeline();
+        pipeline->optimizePipeline();
     }
-
-    Status cursorStatus = Status::OK();
 
     if (opts.attachCursorSource) {
-        cursorStatus = attachCursorSourceToPipeline(expCtx, pipeline.getValue().get());
+        pipeline = attachCursorSourceToPipeline(expCtx, pipeline.release());
     }
 
-    return cursorStatus.isOK() ? std::move(pipeline) : cursorStatus;
+    return pipeline;
 }
 
-Status MongoInterfaceStandalone::attachCursorSourceToPipeline(
-    const boost::intrusive_ptr<ExpressionContext>& expCtx, Pipeline* pipeline) {
+unique_ptr<Pipeline, PipelineDeleter> MongoInterfaceStandalone::attachCursorSourceToPipeline(
+    const boost::intrusive_ptr<ExpressionContext>& expCtx, Pipeline* ownedPipeline) {
+    std::unique_ptr<Pipeline, PipelineDeleter> pipeline(ownedPipeline,
+                                                        PipelineDeleter(expCtx->opCtx));
+
     invariant(pipeline->getSources().empty() ||
               !dynamic_cast<DocumentSourceCursor*>(pipeline->getSources().front().get()));
 
     boost::optional<AutoGetCollectionForReadCommand> autoColl;
-    if (expCtx->uuid) {
-        try {
-            autoColl.emplace(expCtx->opCtx,
-                             NamespaceStringOrUUID{expCtx->ns.db().toString(), *expCtx->uuid});
-        } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>& ex) {
-            // The UUID doesn't exist anymore
-            return ex.toStatus();
-        }
-    } else {
-        autoColl.emplace(expCtx->opCtx, expCtx->ns);
-    }
+    const NamespaceStringOrUUID nsOrUUID = expCtx->uuid
+        ? NamespaceStringOrUUID{expCtx->ns.db().toString(), *expCtx->uuid}
+        : expCtx->ns;
+    autoColl.emplace(expCtx->opCtx,
+                     nsOrUUID,
+                     AutoGetCollection::ViewMode::kViewsForbidden,
+                     Date_t::max(),
+                     AutoStatsTracker::LogMode::kUpdateTop);
 
-    // makePipeline() is only called to perform secondary aggregation requests and expects the
-    // collection representing the document source to be not-sharded. We confirm sharding state
-    // here to avoid taking a collection lock elsewhere for this purpose alone.
-    // TODO SERVER-27616: This check is incorrect in that we don't acquire a collection cursor
-    // until after we release the lock, leaving room for a collection to be sharded in-between.
-    auto css = CollectionShardingState::get(expCtx->opCtx, expCtx->ns);
-    uassert(4567,
-            str::stream() << "from collection (" << expCtx->ns.ns() << ") cannot be sharded",
-            !css->getMetadataForOperation(expCtx->opCtx)->isSharded());
-
-    PipelineD::prepareCursorSource(autoColl->getCollection(), expCtx->ns, nullptr, pipeline);
+    PipelineD::prepareCursorSource(autoColl->getCollection(), expCtx->ns, nullptr, pipeline.get());
 
     // Optimize again, since there may be additional optimizations that can be done after adding
     // the initial cursor stage.
     pipeline->optimizePipeline();
 
-    return Status::OK();
+    return pipeline;
 }
 
 std::string MongoInterfaceStandalone::getShardName(OperationContext* opCtx) const {
@@ -355,7 +391,7 @@ std::vector<FieldPath> MongoInterfaceStandalone::collectDocumentKeyFieldsActingA
 
 std::vector<GenericCursor> MongoInterfaceStandalone::getIdleCursors(
     const intrusive_ptr<ExpressionContext>& expCtx, CurrentOpUserMode userMode) const {
-    return CursorManager::getIdleCursors(expCtx->opCtx, userMode);
+    return CursorManager::get(expCtx->opCtx)->getIdleCursors(expCtx->opCtx, userMode);
 }
 
 boost::optional<Document> MongoInterfaceStandalone::lookupSingleDocument(
@@ -363,9 +399,13 @@ boost::optional<Document> MongoInterfaceStandalone::lookupSingleDocument(
     const NamespaceString& nss,
     UUID collectionUUID,
     const Document& documentKey,
-    boost::optional<BSONObj> readConcern) {
+    boost::optional<BSONObj> readConcern,
+    bool allowSpeculativeMajorityRead) {
     invariant(!readConcern);  // We don't currently support a read concern on mongod - it's only
                               // expected to be necessary on mongos.
+    invariant(!allowSpeculativeMajorityRead);  // We don't expect 'allowSpeculativeMajorityRead' on
+                                               // mongod - it's only expected to be necessary on
+                                               // mongos.
 
     std::unique_ptr<Pipeline, PipelineDeleter> pipeline;
     try {
@@ -374,7 +414,7 @@ boost::optional<Document> MongoInterfaceStandalone::lookupSingleDocument(
             nss,
             collectionUUID,
             _getCollectionDefaultCollator(expCtx->opCtx, nss.db(), collectionUUID));
-        pipeline = uassertStatusOK(makePipeline({BSON("$match" << documentKey)}, foreignExpCtx));
+        pipeline = makePipeline({BSON("$match" << documentKey)}, foreignExpCtx);
     } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
         return boost::none;
     }
@@ -390,6 +430,18 @@ boost::optional<Document> MongoInterfaceStandalone::lookupSingleDocument(
                                 << next->toString()
                                 << "]");
     }
+
+    // Set the speculative read optime appropriately after we do a document lookup locally. We don't
+    // know exactly what optime the document reflects, we so set the speculative read optime to the
+    // most recent applied optime.
+    repl::SpeculativeMajorityReadInfo& speculativeMajorityReadInfo =
+        repl::SpeculativeMajorityReadInfo::get(expCtx->opCtx);
+    if (speculativeMajorityReadInfo.isSpeculativeRead()) {
+        auto replCoord = repl::ReplicationCoordinator::get(expCtx->opCtx);
+        speculativeMajorityReadInfo.setSpeculativeReadOpTimeForward(
+            replCoord->getMyLastAppliedOpTime());
+    }
+
     return lookedUpDocument;
 }
 
@@ -402,12 +454,23 @@ BackupCursorState MongoInterfaceStandalone::openBackupCursor(OperationContext* o
     }
 }
 
-void MongoInterfaceStandalone::closeBackupCursor(OperationContext* opCtx, UUID backupId) {
+void MongoInterfaceStandalone::closeBackupCursor(OperationContext* opCtx, const UUID& backupId) {
     auto backupCursorHooks = BackupCursorHooks::get(opCtx->getServiceContext());
     if (backupCursorHooks->enabled()) {
         backupCursorHooks->closeBackupCursor(opCtx, backupId);
     } else {
         uasserted(50955, "Backup cursors are an enterprise only feature.");
+    }
+}
+
+BackupCursorExtendState MongoInterfaceStandalone::extendBackupCursor(OperationContext* opCtx,
+                                                                     const UUID& backupId,
+                                                                     const Timestamp& extendTo) {
+    auto backupCursorHooks = BackupCursorHooks::get(opCtx->getServiceContext());
+    if (backupCursorHooks->enabled()) {
+        return backupCursorHooks->extendBackupCursor(opCtx, backupId, extendTo);
+    } else {
+        uasserted(51010, "Backup cursors are an enterprise only feature.");
     }
 }
 
@@ -446,17 +509,16 @@ bool MongoInterfaceStandalone::uniqueKeyIsSupportedByIndex(
     // the catalog.
     Lock::DBLock dbLock(opCtx, nss.db(), MODE_IS);
     Lock::CollectionLock collLock(opCtx->lockState(), nss.ns(), MODE_IS);
-    const auto* collection = [&]() -> Collection* {
-        auto db = DatabaseHolder::getDatabaseHolder().get(opCtx, nss.db());
-        return db ? db->getCollection(opCtx, nss) : nullptr;
-    }();
+    auto databaseHolder = DatabaseHolder::get(opCtx);
+    auto db = databaseHolder->getDb(opCtx, nss.db());
+    auto collection = db ? db->getCollection(opCtx, nss) : nullptr;
     if (!collection) {
         return uniqueKeyPaths == std::set<FieldPath>{"_id"};
     }
 
     auto indexIterator = collection->getIndexCatalog()->getIndexIterator(opCtx, false);
     while (indexIterator->more()) {
-        IndexCatalogEntry* entry = indexIterator->next();
+        const IndexCatalogEntry* entry = indexIterator->next();
         if (supportsUniqueKey(expCtx, entry, uniqueKeyPaths)) {
             return true;
         }
@@ -475,7 +537,7 @@ BSONObj MongoInterfaceStandalone::_reportCurrentOpForClient(
 
     if (clientOpCtx) {
         if (auto txnParticipant = TransactionParticipant::get(clientOpCtx)) {
-            txnParticipant->reportUnstashedState(clientOpCtx, &builder);
+            txnParticipant.reportUnstashedState(clientOpCtx, &builder);
         }
 
         // Append lock stats before returning.
@@ -506,9 +568,8 @@ void MongoInterfaceStandalone::_reportCurrentOpsForIdleSessions(OperationContext
 
     sessionCatalog->scanSessions(
         {std::move(sessionFilter)},
-        [&](WithLock sessionCatalogLock, Session* session) {
-            auto op =
-                TransactionParticipant::getFromNonCheckedOutSession(session)->reportStashedState();
+        [&](const ObservableSession& session) {
+            auto op = TransactionParticipant::get(session).reportStashedState(opCtx);
             if (!op.isEmpty()) {
                 ops->emplace_back(op);
             }
@@ -537,6 +598,10 @@ std::unique_ptr<CollatorInterface> MongoInterfaceStandalone::_getCollectionDefau
 
     auto& collator = it->second;
     return collator ? collator->clone() : nullptr;
+}
+
+std::unique_ptr<ResourceYielder> MongoInterfaceStandalone::getResourceYielder() const {
+    return std::make_unique<MongoDResourceYielder>();
 }
 
 }  // namespace mongo

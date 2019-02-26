@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -71,17 +70,15 @@ public:
     bool isEOF() final;
     Status executePlan() final;
     void markAsKilled(Status killStatus) final;
-    void dispose(OperationContext* opCtx, CursorManager* cursorManager) final;
+    void dispose(OperationContext* opCtx) final;
     void enqueue(const BSONObj& obj) final;
     BSONObjSet getOutputSorts() const final;
-    void unsetRegistered() final;
-    RegistrationToken getRegistrationToken() const&;
-    void setRegistrationToken(RegistrationToken token) & final;
     bool isMarkedAsKilled() const final;
     Status getKillStatus() final;
     bool isDisposed() const final;
     bool isDetached() const final;
-    Timestamp getLatestOplogTimestamp() final;
+    Timestamp getLatestOplogTimestamp() const final;
+    BSONObj getPostBatchResumeToken() const final;
     Status getMemberObjectStatus(const BSONObj& memberObj) const final;
 
 private:
@@ -135,9 +132,9 @@ private:
 
     /**
      * Yields locks and waits for inserts to the collection. Returns ADVANCED if there has been an
-     * insertion and there may be new results. Returns DEAD if the PlanExecutor was killed during a
-     * yield. This method is only to be used for tailable and awaitData cursors, so rather than
-     * returning DEAD if the operation has exceeded its time limit, we return IS_EOF to preserve
+     * insertion and there may be new results. Returns FAILURE if the PlanExecutor was killed during
+     * a yield. This method is only to be used for tailable and awaitData cursors, so rather than
+     * returning FAILURE if the operation has exceeded its time limit, we return IS_EOF to preserve
      * this PlanExecutor for future use.
      *
      * If an error is encountered and 'errorObj' is provided, it is populated with an object
@@ -178,10 +175,6 @@ private:
     std::queue<BSONObj> _stash;
 
     enum { kUsable, kSaved, kDetached, kDisposed } _currentState = kUsable;
-
-    // Set if this PlanExecutor is registered with the CursorManager.
-    boost::optional<Partitioned<stdx::unordered_set<PlanExecutor*>>::PartitionId>
-        _registrationToken;
 
     bool _everDetachedFromOperationContext = false;
 };

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -42,54 +41,45 @@
 #include "mongo/base/init.h"
 #include "mongo/base/parse_number.h"
 #include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/server_parameters.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/processinfo.h"
+#include "mongo/util/tcmalloc_parameters_gen.h"
 
 namespace mongo {
 namespace {
+constexpr auto kMaxTotalThreadCacheBytesPropertyName = "tcmalloc.max_total_thread_cache_bytes"_sd;
+constexpr auto kAggressiveMemoryDecommitPropertyName = "tcmalloc.aggressive_memory_decommit"_sd;
 
-class TcmallocNumericPropertyServerParameter : public ServerParameter {
-    MONGO_DISALLOW_COPYING(TcmallocNumericPropertyServerParameter);
-
-public:
-    explicit TcmallocNumericPropertyServerParameter(const std::string& serverParameterName,
-                                                    const std::string& tcmallocPropertyName);
-
-    virtual void append(OperationContext* opCtx, BSONObjBuilder& b, const std::string& name);
-    virtual Status set(const BSONElement& newValueElement);
-    virtual Status setFromString(const std::string& str);
-
-private:
-    const std::string _tcmallocPropertyName;
-};
-
-TcmallocNumericPropertyServerParameter::TcmallocNumericPropertyServerParameter(
-    const std::string& serverParameterName, const std::string& tcmallocPropertyName)
-    : ServerParameter(ServerParameterSet::getGlobal(),
-                      serverParameterName,
-                      true /* change at startup */,
-                      true /* change at runtime */),
-      _tcmallocPropertyName(tcmallocPropertyName) {}
-
-void TcmallocNumericPropertyServerParameter::append(OperationContext* opCtx,
-                                                    BSONObjBuilder& b,
-                                                    const std::string& name) {
+StatusWith<size_t> getProperty(StringData propname) {
     size_t value;
-    if (MallocExtension::instance()->GetNumericProperty(_tcmallocPropertyName.c_str(), &value)) {
-        b.appendNumber(name, value);
+    if (!MallocExtension::instance()->GetNumericProperty(propname.toString().c_str(), &value)) {
+        return {ErrorCodes::InternalError,
+                str::stream() << "Failed to retreive tcmalloc prop: " << propname};
     }
+    return value;
 }
 
-Status TcmallocNumericPropertyServerParameter::set(const BSONElement& newValueElement) {
+Status setProperty(StringData propname, size_t value) {
+    if (!RUNNING_ON_VALGRIND) {
+        if (!MallocExtension::instance()->SetNumericProperty(propname.toString().c_str(), value)) {
+            return {ErrorCodes::InternalError,
+                    str::stream() << "Failed to set internal tcmalloc property " << propname};
+        }
+    }
+    return Status::OK();
+}
+
+StatusWith<size_t> validateTCMallocValue(StringData name, const BSONElement& newValueElement) {
     if (!newValueElement.isNumber()) {
-        return Status(ErrorCodes::TypeMismatch,
-                      str::stream() << "Expected server parameter " << newValueElement.fieldName()
-                                    << " to have numeric type, but found "
-                                    << newValueElement.toString(false)
-                                    << " of type "
-                                    << typeName(newValueElement.type()));
+        return {ErrorCodes::TypeMismatch,
+                str::stream() << "Expected server parameter " << name
+                              << " to have numeric type, but found "
+                              << newValueElement.toString(false)
+                              << " of type "
+                              << typeName(newValueElement.type())};
     }
     long long valueAsLongLong = newValueElement.safeNumberLong();
     if (valueAsLongLong < 0 ||
@@ -97,38 +87,45 @@ Status TcmallocNumericPropertyServerParameter::set(const BSONElement& newValueEl
         return Status(
             ErrorCodes::BadValue,
             str::stream() << "Value " << newValueElement.toString(false) << " is out of range for "
-                          << newValueElement.fieldName()
+                          << name
                           << "; expected a value between 0 and "
                           << std::min<unsigned long long>(std::numeric_limits<size_t>::max(),
                                                           std::numeric_limits<long long>::max()));
     }
-    if (!RUNNING_ON_VALGRIND) {
-        if (!MallocExtension::instance()->SetNumericProperty(
-                _tcmallocPropertyName.c_str(), static_cast<size_t>(valueAsLongLong))) {
-            return Status(ErrorCodes::InternalError,
-                          str::stream() << "Failed to set internal tcmalloc property "
-                                        << _tcmallocPropertyName);
-        }
-    }
-    return Status::OK();
+    return static_cast<size_t>(valueAsLongLong);
 }
 
-Status TcmallocNumericPropertyServerParameter::setFromString(const std::string& str) {
-    long long valueAsLongLong;
-    Status status = parseNumberFromString(str, &valueAsLongLong);
-    if (!status.isOK()) {
-        return status;
+}  // namespace
+
+#define TCMALLOC_SP_METHODS(cls)                                                     \
+    void TCMalloc##cls##ServerParameter::append(                                     \
+        OperationContext*, BSONObjBuilder& b, const std::string& name) {             \
+        auto swValue = getProperty(k##cls##PropertyName);                            \
+        if (swValue.isOK()) {                                                        \
+            b.appendNumber(name, swValue.getValue());                                \
+        }                                                                            \
+    }                                                                                \
+    Status TCMalloc##cls##ServerParameter::set(const BSONElement& newValueElement) { \
+        auto swValue = validateTCMallocValue(name(), newValueElement);               \
+        if (!swValue.isOK()) {                                                       \
+            return swValue.getStatus();                                              \
+        }                                                                            \
+        return setProperty(k##cls##PropertyName, swValue.getValue());                \
+    }                                                                                \
+    Status TCMalloc##cls##ServerParameter::setFromString(const std::string& str) {   \
+        size_t value;                                                                \
+        Status status = parseNumberFromString(str, &value);                          \
+        if (!status.isOK()) {                                                        \
+            return status;                                                           \
+        }                                                                            \
+        return setProperty(k##cls##PropertyName, value);                             \
     }
-    BSONObjBuilder builder;
-    builder.append(name(), valueAsLongLong);
-    return set(builder.done().firstElement());
-}
 
-TcmallocNumericPropertyServerParameter tcmallocMaxTotalThreadCacheBytesParameter(
-    "tcmallocMaxTotalThreadCacheBytes", "tcmalloc.max_total_thread_cache_bytes");
+TCMALLOC_SP_METHODS(MaxTotalThreadCacheBytes)
+TCMALLOC_SP_METHODS(AggressiveMemoryDecommit)
+#undef TCMALLOC_SP_METHODS
 
-TcmallocNumericPropertyServerParameter tcmallocAggressiveMemoryDecommit(
-    "tcmallocAggressiveMemoryDecommit", "tcmalloc.aggressive_memory_decommit");
+namespace {
 
 MONGO_INITIALIZER_GENERAL(TcmallocConfigurationDefaults,
                           MONGO_NO_PREREQUISITES,
@@ -147,7 +144,7 @@ MONGO_INITIALIZER_GENERAL(TcmallocConfigurationDefaults,
         (systemMemorySizeMB / 8) * 1024 * 1024;  // 1/8 of system memory in bytes
     size_t cacheSize = std::min(defaultTcMallocCacheSize, derivedTcMallocCacheSize);
 
-    return tcmallocMaxTotalThreadCacheBytesParameter.setFromString(std::to_string(cacheSize));
+    return setProperty(kMaxTotalThreadCacheBytesPropertyName, cacheSize);
 }
 
 }  // namespace

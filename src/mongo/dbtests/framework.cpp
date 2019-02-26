@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -38,10 +37,12 @@
 
 #include "mongo/base/checked_cast.h"
 #include "mongo/base/status.h"
+#include "mongo/db/catalog/database_holder_impl.h"
 #include "mongo/db/catalog/uuid_catalog.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/lock_state.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/index_builds_coordinator_mongod.h"
 #include "mongo/db/op_observer_registry.h"
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/db/service_context.h"
@@ -54,6 +55,7 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/log.h"
+#include "mongo/util/periodic_runner_factory.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/version.h"
 
@@ -70,6 +72,11 @@ int runDbTests(int argc, char** argv) {
         // thread we use for proxying MozJS requests. Dropping the cache cleans up
         // the memory and makes leak sanitizer happy.
         ScriptEngine::dropScopeCache();
+
+        // Shut down the background periodic task runner, before the storage engine.
+        if (auto runner = getGlobalServiceContext()->getPeriodicRunner()) {
+            runner->shutdown();
+        }
 
         // We may be shut down before we have a global storage
         // engine.
@@ -91,7 +98,16 @@ int runDbTests(int argc, char** argv) {
 
     srand((unsigned)frameworkGlobalParams.seed);
 
+    // Set up the periodic runner for background job execution, which is required by the storage
+    // engine to be running beforehand.
+    auto runner = makePeriodicRunner(globalServiceContext);
+    runner->startup();
+    globalServiceContext->setPeriodicRunner(std::move(runner));
+
     initializeStorageEngine(globalServiceContext, StorageEngineInitFlags::kNone);
+    DatabaseHolder::set(globalServiceContext, std::make_unique<DatabaseHolderImpl>());
+    IndexBuildsCoordinator::set(globalServiceContext,
+                                std::make_unique<IndexBuildsCoordinatorMongod>());
     auto registry = stdx::make_unique<OpObserverRegistry>();
     registry->addObserver(stdx::make_unique<UUIDCatalogObserver>());
     globalServiceContext->setOpObserver(std::move(registry));

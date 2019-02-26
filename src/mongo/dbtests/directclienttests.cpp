@@ -1,7 +1,3 @@
-/** @file directclienttests.cpp
-*/
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -36,7 +32,6 @@
 #include <iostream>
 
 #include "mongo/db/client.h"
-#include "mongo/db/db.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/json.h"
 #include "mongo/db/lasterror.h"

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -68,7 +67,7 @@ protected:
                        double maxDistance,
                        const BSONObj& search,
                        BSONObjBuilder* result,
-                       unsigned limit);
+                       unsigned limit) const;
 
 private:
     /**

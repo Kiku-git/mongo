@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -51,8 +50,8 @@ MONGO_FAIL_POINT_DECLARE(stopReplProducer);
 /**
  * The oplog fetcher, once started, reads operations from a remote oplog using a tailable cursor.
  *
- * The initial find command is generated from last fetched optime and hash and may contain the
- * current term depending on the replica set config provided.
+ * The initial find command is generated from last fetched optime and may contain the current term
+ * depending on the replica set config provided.
  *
  * Forwards metadata in each find/getMore response to the data replicator external state.
  *
@@ -86,8 +85,15 @@ public:
         size_t networkDocumentBytes = 0;
         size_t toApplyDocumentCount = 0;
         size_t toApplyDocumentBytes = 0;
-        OpTimeWithHash lastDocument = {0, OpTime()};
+        OpTime lastDocument = OpTime();
     };
+
+    /**
+     * An enum that indicates if we want to skip the first document during oplog fetching or not.
+     * Currently, the only time we don't want to skip the first document is during initial sync
+     * if there was an oldest active transaction timestamp.
+     */
+    enum class StartingPoint { kSkipFirstDoc, kEnqueueFirstDoc };
 
     /**
      * Type of function that accepts a pair of iterators into a range of operations
@@ -115,7 +121,7 @@ public:
      * Invariants if validation fails on any of the provided arguments.
      */
     OplogFetcher(executor::TaskExecutor* executor,
-                 OpTimeWithHash lastFetched,
+                 OpTime lastFetched,
                  HostAndPort source,
                  NamespaceString nss,
                  ReplSetConfig config,
@@ -125,7 +131,8 @@ public:
                  DataReplicatorExternalState* dataReplicatorExternalState,
                  EnqueueDocumentsFn enqueueDocumentsFn,
                  OnShutdownCallbackFn onShutdownCallbackFn,
-                 const int batchSize);
+                 const int batchSize,
+                 StartingPoint startingPoint = StartingPoint::kSkipFirstDoc);
 
     virtual ~OplogFetcher();
 
@@ -176,6 +183,9 @@ private:
     const EnqueueDocumentsFn _enqueueDocumentsFn;
     const Milliseconds _awaitDataTimeout;
     const int _batchSize;
+
+    // Indicates if we want to skip the first document during oplog fetching or not.
+    StartingPoint _startingPoint;
 };
 
 }  // namespace repl

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -51,6 +50,11 @@ const BSONField<std::string> TagsType::tag("tag");
 const BSONField<BSONObj> TagsType::min("min");
 const BSONField<BSONObj> TagsType::max("max");
 
+TagsType::TagsType(NamespaceString nss, std::string tag, ChunkRange range)
+    : _ns(std::move(nss)),
+      _tag(std::move(tag)),
+      _minKey(range.getMin().getOwned()),
+      _maxKey(range.getMax().getOwned()) {}
 
 StatusWith<TagsType> TagsType::fromBSON(const BSONObj& source) {
     TagsType tags;

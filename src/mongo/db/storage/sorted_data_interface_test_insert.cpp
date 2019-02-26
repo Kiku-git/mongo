@@ -1,6 +1,3 @@
-// sorted_data_interface_test_insert.cpp
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -43,7 +40,8 @@ namespace {
 // Insert a key and verify that the number of entries in the index equals 1.
 TEST(SortedDataInterface, Insert) {
     const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
-    const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
+    const std::unique_ptr<SortedDataInterface> sorted(
+        harnessHelper->newSortedDataInterface(/*unique=*/false, /*partial=*/false));
 
     {
         const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
@@ -68,7 +66,8 @@ TEST(SortedDataInterface, Insert) {
 // Insert a compound key and verify that the number of entries in the index equals 1.
 TEST(SortedDataInterface, InsertCompoundKey) {
     const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
-    const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
+    const std::unique_ptr<SortedDataInterface> sorted(
+        harnessHelper->newSortedDataInterface(/*unique=*/false, /*partial=*/false));
 
     {
         const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
@@ -95,7 +94,8 @@ TEST(SortedDataInterface, InsertCompoundKey) {
 // when duplicates are not allowed.
 TEST(SortedDataInterface, InsertSameDiskLoc) {
     const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
-    const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
+    const std::unique_ptr<SortedDataInterface> sorted(
+        harnessHelper->newSortedDataInterface(/*unique=*/false, /*partial=*/false));
 
     {
         const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
@@ -137,7 +137,8 @@ TEST(SortedDataInterface, InsertSameDiskLoc) {
 // when duplicates are allowed.
 TEST(SortedDataInterface, InsertSameDiskLocWithDupsAllowed) {
     const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
-    const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(true));
+    const std::unique_ptr<SortedDataInterface> sorted(
+        harnessHelper->newSortedDataInterface(/*unique=*/true, /*partial=*/false));
 
     {
         const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
@@ -178,7 +179,8 @@ TEST(SortedDataInterface, InsertSameDiskLocWithDupsAllowed) {
 // in the index when duplicates are not allowed.
 TEST(SortedDataInterface, InsertSameKey) {
     const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
-    const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(true));
+    const std::unique_ptr<SortedDataInterface> sorted(
+        harnessHelper->newSortedDataInterface(/*unique=*/true, /*partial=*/false));
 
     {
         const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
@@ -225,7 +227,7 @@ void _testInsertSameKeyWithDupsAllowed(const RecordId locs[3]) {
     for (int keeper = 0; keeper < 3; keeper++) {
         const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
         const std::unique_ptr<SortedDataInterface> sorted(
-            harnessHelper->newSortedDataInterface(true));
+            harnessHelper->newSortedDataInterface(/*unique=*/true, /*partial=*/false));
 
         {
             const ServiceContext::UniqueOperationContext opCtx(
@@ -287,7 +289,8 @@ TEST(SortedDataInterface, InsertSameKeyWithDupsAllowedLocsDescending) {
 // in the index equals the number that were inserted.
 TEST(SortedDataInterface, InsertMultiple) {
     const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
-    const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(true));
+    const std::unique_ptr<SortedDataInterface> sorted(
+        harnessHelper->newSortedDataInterface(/*unique=*/true, /*partial=*/false));
 
     {
         const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
@@ -328,7 +331,8 @@ TEST(SortedDataInterface, InsertMultiple) {
 // in the index equals the number that were inserted.
 TEST(SortedDataInterface, InsertMultipleCompoundKeys) {
     const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
-    const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(true));
+    const std::unique_ptr<SortedDataInterface> sorted(
+        harnessHelper->newSortedDataInterface(/*unique=*/true, /*partial=*/false));
 
     {
         const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
@@ -365,6 +369,20 @@ TEST(SortedDataInterface, InsertMultipleCompoundKeys) {
         const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(5, sorted->numEntries(opCtx.get()));
     }
+}
+
+TEST(SortedDataInterface, InsertReservedRecordId) {
+    const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
+    const std::unique_ptr<SortedDataInterface> sorted(
+        harnessHelper->newSortedDataInterface(/*unique=*/false, /*partial=*/false));
+    const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+    ASSERT(sorted->isEmpty(opCtx.get()));
+    WriteUnitOfWork uow(opCtx.get());
+    RecordId reservedLoc(RecordId::ReservedId::kWildcardMultikeyMetadataId);
+    ASSERT(reservedLoc.isReserved());
+    ASSERT_OK(sorted->insert(opCtx.get(), key1, reservedLoc, /*dupsAllowed*/ true));
+    uow.commit();
+    ASSERT_EQUALS(1, sorted->numEntries(opCtx.get()));
 }
 
 }  // namespace

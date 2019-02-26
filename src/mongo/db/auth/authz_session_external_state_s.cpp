@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -36,7 +35,6 @@
 
 #include "mongo/base/status.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/s/grid.h"
 
 namespace mongo {
 

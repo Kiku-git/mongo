@@ -1,7 +1,7 @@
 /**
  * Verify writes inside a transaction are not interpreted as retryable writes in a sharded cluster.
  *
- * @tags: [requires_sharding, uses_transactions, uses_single_shard_transaction]
+ * @tags: [requires_sharding, uses_transactions]
  */
 (function() {
     "use strict";
@@ -15,11 +15,17 @@
                   isSharded);
 
         // Fail with retryable error.
+        // Sharding tests require failInternalCommands: true, since the mongos appears to mongod to
+        // be an internal client.
         const retryableError = ErrorCodes.InterruptedDueToStepDown;
         assert.commandWorked(st.rs0.getPrimary().adminCommand({
             configureFailPoint: "failCommand",
             mode: {times: 1},
-            data: {errorCode: retryableError, failCommands: [writeCmdName]}
+            data: {
+                errorCode: retryableError,
+                failCommands: [writeCmdName],
+                failInternalCommands: true
+            }
         }));
 
         session.startTransaction();
@@ -35,7 +41,11 @@
         assert.commandWorked(st.rs0.getPrimary().adminCommand({
             configureFailPoint: "failCommand",
             mode: {times: 1},
-            data: {closeConnection: true, failCommands: [writeCmdName]}
+            data: {
+                closeConnection: true,
+                failCommands: [writeCmdName],
+                failInternalCommands: true
+            }
         }));
 
         session.startTransaction();

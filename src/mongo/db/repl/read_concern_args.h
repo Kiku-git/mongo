@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -125,12 +124,18 @@ public:
     MajorityReadMechanism getMajorityReadMechanism() const;
 
     /**
+     * Returns whether the read concern is speculative 'majority'.
+     */
+    bool isSpeculativeMajority() const;
+
+    /**
      * Appends level and afterOpTime.
      */
     void appendInfo(BSONObjBuilder* builder) const;
 
     /**
-     * Returns true if any of clusterTime,  opTime or level arguments are set.
+     * Returns true if any of clusterTime, opTime or level arguments are set. Does not differentiate
+     * between an unspecified read concern and an empty one (i.e. an empty BSON object).
      */
     bool isEmpty() const;
 
@@ -148,6 +153,11 @@ public:
      * Checks whether _level is explicitly set.
      */
     bool hasLevel() const;
+
+    /**
+     * Checks whether _originalLevel is explicitly set.
+     */
+    bool hasOriginalLevel() const;
 
     /**
      * Returns the opTime. Deprecated: will be replaced with getArgsAfterClusterTime.

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -49,7 +48,6 @@ class Client;
 class Collection;
 
 class IndexDescriptor;
-class IndexAccessMethod;
 struct InsertDeleteOptions;
 
 /**
@@ -87,16 +85,16 @@ public:
      */
     BSONObj getDefaultIdIndexSpec() const override;
 
-    IndexDescriptor* findIdIndex(OperationContext* opCtx) const override;
+    const IndexDescriptor* findIdIndex(OperationContext* opCtx) const override;
 
     /**
      * Find index by name.  The index name uniquely identifies an index.
      *
      * @return null if cannot find
      */
-    IndexDescriptor* findIndexByName(OperationContext* opCtx,
-                                     StringData name,
-                                     bool includeUnfinishedIndexes = false) const override;
+    const IndexDescriptor* findIndexByName(OperationContext* opCtx,
+                                           StringData name,
+                                           bool includeUnfinishedIndexes = false) const override;
 
     /**
      * Find index by matching key pattern and collation spec.  The key pattern and collation spec
@@ -108,7 +106,7 @@ public:
      * @return null if cannot find index, otherwise the index with a matching key pattern and
      * collation.
      */
-    IndexDescriptor* findIndexByKeyPatternAndCollationSpec(
+    const IndexDescriptor* findIndexByKeyPatternAndCollationSpec(
         OperationContext* opCtx,
         const BSONObj& key,
         const BSONObj& collationSpec,
@@ -123,7 +121,7 @@ public:
     void findIndexesByKeyPattern(OperationContext* opCtx,
                                  const BSONObj& key,
                                  bool includeUnfinishedIndexes,
-                                 std::vector<IndexDescriptor*>* matches) const override;
+                                 std::vector<const IndexDescriptor*>* matches) const override;
 
     /**
      * Returns an index suitable for shard key range scans.
@@ -138,13 +136,13 @@ public:
      *
      * If no such index exists, returns NULL.
      */
-    IndexDescriptor* findShardKeyPrefixedIndex(OperationContext* opCtx,
-                                               const BSONObj& shardKey,
-                                               bool requireSingleKey) const override;
+    const IndexDescriptor* findShardKeyPrefixedIndex(OperationContext* opCtx,
+                                                     const BSONObj& shardKey,
+                                                     bool requireSingleKey) const override;
 
     void findIndexByType(OperationContext* opCtx,
                          const std::string& type,
-                         std::vector<IndexDescriptor*>& matches,
+                         std::vector<const IndexDescriptor*>& matches,
                          bool includeUnfinishedIndexes = false) const override;
 
 
@@ -155,18 +153,16 @@ public:
      *
      * Use this method to notify the IndexCatalog that the spec for this index has changed.
      *
-     * It is invalid to dereference 'oldDesc' after calling this method.  This method broadcasts
-     * an invalidateAll() on the cursor manager to notify other users of the IndexCatalog that
-     * this descriptor is now invalid.
+     * It is invalid to dereference 'oldDesc' after calling this method.
      */
     const IndexDescriptor* refreshEntry(OperationContext* opCtx,
                                         const IndexDescriptor* oldDesc) override;
 
-    // never returns NULL
     const IndexCatalogEntry* getEntry(const IndexDescriptor* desc) const override;
 
-    IndexAccessMethod* getIndex(const IndexDescriptor* desc) override;
-    const IndexAccessMethod* getIndex(const IndexDescriptor* desc) const override;
+    std::shared_ptr<const IndexCatalogEntry> getEntryShared(const IndexDescriptor*) const override;
+
+    std::vector<std::shared_ptr<const IndexCatalogEntry>> getAllReadyEntriesShared() const override;
 
     /**
      * Returns a not-ok Status if there are any unfinished index builds. No new indexes should
@@ -191,6 +187,10 @@ public:
     StatusWith<BSONObj> prepareSpecForCreate(OperationContext* opCtx,
                                              const BSONObj& original) const override;
 
+    std::vector<BSONObj> removeExistingIndexes(OperationContext* const opCtx,
+                                               const std::vector<BSONObj>& indexSpecsToBuild,
+                                               bool throwOnErrors) const override;
+
     /**
      * Drops all indexes in the index catalog, optionally dropping the id index depending on the
      * 'includingIdIndex' parameter value. If the 'droppedIndexes' parameter is not null,
@@ -201,7 +201,7 @@ public:
                         stdx::function<void(const IndexDescriptor*)> onDropFn) override;
     void dropAllIndexes(OperationContext* opCtx, bool includingIdIndex) override;
 
-    Status dropIndex(OperationContext* opCtx, IndexDescriptor* desc) override;
+    Status dropIndex(OperationContext* opCtx, const IndexDescriptor* desc) override;
 
     /**
      * will drop all incompleted indexes and return specs
@@ -234,35 +234,44 @@ public:
      */
     MultikeyPaths getMultikeyPaths(OperationContext* opCtx, const IndexDescriptor* idx) override;
 
+    void setMultikeyPaths(OperationContext* const opCtx,
+                          const IndexDescriptor* desc,
+                          const MultikeyPaths& multikeyPaths) override;
+
     // --- these probably become private?
 
     class IndexBuildBlock : public IndexCatalog::IndexBuildBlockInterface {
         MONGO_DISALLOW_COPYING(IndexBuildBlock);
 
     public:
-        IndexBuildBlock(OperationContext* opCtx,
-                        Collection* collection,
-                        IndexCatalogImpl* catalog,
-                        const BSONObj& spec);
+        IndexBuildBlock(IndexCatalogImpl* catalog,
+                        const NamespaceString& nss,
+                        const BSONObj& spec,
+                        IndexBuildMethod method);
 
         ~IndexBuildBlock();
 
         /**
-         * Must be called from within a `WriteUnitOfWork`
+         * Being called in a 'WriteUnitOfWork' has no effect.
          */
-        Status init();
+        void deleteTemporaryTables(OperationContext* opCtx);
 
         /**
          * Must be called from within a `WriteUnitOfWork`
          */
-        void success();
+        Status init(OperationContext* opCtx, Collection* collection);
+
+        /**
+         * Must be called from within a `WriteUnitOfWork`
+         */
+        void success(OperationContext* opCtx, Collection* collection);
 
         /**
          * index build failed, clean up meta data
          *
          * Must be called from within a `WriteUnitOfWork`
          */
-        void fail();
+        void fail(OperationContext* opCtx, const Collection* collection);
 
         IndexCatalogEntry* getEntry() {
             return _entry;
@@ -277,18 +286,17 @@ public:
         }
 
     private:
-        Collection* const _collection;
         IndexCatalogImpl* const _catalog;
         const std::string _ns;
 
         BSONObj _spec;
+        IndexBuildMethod _method;
 
         std::string _indexName;
         std::string _indexNamespace;
 
         IndexCatalogEntry* _entry;
 
-        OperationContext* _opCtx;
         std::unique_ptr<IndexBuildInterceptor> _indexBuildInterceptor;
     };
 
@@ -305,6 +313,15 @@ public:
                         int64_t* keysInsertedOut) override;
 
     /**
+     * See IndexCatalog::updateRecord
+     */
+    Status updateRecord(OperationContext* const opCtx,
+                        const BSONObj& oldDoc,
+                        const BSONObj& newDoc,
+                        const RecordId& recordId,
+                        int64_t* const keysInsertedOut,
+                        int64_t* const keysDeletedOut) override;
+    /**
      * When 'keysDeletedOut' is not null, it will be set to the number of index keys removed by
      * this operation.
      */
@@ -314,12 +331,14 @@ public:
                        bool noWarn,
                        int64_t* keysDeletedOut) override;
 
+    Status compactIndexes(OperationContext* opCtx) override;
+
     inline std::string getAccessMethodName(const BSONObj& keyPattern) override {
         return _getAccessMethodName(keyPattern);
     }
 
     std::unique_ptr<IndexCatalog::IndexBuildBlockInterface> createIndexBuildBlock(
-        OperationContext* opCtx, const BSONObj& spec) override;
+        OperationContext* opCtx, const BSONObj& spec, IndexBuildMethod method) override;
 
     std::string::size_type getLongestIndexNameLength(OperationContext* opCtx) const override;
 

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -34,16 +33,20 @@
 
 #include "mongo/db/index_builder.h"
 
+#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_holder.h"
-#include "mongo/db/catalog/multi_index_block_impl.h"
+#include "mongo/db/catalog/index_timestamp_helper.h"
+#include "mongo/db/catalog/multi_index_block.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/logical_clock.h"
+#include "mongo/db/op_observer.h"
 #include "mongo/db/repl/timestamp_block.h"
+#include "mongo/db/server_options.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
@@ -52,44 +55,12 @@ namespace mongo {
 
 using std::endl;
 
-AtomicUInt32 IndexBuilder::_indexBuildCount;
+AtomicWord<unsigned> IndexBuilder::_indexBuildCount;
 
 namespace {
 
-/**
- * Returns true if writes to the catalog entry for the input namespace require being
- * timestamped. A ghost write is when the operation is not committed with an oplog entry and
- * implies the caller will look at the logical clock to choose a time to use.
- */
-bool requiresGhostCommitTimestamp(OperationContext* opCtx, NamespaceString nss) {
-    if (!nss.isReplicated() || nss.coll().startsWith("tmp.mr.")) {
-        return false;
-    }
-
-    auto replCoord = repl::ReplicationCoordinator::get(opCtx);
-    if (!replCoord->getSettings().usingReplSets()) {
-        return false;
-    }
-
-    // If there is a commit timestamp already assigned, there's no need to explicitly assign a
-    // timestamp. This case covers foreground index builds.
-    if (!opCtx->recoveryUnit()->getCommitTimestamp().isNull()) {
-        return false;
-    }
-
-    // Only oplog entries (including a user's `applyOps` command) construct indexes via
-    // `IndexBuilder`. Nodes in `startup` may not yet have initialized the `LogicalClock`, however
-    // index builds during startup replication recovery must be timestamped. These index builds
-    // are foregrounded and timestamp their catalog writes with a "commit timestamp". Nodes in the
-    // oplog application phase of initial sync (`startup2`) must not timestamp index builds before
-    // the `initialDataTimestamp`.
-    const auto memberState = replCoord->getMemberState();
-    if (memberState.startup() || memberState.startup2()) {
-        return false;
-    }
-
-    return true;
-}
+const StringData kIndexesFieldName = "indexes"_sd;
+const StringData kCommandName = "createIndexes"_sd;
 
 // Synchronization tools when replication spawns a background index in a new thread.
 // The bool is 'true' when a new background index has started in a new thread but the
@@ -106,14 +77,22 @@ void _setBgIndexStarting() {
 }
 }  // namespace
 
-IndexBuilder::IndexBuilder(const BSONObj& index, bool relaxConstraints, Timestamp initIndexTs)
+IndexBuilder::IndexBuilder(const BSONObj& index,
+                           IndexConstraints indexConstraints,
+                           ReplicatedWrites replicatedWrites,
+                           Timestamp initIndexTs)
     : BackgroundJob(true /* self-delete */),
       _index(index.getOwned()),
-      _relaxConstraints(relaxConstraints),
+      _indexConstraints(indexConstraints),
+      _replicatedWrites(replicatedWrites),
       _initIndexTs(initIndexTs),
-      _name(str::stream() << "repl index builder " << _indexBuildCount.addAndFetch(1)) {}
+      _name(str::stream() << "repl-index-builder-" << _indexBuildCount.addAndFetch(1)) {}
 
 IndexBuilder::~IndexBuilder() {}
+
+bool IndexBuilder::canBuildInBackground() {
+    return MultiIndexBlock::areHybridIndexBuildsEnabled();
+}
 
 std::string IndexBuilder::name() const {
     return _name;
@@ -126,6 +105,12 @@ void IndexBuilder::run() {
     auto opCtx = cc().makeOperationContext();
     ShouldNotConflictWithSecondaryBatchApplicationBlock shouldNotConflictBlock(opCtx->lockState());
 
+    // If the calling thread is not replicating writes, neither should this thread.
+    boost::optional<repl::UnreplicatedWritesBlock> unreplicatedWrites;
+    if (_replicatedWrites == ReplicatedWrites::kUnreplicated) {
+        unreplicatedWrites.emplace(opCtx.get());
+    }
+
     AuthorizationSession::get(opCtx->getClient())->grantInternalAuthorization();
 
     {
@@ -135,9 +120,19 @@ void IndexBuilder::run() {
     NamespaceString ns(_index["ns"].String());
 
     Lock::DBLock dlk(opCtx.get(), ns.db(), MODE_X);
-    Database* db = DatabaseHolder::getDatabaseHolder().get(opCtx.get(), ns.db().toString());
+    auto databaseHolder = DatabaseHolder::get(opCtx.get());
+    auto db = databaseHolder->getDb(opCtx.get(), ns.db().toString());
 
-    Status status = _build(opCtx.get(), db, true, &dlk);
+    // This background index build can only be interrupted at shutdown.
+    // For the duration of the OperationContext::runWithoutInterruption() invocation, any kill
+    // status set by the killOp command will be ignored.
+    // After OperationContext::runWithoutInterruption() returns, any call to
+    // OperationContext::checkForInterrupt() will see the kill status and respond accordingly
+    // (checkForInterrupt() will throw an exception while checkForInterruptNoAssert() returns
+    // an error Status).
+    Status status = opCtx->runWithoutInterruption([&, this] {
+        return _buildAndHandleErrors(opCtx.get(), db, true /* buildInBackground */, &dlk);
+    });
     if (!status.isOK()) {
         error() << "IndexBuilder could not build index: " << redact(status);
         fassert(28555, ErrorCodes::isInterruption(status.code()));
@@ -145,7 +140,7 @@ void IndexBuilder::run() {
 }
 
 Status IndexBuilder::buildInForeground(OperationContext* opCtx, Database* db) const {
-    return _build(opCtx, db, false, NULL);
+    return _buildAndHandleErrors(opCtx, db, false /*buildInBackground */, nullptr);
 }
 
 void IndexBuilder::waitForBgIndexStarting() {
@@ -157,125 +152,198 @@ void IndexBuilder::waitForBgIndexStarting() {
     _bgIndexStarting = false;
 }
 
-namespace {
-/**
- * @param status shalt not be of code `WriteConflict`.
- */
-Status _failIndexBuild(MultiIndexBlock& indexer, Status status, bool allowBackgroundBuilding) {
-    invariant(status.code() != ErrorCodes::WriteConflict);
-
-    if (status.code() == ErrorCodes::InterruptedAtShutdown) {
-        // leave it as-if kill -9 happened. This will be handled on restart.
-        invariant(allowBackgroundBuilding);  // Foreground builds aren't interrupted.
-        indexer.abortWithoutCleanup();
-        return status;
-    }
-
-    if (allowBackgroundBuilding) {
-        error() << "Background index build failed. Status: " << redact(status);
-        fassertFailed(50769);
-    } else {
-        return status;
-    }
-}
-}  // namespace
-
-Status IndexBuilder::_build(OperationContext* opCtx,
-                            Database* db,
-                            bool allowBackgroundBuilding,
-                            Lock::DBLock* dbLock) const try {
+Status IndexBuilder::_buildAndHandleErrors(OperationContext* opCtx,
+                                           Database* db,
+                                           bool buildInBackground,
+                                           Lock::DBLock* dbLock) const {
     const NamespaceString ns(_index["ns"].String());
 
     Collection* coll = db->getCollection(opCtx, ns);
     // Collections should not be implicitly created by the index builder.
     fassert(40409, coll);
 
-    {
-        stdx::lock_guard<Client> lk(*opCtx->getClient());
-        // Show which index we're building in the curop display.
-        CurOp::get(opCtx)->setOpDescription_inlock(_index);
+    MultiIndexBlock indexer;
+
+    // The 'indexer' can throw, so ensure build cleanup occurs.
+    ON_BLOCK_EXIT([&] { indexer.cleanUpAfterBuild(opCtx, coll); });
+
+    auto status = _build(opCtx, buildInBackground, coll, indexer, dbLock);
+    // Background index builds are not allowed to return errors because they run in a background
+    // thread.
+    if (status.isOK() || !buildInBackground) {
+        invariant(!dbLock || dbLock->mode() == MODE_X);
+        return status;
     }
 
-    MultiIndexBlockImpl indexer(opCtx, coll);
-    indexer.allowInterruption();
-    if (allowBackgroundBuilding)
-        indexer.allowBackgroundBuilding();
+    // The MultiIndexBlock destructor may only be called when an X lock is held on the database.
+    if (dbLock->mode() != MODE_X) {
+        UninterruptibleLockGuard noInterrupt(opCtx->lockState());
+        dbLock->relockWithMode(MODE_X);
+    }
+
+    invariant(status.code() != ErrorCodes::WriteConflict);
+
+    if (status.code() == ErrorCodes::InterruptedAtShutdown) {
+        // leave it as-if kill -9 happened. This will be handled on restart.
+        indexer.abortWithoutCleanup(opCtx);
+        return status;
+    }
+
+    error() << "Background index build failed. Status: " << redact(status);
+    fassertFailed(50769);
+}
+
+Status IndexBuilder::_build(OperationContext* opCtx,
+                            bool buildInBackground,
+                            Collection* coll,
+                            MultiIndexBlock& indexer,
+                            Lock::DBLock* dbLock) const try {
+    auto ns = coll->ns();
+
+    {
+        BSONObjBuilder builder;
+        builder.append(kCommandName, ns.coll());
+        {
+            BSONArrayBuilder indexesBuilder;
+            indexesBuilder.append(_index);
+            builder.append(kIndexesFieldName, indexesBuilder.arr());
+        }
+        auto opDescObj = builder.obj();
+
+        stdx::lock_guard<Client> lk(*opCtx->getClient());
+        // Show which index we're building in the curop display.
+        auto curOp = CurOp::get(opCtx);
+        curOp->setLogicalOp_inlock(LogicalOp::opCommand);
+        curOp->setNS_inlock(ns.ns());
+        curOp->setOpDescription_inlock(opDescObj);
+    }
+
+    // Ignore uniqueness constraint violations when relaxed (on secondaries). Secondaries can
+    // complete index builds in the middle of batches, which creates the potential for finding
+    // duplicate key violations where there otherwise would be none at consistent states.
+    if (_indexConstraints == IndexConstraints::kRelax) {
+        indexer.ignoreUniqueConstraint();
+    }
 
     Status status = Status::OK();
+
     {
         TimestampBlock tsBlock(opCtx, _initIndexTs);
-        status = writeConflictRetry(
-            opCtx, "Init index build", ns.ns(), [&] { return indexer.init(_index).getStatus(); });
+        status = writeConflictRetry(opCtx, "Init index build", ns.ns(), [&] {
+            return indexer
+                .init(
+                    opCtx, coll, _index, MultiIndexBlock::makeTimestampedIndexOnInitFn(opCtx, coll))
+                .getStatus();
+        });
     }
 
     if (status == ErrorCodes::IndexAlreadyExists ||
-        (status == ErrorCodes::IndexOptionsConflict && _relaxConstraints)) {
+        (status == ErrorCodes::IndexOptionsConflict &&
+         _indexConstraints == IndexConstraints::kRelax)) {
         LOG(1) << "Ignoring indexing error: " << redact(status);
-        if (allowBackgroundBuilding) {
-            // Must set this in case anyone is waiting for this build.
+
+        // Must set this in case anyone is waiting for this build.
+        if (dbLock) {
             _setBgIndexStarting();
         }
         return Status::OK();
     }
     if (!status.isOK()) {
-        return _failIndexBuild(indexer, status, allowBackgroundBuilding);
+        return status;
     }
 
-    if (allowBackgroundBuilding) {
-        _setBgIndexStarting();
+    if (buildInBackground) {
         invariant(dbLock);
+
+        _setBgIndexStarting();
+        opCtx->recoveryUnit()->abandonSnapshot();
+
+        UninterruptibleLockGuard noInterrupt(opCtx->lockState());
         dbLock->relockWithMode(MODE_IX);
     }
 
     {
         Lock::CollectionLock collLock(opCtx->lockState(), ns.ns(), MODE_IX);
         // WriteConflict exceptions and statuses are not expected to escape this method.
-        status = indexer.insertAllDocumentsInCollection();
+        status = indexer.insertAllDocumentsInCollection(opCtx, coll);
     }
     if (!status.isOK()) {
-        if (allowBackgroundBuilding) {
-            UninterruptibleLockGuard noInterrupt(opCtx->lockState());
-            dbLock->relockWithMode(MODE_X);
-            if (status == ErrorCodes::InterruptedAtShutdown)
-                return _failIndexBuild(indexer, status, allowBackgroundBuilding);
-            opCtx->checkForInterrupt();
+        return status;
+    }
+
+    if (buildInBackground) {
+        {
+            // Perform the first drain while holding an intent lock.
+            Lock::CollectionLock collLock(opCtx->lockState(), ns.ns(), MODE_IX);
+
+            // Read at a point in time so that the drain, which will timestamp writes at
+            // lastApplied, can never commit writes earlier than its read timestamp.
+            status = indexer.drainBackgroundWrites(opCtx, RecoveryUnit::ReadSource::kNoOverlap);
         }
-        return _failIndexBuild(indexer, status, allowBackgroundBuilding);
-    }
+        if (!status.isOK()) {
+            return status;
+        }
 
-    if (allowBackgroundBuilding) {
+        // Perform the second drain while stopping inserts into the collection.
+        {
+            Lock::CollectionLock colLock(opCtx->lockState(), ns.ns(), MODE_S);
+            status = indexer.drainBackgroundWrites(opCtx);
+        }
+        if (!status.isOK()) {
+            return status;
+        }
+
+        opCtx->recoveryUnit()->abandonSnapshot();
+
+        UninterruptibleLockGuard noInterrupt(opCtx->lockState());
         dbLock->relockWithMode(MODE_X);
-    }
-    writeConflictRetry(opCtx, "Commit index build", ns.ns(), [opCtx, &indexer, &ns] {
-        WriteUnitOfWork wunit(opCtx);
-        indexer.commit();
 
-        if (requiresGhostCommitTimestamp(opCtx, ns)) {
+        // Perform the third and final drain after releasing a shared lock and reacquiring an
+        // exclusive lock on the database.
+        status = indexer.drainBackgroundWrites(opCtx);
+        if (!status.isOK()) {
+            return status;
+        }
 
-            auto tryTimestamp = [opCtx] {
-                auto status = opCtx->recoveryUnit()->setTimestamp(
-                    LogicalClock::get(opCtx)->getClusterTime().asTimestamp());
-                if (status.code() == ErrorCodes::BadValue) {
-                    LOG(1) << "Temporarily could not timestamp the index build commit: "
-                           << status.reason();
-                    return false;
-                }
-                fassert(50701, status);
-                return true;
-            };
-
-            // Timestamping the index build may fail in rare cases if retrieving the cluster time
-            // races with the stable timestamp advancing. It should be retried immediately.
-            while (!tryTimestamp()) {
-                opCtx->checkForInterrupt();
+        // Only perform constraint checking when enforced (on primaries).
+        if (_indexConstraints == IndexConstraints::kEnforce) {
+            status = indexer.checkConstraints(opCtx);
+            if (!status.isOK()) {
+                return status;
             }
         }
-        wunit.commit();
-    });
+    }
 
-    if (allowBackgroundBuilding) {
-        dbLock->relockWithMode(MODE_X);
-        Database* reloadDb = DatabaseHolder::getDatabaseHolder().get(opCtx, ns.db());
+    status = writeConflictRetry(opCtx, "Commit index build", ns.ns(), [opCtx, coll, &indexer, &ns] {
+        WriteUnitOfWork wunit(opCtx);
+        auto status = indexer.commit(opCtx,
+                                     coll,
+                                     [opCtx, coll, &ns](const BSONObj& indexSpec) {
+                                         opCtx->getServiceContext()->getOpObserver()->onCreateIndex(
+                                             opCtx, ns, *(coll->uuid()), indexSpec, false);
+                                     },
+                                     MultiIndexBlock::kNoopOnCommitFn);
+        if (!status.isOK()) {
+            return status;
+        }
+
+        IndexTimestampHelper::setGhostCommitTimestampForCatalogWrite(opCtx, ns);
+        wunit.commit();
+        return Status::OK();
+    });
+    if (!status.isOK()) {
+        return status;
+    }
+
+    if (buildInBackground) {
+        invariant(opCtx->lockState()->isDbLockedForMode(ns.db(), MODE_X),
+                  str::stream() << "Database not locked in exclusive mode after committing "
+                                   "background index: "
+                                << ns.ns()
+                                << ": "
+                                << _index);
+        auto databaseHolder = DatabaseHolder::get(opCtx);
+        auto reloadDb = databaseHolder->getDb(opCtx, ns.db());
         fassert(28553, reloadDb);
         fassert(28554, reloadDb->getCollection(opCtx, ns));
     }
@@ -284,4 +352,5 @@ Status IndexBuilder::_build(OperationContext* opCtx,
 } catch (const DBException& e) {
     return e.toStatus();
 }
-}
+
+}  // namespace mongo

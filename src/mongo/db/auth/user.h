@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -104,6 +103,15 @@ public:
     typedef stdx::unordered_map<ResourcePattern, Privilege> ResourcePrivilegeMap;
 
     explicit User(const UserName& name);
+
+    using UserId = std::vector<std::uint8_t>;
+    const UserId& getID() const {
+        return _id;
+    }
+
+    void setID(UserId id) {
+        _id = std::move(id);
+    }
 
     /**
      * Returns the user name for this user.
@@ -231,6 +239,10 @@ protected:
     void _invalidate();
 
 private:
+    // Unique ID (often UUID) for this user.
+    // May be empty for legacy users.
+    UserId _id;
+
     UserName _name;
 
     // Digest of the full username
@@ -252,7 +264,7 @@ private:
     RestrictionDocuments _restrictions;
 
     // Indicates whether the user has been marked as invalid by the AuthorizationManager.
-    AtomicBool _isValid{true};
+    AtomicWord<bool> _isValid{true};
 };
 
 using UserHandle = std::shared_ptr<User>;

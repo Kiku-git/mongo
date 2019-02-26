@@ -96,6 +96,7 @@ DIRECTIO
 DNE
 DOI
 DONTNEED
+DSK
 DUPLICATEV
 DataSet
 DbCursor
@@ -129,6 +130,7 @@ Eron
 FALLOC
 FALLTHROUGH
 FH
+FIXME
 FLD
 FLSv
 FLv
@@ -290,6 +292,7 @@ PARAM
 POSIX
 PPC
 PREDEFINE
+PRId
 PRIu
 PRNG
 PTHREAD
@@ -378,6 +381,7 @@ ThreadList
 ThreadListWrapper
 Timespec
 Timestamp
+Timestamps
 TryCV
 TxnID
 UDF
@@ -398,10 +402,12 @@ UnmapViewOfFile
 Unmarshall
 Unordered
 Uryyb
+VALGRIND
 VARCHAR
 VLDB
 VMSG
 VR
+VRFY
 VX
 Vc
 Vfprintf
@@ -528,6 +534,7 @@ bzDecompressInit
 bzalloc
 bzfree
 bzip
+calc
 call's
 calloc
 cas
@@ -700,6 +707,7 @@ endian
 english
 enqueue
 enqueued
+enum
 env
 eof
 epi
@@ -731,6 +739,7 @@ fdopen
 fextend
 ffc
 fff
+ffffffffffffffff
 fflush
 ffs
 fgetc
@@ -952,6 +961,7 @@ marshalled
 maxCLevel
 maxcpu
 maxdbs
+maxdiff
 mbll
 mbss
 mem
@@ -999,9 +1009,11 @@ needkey
 needvalue
 negint
 nentries
+nentriesp
 newbar
 newfile
 newuri
+newv
 nextprev
 nfilename
 nhex
@@ -1030,6 +1042,7 @@ numSymbols
 numbare
 offpage
 ok
+oldv
 ondisk
 onint
 online
@@ -1163,6 +1176,7 @@ scalability
 sched
 scr
 sd
+second's
 secretkey
 sed
 sessionp
@@ -1217,6 +1231,8 @@ subgets
 subinit
 sublicense
 subone
+suboptimal
+subsystem's
 subtest
 subtree
 sunique
@@ -1374,6 +1390,7 @@ xff
 xxxx
 xxxxx
 xxxxxx
+zSeries
 zalloc
 zf
 zfree

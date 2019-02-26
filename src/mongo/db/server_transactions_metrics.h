@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -36,6 +35,7 @@
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/transactions_stats_gen.h"
+#include "mongo/util/concurrency/with_lock.h"
 
 namespace mongo {
 
@@ -140,52 +140,75 @@ public:
     /**
      * Appends the accumulated stats to a transactions stats object.
      */
-    void updateStats(TransactionsStats* stats);
+    void updateStats(TransactionsStats* stats, OperationContext* opCtx);
+
+    /**
+     * Invalidates the in-memory state of prepared transactions during replication rollback by
+     * clearing oldestActiveOplogEntryOpTime, oldestActiveOplogEntryOpTimes, and
+     * oldestNonMajorityCommittedOpTimes. These variables/data structures should be properly
+     * reconstructed during replication recovery.
+     */
+    void clearOpTimes();
 
 private:
     /**
      * Returns the first and oldest optime in the ordered set of active oplog entry optimes.
      * Returns boost::none if there are no transaction oplog entry optimes stored.
      */
-    boost::optional<repl::OpTime> _calculateOldestActiveOpTime() const;
+    boost::optional<repl::OpTime> _calculateOldestActiveOpTime(WithLock) const;
+
+    /**
+     * Returns the oldest read timestamp in use by any open unprepared transaction. This will
+     * return a null timestamp if there is no oldest open unprepared read timestamp to be
+     * returned.
+     */
+    static Timestamp _getOldestOpenUnpreparedReadTimestamp(OperationContext* opCtx);
+
+    //
+    // Member variables, excluding atomic variables, are labeled with the following code to
+    // indicate the synchronization rules for accessing them.
+    //
+    // (M)  Reads and writes guarded by _mutex
+    //
+    mutable stdx::mutex _mutex;
 
     // The number of multi-document transactions currently active.
-    AtomicUInt64 _currentActive{0};
+    AtomicWord<unsigned long long> _currentActive{0};
 
     // The number of multi-document transactions currently inactive.
-    AtomicUInt64 _currentInactive{0};
+    AtomicWord<unsigned long long> _currentInactive{0};
 
     // The total number of open transactions.
-    AtomicUInt64 _currentOpen{0};
+    AtomicWord<unsigned long long> _currentOpen{0};
 
     // The total number of multi-document transactions started since the last server startup.
-    AtomicUInt64 _totalStarted{0};
+    AtomicWord<unsigned long long> _totalStarted{0};
 
     // The total number of multi-document transaction aborts.
-    AtomicUInt64 _totalAborted{0};
+    AtomicWord<unsigned long long> _totalAborted{0};
 
     // The total number of multi-document transaction commits.
-    AtomicUInt64 _totalCommitted{0};
+    AtomicWord<unsigned long long> _totalCommitted{0};
 
     // The total number of prepared transactions since the last server startup.
-    AtomicUInt64 _totalPrepared{0};
+    AtomicWord<unsigned long long> _totalPrepared{0};
 
     // The total number of prepared transaction commits.
-    AtomicUInt64 _totalPreparedThenCommitted{0};
+    AtomicWord<unsigned long long> _totalPreparedThenCommitted{0};
 
     // The total number of prepared transaction aborts.
-    AtomicUInt64 _totalPreparedThenAborted{0};
+    AtomicWord<unsigned long long> _totalPreparedThenAborted{0};
 
     // The current number of transactions in the prepared state.
-    AtomicUInt64 _currentPrepared{0};
+    AtomicWord<unsigned long long> _currentPrepared{0};
 
     // The optime of the oldest oplog entry for any active transaction.
-    boost::optional<repl::OpTime> _oldestActiveOplogEntryOpTime;
+    boost::optional<repl::OpTime> _oldestActiveOplogEntryOpTime;  // (M)
 
     // Maintain the oldest oplog entry OpTime across all active transactions. Currently, we only
     // write an oplog entry for an ongoing transaction if it is in the `prepare` state. By
     // maintaining an ordered set of OpTimes, the OpTime at the beginning will be the oldest.
-    std::set<repl::OpTime> _oldestActiveOplogEntryOpTimes;
+    std::set<repl::OpTime> _oldestActiveOplogEntryOpTimes;  // (M)
 
     // Maintain the oldest oplog entry OpTime across transactions whose corresponding abort/commit
     // oplog entries have not been majority committed. Since this is an ordered set, the first
@@ -196,7 +219,7 @@ private:
     // 'finishOpTime': The commit/abort oplog entry OpTime.
     // Once the corresponding abort/commit entry has been majority committed, remove the pair from
     // this set.
-    std::set<std::pair<repl::OpTime, repl::OpTime>> _oldestNonMajorityCommittedOpTimes;
+    std::set<std::pair<repl::OpTime, repl::OpTime>> _oldestNonMajorityCommittedOpTimes;  // (M)
 };
 
 }  // namespace mongo

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -69,6 +68,9 @@ namespace {
 // If enabled, causes loop in _applyOps() to hang after applying current operation.
 MONGO_FAIL_POINT_DEFINE(applyOpsPauseBetweenOperations);
 
+// If enabled, causes _applyPrepareTransaction to hang before preparing the transaction participant.
+MONGO_FAIL_POINT_DEFINE(applyOpsHangBeforePreparingTransaction);
+
 /**
  * Return true iff the applyOpsCmd can be executed in a single WriteUnitOfWork.
  */
@@ -136,7 +138,8 @@ Status _applyOps(OperationContext* opCtx,
             // ApplyOps does not have the global writer lock when applying transaction
             // operations, so we need to acquire the DB and Collection locks.
             Lock::DBLock dbLock(opCtx, nss.db(), MODE_IX);
-            auto db = DatabaseHolder::getDatabaseHolder().get(opCtx, nss.ns());
+            auto databaseHolder = DatabaseHolder::get(opCtx);
+            auto db = databaseHolder->getDb(opCtx, nss.ns());
             if (!db) {
                 // Retry in non-atomic mode, since MMAP cannot implicitly create a new database
                 // within an active WriteUnitOfWork.
@@ -215,7 +218,7 @@ Status _applyOps(OperationContext* opCtx,
                         if (*opType == 'c') {
                             invariant(opCtx->lockState()->isW());
                             uassertStatusOK(repl::applyCommand_inlock(
-                                opCtx, opObj, entry, oplogApplicationMode));
+                                opCtx, opObj, entry, oplogApplicationMode, boost::none));
                             return Status::OK();
                         }
 
@@ -280,24 +283,6 @@ Status _applyOps(OperationContext* opCtx,
 Status _applyPrepareTransaction(OperationContext* opCtx,
                                 const repl::OplogEntry& entry,
                                 repl::OplogApplication::Mode oplogApplicationMode) {
-    // Wait until the end of recovery to apply the operations from the prepared transaction.
-    if (oplogApplicationMode == OplogApplication::Mode::kRecovering) {
-        if (!serverGlobalParams.enableMajorityReadConcern) {
-            error() << "Cannot replay a prepared transaction when 'enableMajorityReadConcern' is "
-                       "set to false. Restart the server with --enableMajorityReadConcern=true "
-                       "to complete recovery.";
-        }
-        fassert(50964, serverGlobalParams.enableMajorityReadConcern);
-        return Status::OK();
-    }
-    // Return error if run via applyOps command.
-    uassert(50945,
-            "applyOps with prepared flag is only used internally by secondaries.",
-            oplogApplicationMode != repl::OplogApplication::Mode::kApplyOpsCmd);
-
-    // TODO: SERVER-36492 Only run on secondary until we support initial sync.
-    invariant(oplogApplicationMode == repl::OplogApplication::Mode::kSecondary);
-
     const auto info = ApplyOpsCommandInfo::parse(entry.getObject());
     invariant(info.getPrepare() && *info.getPrepare());
     uassert(
@@ -316,7 +301,7 @@ Status _applyPrepareTransaction(OperationContext* opCtx,
     MongoDOperationContextSessionWithoutRefresh sessionCheckout(opCtx);
 
     auto transaction = TransactionParticipant::get(opCtx);
-    transaction->unstashTransactionResources(opCtx, "prepareTransaction");
+    transaction.unstashTransactionResources(opCtx, "prepareTransaction");
 
     // Apply the operations via applysOps functionality.
     int numApplied = 0;
@@ -333,9 +318,55 @@ Status _applyPrepareTransaction(OperationContext* opCtx,
         return status;
     }
     invariant(!entry.getOpTime().isNull());
-    transaction->prepareTransaction(opCtx, entry.getOpTime());
-    transaction->stashTransactionResources(opCtx);
+
+    if (MONGO_FAIL_POINT(applyOpsHangBeforePreparingTransaction)) {
+        LOG(0) << "Hit applyOpsHangBeforePreparingTransaction failpoint";
+        MONGO_FAIL_POINT_PAUSE_WHILE_SET_OR_INTERRUPTED(opCtx,
+                                                        applyOpsHangBeforePreparingTransaction);
+    }
+
+    transaction.prepareTransaction(opCtx, entry.getOpTime());
+    transaction.stashTransactionResources(opCtx);
+
     return Status::OK();
+}
+
+/**
+ * Make sure that if we are in replication recovery or initial sync, we don't apply the prepare
+ * transaction oplog entry until we either see a commit transaction oplog entry or are at the very
+ * end of recovery/initial sync. Otherwise, only apply the prepare transaction oplog entry if we are
+ * a secondary.
+ */
+Status _applyPrepareTransactionOplogEntry(OperationContext* opCtx,
+                                          const repl::OplogEntry& entry,
+                                          repl::OplogApplication::Mode oplogApplicationMode) {
+    // Don't apply the operations from the prepared transaction until either we see a commit
+    // transaction oplog entry during recovery or are at the end of recovery.
+    if (oplogApplicationMode == OplogApplication::Mode::kRecovering) {
+        if (!serverGlobalParams.enableMajorityReadConcern) {
+            error() << "Cannot replay a prepared transaction when 'enableMajorityReadConcern' is "
+                       "set to false. Restart the server with --enableMajorityReadConcern=true "
+                       "to complete recovery.";
+        }
+        fassert(50964, serverGlobalParams.enableMajorityReadConcern);
+        return Status::OK();
+    }
+
+    // Don't apply the operations from the prepared transaction until either we see a commit
+    // transaction oplog entry during the oplog application phase of initial sync or are at the end
+    // of initial sync.
+    if (oplogApplicationMode == OplogApplication::Mode::kInitialSync) {
+        return Status::OK();
+    }
+
+    // Return error if run via applyOps command.
+    uassert(50945,
+            "applyOps with prepared flag is only used internally by secondaries.",
+            oplogApplicationMode != repl::OplogApplication::Mode::kApplyOpsCmd);
+
+    invariant(oplogApplicationMode == repl::OplogApplication::Mode::kSecondary);
+
+    return _applyPrepareTransaction(opCtx, entry, oplogApplicationMode);
 }
 
 Status _checkPrecondition(OperationContext* opCtx,
@@ -358,7 +389,8 @@ Status _checkPrecondition(OperationContext* opCtx,
         BSONObj realres = db.findOne(nss.ns(), preCondition["q"].Obj());
 
         // Get collection default collation.
-        Database* database = DatabaseHolder::getDatabaseHolder().get(opCtx, nss.db());
+        auto databaseHolder = DatabaseHolder::get(opCtx);
+        auto database = databaseHolder->getDb(opCtx, nss.db());
         if (!database) {
             return {ErrorCodes::NamespaceNotFound, "database in ns does not exist: " + nss.ns()};
         }
@@ -422,7 +454,7 @@ Status applyApplyOpsOplogEntry(OperationContext* opCtx,
     // The lock requirement of transaction operations should be the same as that on the primary,
     // so we don't acquire the locks conservatively for them.
     if (entry.shouldPrepare()) {
-        return _applyPrepareTransaction(opCtx, entry, oplogApplicationMode);
+        return _applyPrepareTransactionOplogEntry(opCtx, entry, oplogApplicationMode);
     }
     BSONObjBuilder resultWeDontCareAbout;
     return applyOps(opCtx,
@@ -430,6 +462,13 @@ Status applyApplyOpsOplogEntry(OperationContext* opCtx,
                     entry.getObject(),
                     oplogApplicationMode,
                     &resultWeDontCareAbout);
+}
+
+Status applyRecoveredPrepareTransaction(OperationContext* opCtx, const OplogEntry& entry) {
+    // Snapshot transactions never conflict with the PBWM lock.
+    invariant(!opCtx->lockState()->shouldConflictWithSecondaryBatchApplication());
+    UnreplicatedWritesBlock uwb(opCtx);
+    return _applyPrepareTransaction(opCtx, entry, OplogApplication::Mode::kRecovering);
 }
 
 Status applyOps(OperationContext* opCtx,

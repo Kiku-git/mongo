@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -45,7 +44,7 @@
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/exec/delete.h"
-#include "mongo/db/exec/update.h"
+#include "mongo/db/exec/update_stage.h"
 #include "mongo/db/exec/working_set_common.h"
 #include "mongo/db/lasterror.h"
 #include "mongo/db/namespace_string.h"
@@ -66,7 +65,6 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/retryable_writes_stats.h"
 #include "mongo/db/s/collection_sharding_state.h"
-#include "mongo/db/session_catalog.h"
 #include "mongo/db/stats/top.h"
 #include "mongo/db/transaction_participant.h"
 #include "mongo/db/write_concern.h"
@@ -93,7 +91,7 @@ boost::optional<BSONObj> advanceExecutor(OperationContext* opCtx,
         return {std::move(value)};
     }
 
-    if (PlanExecutor::FAILURE == state || PlanExecutor::DEAD == state) {
+    if (PlanExecutor::FAILURE == state) {
         error() << "Plan executor error during findAndModify: " << PlanExecutor::statestr(state)
                 << ", stats: " << redact(Explain::getWinningPlanStats(exec));
 
@@ -310,7 +308,7 @@ public:
             maybeDisableValidation.emplace(opCtx);
 
         const auto txnParticipant = TransactionParticipant::get(opCtx);
-        const auto inTransaction = txnParticipant && txnParticipant->inMultiDocumentTransaction();
+        const auto inTransaction = txnParticipant && txnParticipant.inMultiDocumentTransaction();
         uassert(50781,
                 str::stream() << "Cannot write to system collection " << nsString.ns()
                               << " within a transaction.",
@@ -326,8 +324,7 @@ public:
         const auto stmtId = 0;
         if (opCtx->getTxnNumber() && !inTransaction) {
             const auto txnParticipant = TransactionParticipant::get(opCtx);
-            if (auto entry =
-                    txnParticipant->checkStatementExecuted(opCtx, *opCtx->getTxnNumber(), stmtId)) {
+            if (auto entry = txnParticipant.checkStatementExecuted(opCtx, stmtId)) {
                 RetryableWritesStats::get(opCtx)->incrementRetriedCommandsCount();
                 RetryableWritesStats::get(opCtx)->incrementRetriedStatementsCount();
                 parseOplogEntryForFindAndModify(opCtx, args, *entry, &result);
@@ -459,8 +456,8 @@ public:
                         CollectionOptions collectionOptions;
                         uassertStatusOK(collectionOptions.parse(
                             BSONObj(), CollectionOptions::ParseKind::parseForCommand));
-                        uassertStatusOK(Database::userCreateNS(
-                            opCtx, autoDb->getDb(), nsString.ns(), collectionOptions));
+                        auto db = autoDb->getDb();
+                        uassertStatusOK(db->userCreateNS(opCtx, nsString, collectionOptions));
                         wuow.commit();
 
                         collection = autoDb->getDb()->getCollection(opCtx, nsString);

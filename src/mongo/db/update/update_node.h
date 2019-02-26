@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -123,6 +122,9 @@ public:
 
         // If provided, UpdateNode::apply will log the update here.
         LogBuilder* logBuilder = nullptr;
+
+        // If provided, UpdateNode::apply will populate this with a path to each modified field.
+        FieldRefSetWithStorage* modifiedPaths = nullptr;
     };
 
     /**

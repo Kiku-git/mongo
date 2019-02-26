@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -91,7 +90,9 @@ public:
     /**
      * Validate that the number of document keys matches the number of index keys.
      */
-    void validateIndexKeyCount(IndexDescriptor* idx, int64_t numRecs, ValidateResults& results);
+    void validateIndexKeyCount(const IndexDescriptor* idx,
+                               int64_t numRecs,
+                               ValidateResults& results);
 
 private:
     OperationContext* _opCtx;             // Not owned.

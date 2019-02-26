@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -109,7 +108,9 @@ struct DataType::Handler<Terminated<C, T>> {
             return TerminatedHelper::makeStoreStatus(C, length, debug_offset + local_advanced);
         }
 
-        ptr[local_advanced] = C;
+        if (ptr) {
+            ptr[local_advanced] = C;
+        }
 
         if (advanced) {
             *advanced = local_advanced + 1;

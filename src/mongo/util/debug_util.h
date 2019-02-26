@@ -1,6 +1,3 @@
-// debug_util.h
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -55,7 +52,7 @@ public:
     }
 
 private:
-    AtomicInt64 _count{0};
+    AtomicWord<long long> _count{0};
 };
 
 struct Occasionally : SampleEveryNth<16> {};

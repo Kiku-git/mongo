@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -68,8 +67,10 @@ TEST(LockStats, Wait) {
         ASSERT_EQUALS(LOCK_WAITING, lockerConflict.lockBegin(nullptr, resId, MODE_S));
 
         // Sleep 1 millisecond so the wait time passes
-        ASSERT_EQUALS(LOCK_TIMEOUT,
-                      lockerConflict.lockComplete(resId, MODE_S, Date_t::now() + Milliseconds(5)));
+        ASSERT_THROWS_CODE(
+            lockerConflict.lockComplete(resId, MODE_S, Date_t::now() + Milliseconds(5)),
+            AssertionException,
+            ErrorCodes::LockTimeout);
     }
 
     // Make sure that the waits/blocks are non-zero
@@ -112,8 +113,9 @@ TEST(LockStats, Subtraction) {
 
     {
         LockerForTests lockerConflict(MODE_IX);
-        ASSERT_EQUALS(LOCK_TIMEOUT,
-                      lockerConflict.lock(resId, MODE_S, Date_t::now() + Milliseconds(5)));
+        ASSERT_THROWS_CODE(lockerConflict.lock(resId, MODE_S, Date_t::now() + Milliseconds(5)),
+                           AssertionException,
+                           ErrorCodes::LockTimeout);
     }
 
     SingleThreadedLockStats stats;
@@ -124,8 +126,9 @@ TEST(LockStats, Subtraction) {
 
     {
         LockerForTests lockerConflict(MODE_IX);
-        ASSERT_EQUALS(LOCK_TIMEOUT,
-                      lockerConflict.lock(resId, MODE_S, Date_t::now() + Milliseconds(5)));
+        ASSERT_THROWS_CODE(lockerConflict.lock(resId, MODE_S, Date_t::now() + Milliseconds(5)),
+                           AssertionException,
+                           ErrorCodes::LockTimeout);
     }
 
     SingleThreadedLockStats stats2;

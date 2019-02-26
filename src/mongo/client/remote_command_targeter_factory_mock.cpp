@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -54,8 +53,8 @@ public:
         return _mock->findHost(opCtx, readPref);
     }
 
-    Future<HostAndPort> findHostWithMaxWait(const ReadPreferenceSetting& readPref,
-                                            Milliseconds maxWait) override {
+    SharedSemiFuture<HostAndPort> findHostWithMaxWait(const ReadPreferenceSetting& readPref,
+                                                      Milliseconds maxWait) override {
         return _mock->findHostWithMaxWait(readPref, maxWait);
     }
 
@@ -96,7 +95,7 @@ void RemoteCommandTargeterFactoryMock::removeTargeterToReturn(const ConnectionSt
     MockTargetersMap::iterator it = _mockTargeters.find(connStr);
 
     invariant(it != _mockTargeters.end());
-    invariant(it->second.unique());
+    invariant(it->second.use_count() == 1);
 
     _mockTargeters.erase(it);
 }

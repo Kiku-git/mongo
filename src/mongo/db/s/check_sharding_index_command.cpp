@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -118,7 +117,7 @@ public:
             return false;
         }
 
-        IndexDescriptor* idx =
+        const IndexDescriptor* idx =
             collection->getIndexCatalog()->findShardKeyPrefixedIndex(opCtx,
                                                                      keyPattern,
                                                                      true);  // requireSingleKey
@@ -202,7 +201,7 @@ public:
             }
         }
 
-        if (PlanExecutor::DEAD == state || PlanExecutor::FAILURE == state) {
+        if (PlanExecutor::FAILURE == state) {
             uassertStatusOK(WorkingSetCommon::getMemberObjectStatus(currKey).withContext(
                 "Executor error while checking sharding index"));
         }

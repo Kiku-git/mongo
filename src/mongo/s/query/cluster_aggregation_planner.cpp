@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -37,6 +36,7 @@
 #include "mongo/db/pipeline/document_source_match.h"
 #include "mongo/db/pipeline/document_source_out.h"
 #include "mongo/db/pipeline/document_source_project.h"
+#include "mongo/db/pipeline/document_source_sequential_document_cache.h"
 #include "mongo/db/pipeline/document_source_skip.h"
 #include "mongo/db/pipeline/document_source_sort.h"
 #include "mongo/db/pipeline/document_source_unwind.h"
@@ -66,8 +66,6 @@ namespace {
  *
  * It is not safe to call this optimization multiple times.
  *
- * NOTE: looks for NeedsMergerDocumentSources and uses that API
- *
  * Returns the sort specification if the input streams are sorted, and false otherwise.
  */
 boost::optional<BSONObj> findSplitPoint(Pipeline::SourceContainer* shardPipe, Pipeline* mergePipe) {
@@ -75,28 +73,23 @@ boost::optional<BSONObj> findSplitPoint(Pipeline::SourceContainer* shardPipe, Pi
         boost::intrusive_ptr<DocumentSource> current = mergePipe->popFront();
 
         // Check if this source is splittable.
-        NeedsMergerDocumentSource* splittable =
-            dynamic_cast<NeedsMergerDocumentSource*>(current.get());
-
-        if (!splittable) {
+        auto mergeLogic = current->mergingLogic();
+        if (!mergeLogic) {
             // Move the source from the merger _sources to the shard _sources.
             shardPipe->push_back(current);
-        } else {
-            // Split this source into 'merge' and 'shard' _sources.
-            boost::intrusive_ptr<DocumentSource> shardSource = splittable->getShardSource();
-            auto mergeLogic = splittable->mergingLogic();
-
-            // A source may not simultaneously be present on both sides of the split.
-            invariant(shardSource != mergeLogic.mergingStage);
-
-            if (shardSource)
-                shardPipe->push_back(std::move(shardSource));
-
-            if (mergeLogic.mergingStage)
-                mergePipe->addInitialSource(std::move(mergeLogic.mergingStage));
-
-            return mergeLogic.inputSortPattern;
+            continue;
         }
+
+        // A source may not simultaneously be present on both sides of the split.
+        invariant(mergeLogic->shardsStage != mergeLogic->mergingStage);
+
+        if (mergeLogic->shardsStage)
+            shardPipe->push_back(std::move(mergeLogic->shardsStage));
+
+        if (mergeLogic->mergingStage)
+            mergePipe->addInitialSource(std::move(mergeLogic->mergingStage));
+
+        return mergeLogic->inputSortPattern;
     }
     return boost::none;
 }
@@ -295,8 +288,8 @@ ClusterClientCursorGuard convertPipelineToRouterStages(
 
 bool stageCanRunInParallel(const boost::intrusive_ptr<DocumentSource>& stage,
                            const std::set<std::string>& nameOfShardKeyFieldsUponEntryToStage) {
-    if (auto needsMerger = dynamic_cast<NeedsMergerDocumentSource*>(stage.get())) {
-        return needsMerger->canRunInParallelBeforeOut(nameOfShardKeyFieldsUponEntryToStage);
+    if (stage->mergingLogic()) {
+        return stage->canRunInParallelBeforeOut(nameOfShardKeyFieldsUponEntryToStage);
     } else {
         // This stage is fine to execute in parallel on each stream. For example, a $match can be
         // applied to each stream in parallel.
@@ -447,6 +440,20 @@ boost::optional<ShardedExchangePolicy> walkPipelineBackwardsTrackingShardKey(
     return ShardedExchangePolicy{std::move(exchangeSpec), std::move(consumerShards)};
 }
 
+/**
+ * Non-correlated pipeline caching is only supported locally. When the
+ * DocumentSourceSequentialDocumentCache stage has been moved to the shards pipeline, abandon the
+ * associated local cache.
+ */
+void abandonCacheIfSentToShards(Pipeline* shardsPipeline) {
+    for (auto&& stage : shardsPipeline->getSources()) {
+        if (StringData(stage->getSourceName()) ==
+            DocumentSourceSequentialDocumentCache::kStageName) {
+            static_cast<DocumentSourceSequentialDocumentCache*>(stage.get())->abandonCache();
+        }
+    }
+}
+
 }  // namespace
 
 SplitPipeline splitPipeline(std::unique_ptr<Pipeline, PipelineDeleter> pipeline) {
@@ -464,6 +471,8 @@ SplitPipeline splitPipeline(std::unique_ptr<Pipeline, PipelineDeleter> pipeline)
     moveFinalUnwindFromShardsToMerger(shardsPipeline.get(), mergePipeline.get());
     propagateDocLimitToShards(shardsPipeline.get(), mergePipeline.get());
     limitFieldsSentFromShardsToMerger(shardsPipeline.get(), mergePipeline.get());
+
+    abandonCacheIfSentToShards(shardsPipeline.get());
     shardsPipeline->setSplitState(Pipeline::SplitState::kSplitForShards);
     mergePipeline->setSplitState(Pipeline::SplitState::kSplitForMerge);
 

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -39,12 +38,15 @@
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/transport/baton.h"
+#include "mongo/util/fail_point_service.h"
 
 namespace mongo {
 
 class ThreadPoolInterface;
 
 namespace executor {
+MONGO_FAIL_POINT_DECLARE(initialSyncFuzzerSynchronizationPoint1);
+MONGO_FAIL_POINT_DECLARE(initialSyncFuzzerSynchronizationPoint2);
 
 struct ConnectionPoolStats;
 class NetworkInterface;
@@ -71,7 +73,7 @@ public:
     void startup() override;
     void shutdown() override;
     void join() override;
-    void appendDiagnosticBSON(BSONObjBuilder* b) const;
+    void appendDiagnosticBSON(BSONObjBuilder* b) const override;
     Date_t now() override;
     StatusWith<EventHandle> makeEvent() override;
     void signalEvent(const EventHandle& event) override;
@@ -82,10 +84,9 @@ public:
     void waitForEvent(const EventHandle& event) override;
     StatusWith<CallbackHandle> scheduleWork(CallbackFn work) override;
     StatusWith<CallbackHandle> scheduleWorkAt(Date_t when, CallbackFn work) override;
-    StatusWith<CallbackHandle> scheduleRemoteCommand(
-        const RemoteCommandRequest& request,
-        const RemoteCommandCallbackFn& cb,
-        const transport::BatonHandle& baton = nullptr) override;
+    StatusWith<CallbackHandle> scheduleRemoteCommand(const RemoteCommandRequest& request,
+                                                     const RemoteCommandCallbackFn& cb,
+                                                     const BatonHandle& baton = nullptr) override;
     void cancel(const CallbackHandle& cbHandle) override;
     void wait(const CallbackHandle& cbHandle,
               Interruptible* interruptible = Interruptible::notInterruptible()) override;
@@ -135,7 +136,7 @@ private:
      * called outside of _mutex.
      */
     static WorkQueue makeSingletonWorkQueue(CallbackFn work,
-                                            const transport::BatonHandle& baton,
+                                            const BatonHandle& baton,
                                             Date_t when = {});
 
     /**

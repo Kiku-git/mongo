@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -30,9 +29,16 @@
 
 #include "mongo/platform/basic.h"
 
+#include <map>
+#include <set>
+
 #include "mongo/client/remote_command_targeter_mock.h"
+#include "mongo/db/commands.h"
 #include "mongo/db/logical_clock.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/repl/read_concern_args.h"
+#include "mongo/s/catalog/type_shard.h"
+#include "mongo/s/session_catalog_router.h"
 #include "mongo/s/sharding_router_test_fixture.h"
 #include "mongo/s/transaction_router.h"
 #include "mongo/unittest/death_test.h"
@@ -46,7 +52,6 @@ using executor::RemoteCommandRequest;
 class TransactionRouterTest : public ShardingTestFixture {
 protected:
     const LogicalTime kInMemoryLogicalTime = LogicalTime(Timestamp(3, 1));
-    const TxnNumber kTxnNumber = 10;
 
     const HostAndPort kTestConfigShardHost = HostAndPort("FakeConfigHost", 12345);
 
@@ -57,15 +62,27 @@ protected:
     const HostAndPort hostAndPort2 = HostAndPort("shard2:1234");
 
     const ShardId shard3 = ShardId("shard3");
+    const HostAndPort hostAndPort3 = HostAndPort("shard3:1234");
 
-    void setUp() {
+    const StringMap<repl::ReadConcernLevel> supportedNonSnapshotRCLevels = {
+        {"local", repl::ReadConcernLevel::kLocalReadConcern},
+        {"majority", repl::ReadConcernLevel::kMajorityReadConcern}};
+
+    const std::vector<repl::ReadConcernLevel> unsupportedRCLevels = {
+        repl::ReadConcernLevel::kAvailableReadConcern,
+        repl::ReadConcernLevel::kLinearizableReadConcern};
+
+    const Status kDummyStatus = {ErrorCodes::InternalError, "dummy"};
+
+    const NamespaceString kViewNss = NamespaceString("test.foo");
+
+    void setUp() override {
         ShardingTestFixture::setUp();
         configTargeter()->setFindHostReturnValue(kTestConfigShardHost);
-        std::vector<std::tuple<ShardId, HostAndPort>> shardInfos;
-        shardInfos.push_back(std::make_tuple(shard1, hostAndPort1));
-        shardInfos.push_back(std::make_tuple(shard2, hostAndPort2));
 
-        ShardingTestFixture::addRemoteShards(shardInfos);
+        ShardingTestFixture::addRemoteShards({std::make_tuple(shard1, hostAndPort1),
+                                              std::make_tuple(shard2, hostAndPort2),
+                                              std::make_tuple(shard3, hostAndPort3)});
 
         repl::ReadConcernArgs::get(operationContext()) =
             repl::ReadConcernArgs(repl::ReadConcernLevel::kSnapshotReadConcern);
@@ -75,14 +92,78 @@ protected:
         logicalClock->setClusterTimeFromTrustedSource(kInMemoryLogicalTime);
         LogicalClock::set(getServiceContext(), std::move(logicalClock));
     }
+
+    /**
+     * Verifies "abortTransaction" is sent to each expected HostAndPort with the given lsid and
+     * txnNumber. The aborts may come in any order.
+     */
+    void expectAbortTransactions(std::set<HostAndPort> expectedHostAndPorts,
+                                 LogicalSessionId lsid,
+                                 TxnNumber txnNum,
+                                 BSONObj abortResponse = BSON("ok" << 1)) {
+        std::set<HostAndPort> seenHostAndPorts;
+        int numExpectedAborts = static_cast<int>(expectedHostAndPorts.size());
+        for (int i = 0; i < numExpectedAborts; i++) {
+            onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
+                seenHostAndPorts.insert(request.target);
+
+                ASSERT_EQ(NamespaceString::kAdminDb, request.dbname);
+
+                auto cmdName = request.cmdObj.firstElement().fieldNameStringData();
+                ASSERT_EQ(cmdName, "abortTransaction");
+
+                auto osi = OperationSessionInfoFromClient::parse("expectAbortTransaction"_sd,
+                                                                 request.cmdObj);
+
+                ASSERT(osi.getSessionId());
+                ASSERT_EQ(lsid.getId(), osi.getSessionId()->getId());
+
+                ASSERT(osi.getTxnNumber());
+                ASSERT_EQ(txnNum, *osi.getTxnNumber());
+
+                ASSERT(osi.getAutocommit());
+                ASSERT_FALSE(*osi.getAutocommit());
+
+                return abortResponse;
+            });
+        }
+
+        ASSERT(expectedHostAndPorts == seenHostAndPorts);
+    }
 };
 
-TEST_F(TransactionRouterTest, StartTxnShouldBeAttachedOnlyOnFirstStatementToParticipant) {
+class TransactionRouterTestWithDefaultSession : public TransactionRouterTest {
+protected:
+    void setUp() override {
+        TransactionRouterTest::setUp();
+
+        const auto opCtx = operationContext();
+        opCtx->setLogicalSessionId(makeLogicalSessionIdForTest());
+
+        _routerOpCtxSession.emplace(opCtx);
+    }
+
+    void tearDown() override {
+        _routerOpCtxSession.reset();
+
+        TransactionRouterTest::tearDown();
+    }
+
+    const LogicalSessionId& getSessionId() {
+        return *operationContext()->getLogicalSessionId();
+    }
+
+private:
+    boost::optional<RouterOperationContextSession> _routerOpCtxSession;
+};
+
+TEST_F(TransactionRouterTestWithDefaultSession,
+       StartTxnShouldBeAttachedOnlyOnFirstStatementToParticipant) {
     TxnNumber txnNum{3};
 
-    TransactionRouter txnRouter({});
-    txnRouter.checkOut();
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum, true);
+    auto& txnRouter(*TransactionRouter::get(operationContext()));
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
     txnRouter.setDefaultAtClusterTime(operationContext());
 
     BSONObj expectedNewObj = BSON("insert"
@@ -124,12 +205,12 @@ TEST_F(TransactionRouterTest, StartTxnShouldBeAttachedOnlyOnFirstStatementToPart
     }
 }
 
-TEST_F(TransactionRouterTest, BasicStartTxnWithAtClusterTime) {
+TEST_F(TransactionRouterTestWithDefaultSession, BasicStartTxnWithAtClusterTime) {
     TxnNumber txnNum{3};
 
-    TransactionRouter txnRouter({});
-    txnRouter.checkOut();
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum, true);
+    auto& txnRouter(*TransactionRouter::get(operationContext()));
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
     txnRouter.setDefaultAtClusterTime(operationContext());
 
     BSONObj expectedNewObj = BSON("insert"
@@ -171,22 +252,23 @@ TEST_F(TransactionRouterTest, BasicStartTxnWithAtClusterTime) {
     }
 }
 
-TEST_F(TransactionRouterTest, CannotContiueTxnWithoutStarting) {
+TEST_F(TransactionRouterTestWithDefaultSession, CannotContiueTxnWithoutStarting) {
     TxnNumber txnNum{3};
 
-    TransactionRouter txnRouter({});
-    txnRouter.checkOut();
-    ASSERT_THROWS_CODE(txnRouter.beginOrContinueTxn(operationContext(), txnNum, false),
-                       AssertionException,
-                       ErrorCodes::NoSuchTransaction);
+    auto& txnRouter(*TransactionRouter::get(operationContext()));
+    ASSERT_THROWS_CODE(
+        txnRouter.beginOrContinueTxn(
+            operationContext(), txnNum, TransactionRouter::TransactionActions::kContinue),
+        AssertionException,
+        ErrorCodes::NoSuchTransaction);
 }
 
-TEST_F(TransactionRouterTest, NewParticipantMustAttachTxnAndReadConcern) {
+TEST_F(TransactionRouterTestWithDefaultSession, NewParticipantMustAttachTxnAndReadConcern) {
     TxnNumber txnNum{3};
 
-    TransactionRouter txnRouter({});
-    txnRouter.checkOut();
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum, true);
+    auto& txnRouter(*TransactionRouter::get(operationContext()));
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
     txnRouter.setDefaultAtClusterTime(operationContext());
 
     BSONObj expectedNewObj = BSON("insert"
@@ -262,12 +344,12 @@ TEST_F(TransactionRouterTest, NewParticipantMustAttachTxnAndReadConcern) {
     }
 }
 
-TEST_F(TransactionRouterTest, StartingNewTxnShouldClearState) {
+TEST_F(TransactionRouterTestWithDefaultSession, StartingNewTxnShouldClearState) {
     TxnNumber txnNum{3};
 
-    TransactionRouter txnRouter({});
-    txnRouter.checkOut();
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum, true);
+    auto& txnRouter(*TransactionRouter::get(operationContext()));
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
     txnRouter.setDefaultAtClusterTime(operationContext());
 
     {
@@ -293,7 +375,8 @@ TEST_F(TransactionRouterTest, StartingNewTxnShouldClearState) {
     }
 
     TxnNumber txnNum2{5};
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum2, true);
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum2, TransactionRouter::TransactionActions::kStart);
     txnRouter.setDefaultAtClusterTime(operationContext());
 
     BSONObj expectedNewObj = BSON("insert"
@@ -320,21 +403,20 @@ TEST_F(TransactionRouterTest, StartingNewTxnShouldClearState) {
     }
 }
 
-TEST_F(TransactionRouterTest, FirstParticipantIsCoordinator) {
+TEST_F(TransactionRouterTestWithDefaultSession, FirstParticipantIsCoordinator) {
     TxnNumber txnNum{3};
 
-    TransactionRouter txnRouter({});
-    txnRouter.checkOut();
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum, true);
+    auto& txnRouter(*TransactionRouter::get(operationContext()));
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
     txnRouter.setDefaultAtClusterTime(operationContext());
 
     ASSERT_FALSE(txnRouter.getCoordinatorId());
 
-
     {
         txnRouter.attachTxnFieldsIfNeeded(shard1, {});
         auto& participant = *txnRouter.getParticipant(shard1);
-        ASSERT(participant.isCoordinator());
+        ASSERT(participant.isCoordinator);
         ASSERT(txnRouter.getCoordinatorId());
         ASSERT_EQ(*txnRouter.getCoordinatorId(), shard1);
     }
@@ -342,13 +424,14 @@ TEST_F(TransactionRouterTest, FirstParticipantIsCoordinator) {
     {
         txnRouter.attachTxnFieldsIfNeeded(shard2, {});
         auto& participant = *txnRouter.getParticipant(shard2);
-        ASSERT_FALSE(participant.isCoordinator());
+        ASSERT(!participant.isCoordinator);
         ASSERT(txnRouter.getCoordinatorId());
         ASSERT_EQ(*txnRouter.getCoordinatorId(), shard1);
     }
 
     TxnNumber txnNum2{5};
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum2, true);
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum2, TransactionRouter::TransactionActions::kStart);
     txnRouter.setDefaultAtClusterTime(operationContext());
 
     ASSERT_FALSE(txnRouter.getCoordinatorId());
@@ -356,18 +439,18 @@ TEST_F(TransactionRouterTest, FirstParticipantIsCoordinator) {
     {
         txnRouter.attachTxnFieldsIfNeeded(shard2, {});
         auto& participant = *txnRouter.getParticipant(shard2);
-        ASSERT(participant.isCoordinator());
+        ASSERT(participant.isCoordinator);
         ASSERT(txnRouter.getCoordinatorId());
         ASSERT_EQ(*txnRouter.getCoordinatorId(), shard2);
     }
 }
 
-TEST_F(TransactionRouterTest, DoesNotAttachTxnNumIfAlreadyThere) {
+TEST_F(TransactionRouterTestWithDefaultSession, DoesNotAttachTxnNumIfAlreadyThere) {
     TxnNumber txnNum{3};
 
-    TransactionRouter txnRouter({});
-    txnRouter.checkOut();
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum, true);
+    auto& txnRouter(*TransactionRouter::get(operationContext()));
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
     txnRouter.setDefaultAtClusterTime(operationContext());
 
     BSONObj expectedNewObj = BSON("insert"
@@ -394,12 +477,14 @@ TEST_F(TransactionRouterTest, DoesNotAttachTxnNumIfAlreadyThere) {
     ASSERT_BSONOBJ_EQ(expectedNewObj, newCmd);
 }
 
-DEATH_TEST_F(TransactionRouterTest, CrashesIfCmdHasDifferentTxnNumber, "invariant") {
+DEATH_TEST_F(TransactionRouterTestWithDefaultSession,
+             CrashesIfCmdHasDifferentTxnNumber,
+             "invariant") {
     TxnNumber txnNum{3};
 
-    TransactionRouter txnRouter({});
-    txnRouter.checkOut();
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum, true);
+    auto& txnRouter(*TransactionRouter::get(operationContext()));
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
     txnRouter.setDefaultAtClusterTime(operationContext());
 
     txnRouter.attachTxnFieldsIfNeeded(shard1,
@@ -409,12 +494,12 @@ DEATH_TEST_F(TransactionRouterTest, CrashesIfCmdHasDifferentTxnNumber, "invarian
                                            << TxnNumber(10)));
 }
 
-TEST_F(TransactionRouterTest, AttachTxnValidatesReadConcernIfAlreadyOnCmd) {
+TEST_F(TransactionRouterTestWithDefaultSession, AttachTxnValidatesReadConcernIfAlreadyOnCmd) {
     TxnNumber txnNum{3};
 
-    TransactionRouter txnRouter({});
-    txnRouter.checkOut();
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum, true);
+    auto& txnRouter(*TransactionRouter::get(operationContext()));
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
     txnRouter.setDefaultAtClusterTime(operationContext());
 
     {
@@ -443,36 +528,33 @@ TEST_F(TransactionRouterTest, AttachTxnValidatesReadConcernIfAlreadyOnCmd) {
     }
 }
 
-TEST_F(TransactionRouterTest, CannotSpecifyReadConcernAfterFirstStatement) {
+TEST_F(TransactionRouterTestWithDefaultSession, CannotSpecifyReadConcernAfterFirstStatement) {
     TxnNumber txnNum{3};
 
-    TransactionRouter txnRouter({});
-    txnRouter.checkOut();
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum, true /* startTransaction */);
+    auto& txnRouter(*TransactionRouter::get(operationContext()));
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
     txnRouter.setDefaultAtClusterTime(operationContext());
 
     ASSERT_THROWS_CODE(
-        txnRouter.beginOrContinueTxn(operationContext(), txnNum, false /* startTransaction */),
+        txnRouter.beginOrContinueTxn(
+            operationContext(), txnNum, TransactionRouter::TransactionActions::kContinue),
         DBException,
         ErrorCodes::InvalidOptions);
 }
 
-TEST_F(TransactionRouterTest, UpconvertToSnapshotIfNoReadConcernLevelGiven) {
+TEST_F(TransactionRouterTestWithDefaultSession, PassesThroughNoReadConcernToParticipants) {
     repl::ReadConcernArgs::get(operationContext()) = repl::ReadConcernArgs();
 
     TxnNumber txnNum{3};
-    TransactionRouter txnRouter({});
-    txnRouter.checkOut();
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum, true /* startTransaction */);
+
+    auto& txnRouter(*TransactionRouter::get(operationContext()));
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
     txnRouter.setDefaultAtClusterTime(operationContext());
 
     BSONObj expectedNewObj = BSON("insert"
                                   << "test"
-                                  << "readConcern"
-                                  << BSON("level"
-                                          << "snapshot"
-                                          << "atClusterTime"
-                                          << kInMemoryLogicalTime.asTimestamp())
                                   << "startTransaction"
                                   << true
                                   << "coordinator"
@@ -488,24 +570,23 @@ TEST_F(TransactionRouterTest, UpconvertToSnapshotIfNoReadConcernLevelGiven) {
     ASSERT_BSONOBJ_EQ(expectedNewObj, newCmd);
 }
 
-TEST_F(TransactionRouterTest, UpconvertToSnapshotIfNoReadConcernLevelButHasAfterClusterTime) {
+TEST_F(TransactionRouterTestWithDefaultSession,
+       PassesThroughNoReadConcernLevelToParticipantsWithAfterClusterTime) {
     LogicalTime kAfterClusterTime(Timestamp(10, 1));
     repl::ReadConcernArgs::get(operationContext()) =
         repl::ReadConcernArgs(kAfterClusterTime, boost::none);
 
     TxnNumber txnNum{3};
-    TransactionRouter txnRouter({});
-    txnRouter.checkOut();
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum, true /* startTransaction */);
+
+    auto& txnRouter(*TransactionRouter::get(operationContext()));
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
     txnRouter.setDefaultAtClusterTime(operationContext());
 
     BSONObj expectedNewObj = BSON("insert"
                                   << "test"
                                   << "readConcern"
-                                  << BSON("level"
-                                          << "snapshot"
-                                          << "atClusterTime"
-                                          << kAfterClusterTime.asTimestamp())
+                                  << BSON("afterClusterTime" << kAfterClusterTime.asTimestamp())
                                   << "startTransaction"
                                   << true
                                   << "coordinator"
@@ -521,86 +602,59 @@ TEST_F(TransactionRouterTest, UpconvertToSnapshotIfNoReadConcernLevelButHasAfter
     ASSERT_BSONOBJ_EQ(expectedNewObj, newCmd);
 }
 
-TEST_F(TransactionRouterTest, CannotUpconvertIfLevelOtherThanSnapshotOrMajorityWasGiven) {
-    auto readConcernLevels = {repl::ReadConcernLevel::kLocalReadConcern,
-                              repl::ReadConcernLevel::kLinearizableReadConcern,
-                              repl::ReadConcernLevel::kAvailableReadConcern};
-
-    for (auto readConcernLevel : readConcernLevels) {
+TEST_F(TransactionRouterTestWithDefaultSession, RejectUnsupportedReadConcernLevels) {
+    for (auto readConcernLevel : unsupportedRCLevels) {
         repl::ReadConcernArgs::get(operationContext()) = repl::ReadConcernArgs(readConcernLevel);
 
         TxnNumber txnNum{3};
-        TransactionRouter txnRouter({});
-        txnRouter.checkOut();
+        auto& txnRouter(*TransactionRouter::get(operationContext()));
         ASSERT_THROWS_CODE(
-            txnRouter.beginOrContinueTxn(operationContext(), txnNum, true /* startTransaction */),
+            txnRouter.beginOrContinueTxn(
+                operationContext(), txnNum, TransactionRouter::TransactionActions::kStart),
             DBException,
             ErrorCodes::InvalidOptions);
     }
 }
 
-TEST_F(TransactionRouterTest,
-       CannotUpconvertIfLevelOtherThanSnapshotOrMajorityWasGivenWithAfterClusterTime) {
-    auto readConcernLevels = {repl::ReadConcernLevel::kLocalReadConcern,
-                              repl::ReadConcernLevel::kLinearizableReadConcern,
-                              repl::ReadConcernLevel::kAvailableReadConcern};
-
-    for (auto readConcernLevel : readConcernLevels) {
+TEST_F(TransactionRouterTestWithDefaultSession, RejectUnsupportedLevelsWithAfterClusterTime) {
+    for (auto readConcernLevel : unsupportedRCLevels) {
         repl::ReadConcernArgs::get(operationContext()) =
             repl::ReadConcernArgs(LogicalTime(Timestamp(10, 1)), readConcernLevel);
 
         TxnNumber txnNum{3};
-        TransactionRouter txnRouter({});
-        txnRouter.checkOut();
+        auto& txnRouter(*TransactionRouter::get(operationContext()));
         ASSERT_THROWS_CODE(
-            txnRouter.beginOrContinueTxn(operationContext(), txnNum, true /* startTransaction */),
+            txnRouter.beginOrContinueTxn(
+                operationContext(), txnNum, TransactionRouter::TransactionActions::kStart),
             DBException,
             ErrorCodes::InvalidOptions);
     }
 }
 
-TEST_F(TransactionRouterTest, CannotUpconvertWithAfterOpTime) {
-    auto readConcernLevels = {repl::ReadConcernLevel::kLocalReadConcern,
-                              repl::ReadConcernLevel::kLinearizableReadConcern,
-                              repl::ReadConcernLevel::kAvailableReadConcern};
-
-    for (auto readConcernLevel : readConcernLevels) {
+TEST_F(TransactionRouterTestWithDefaultSession, RejectUnsupportedLevelsWithAfterOpTime) {
+    for (auto readConcernLevel : unsupportedRCLevels) {
         repl::ReadConcernArgs::get(operationContext()) =
             repl::ReadConcernArgs(repl::OpTime(Timestamp(10, 1), 2), readConcernLevel);
 
         TxnNumber txnNum{3};
-        TransactionRouter txnRouter({});
-        txnRouter.checkOut();
+        auto& txnRouter(*TransactionRouter::get(operationContext()));
         ASSERT_THROWS_CODE(
-            txnRouter.beginOrContinueTxn(operationContext(), txnNum, true /* startTransaction */),
-            DBException,
-            ErrorCodes::InvalidOptions);
-    }
-
-    repl::ReadConcernArgs::get(operationContext()) =
-        repl::ReadConcernArgs(repl::OpTime(Timestamp(10, 1), 2), boost::none);
-
-    {
-
-        TxnNumber txnNum{3};
-        TransactionRouter txnRouter({});
-        txnRouter.checkOut();
-        ASSERT_THROWS_CODE(
-            txnRouter.beginOrContinueTxn(operationContext(), txnNum, true /* startTransaction */),
+            txnRouter.beginOrContinueTxn(
+                operationContext(), txnNum, TransactionRouter::TransactionActions::kStart),
             DBException,
             ErrorCodes::InvalidOptions);
     }
 }
 
-TEST_F(TransactionRouterTest, CannotCommitWithoutParticipants) {
+TEST_F(TransactionRouterTestWithDefaultSession, CannotCommitWithoutParticipants) {
     TxnNumber txnNum{3};
 
-    TransactionRouter txnRouter({});
-    txnRouter.checkOut();
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum, true);
+    auto& txnRouter(*TransactionRouter::get(operationContext()));
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
     txnRouter.setDefaultAtClusterTime(operationContext());
 
-    ASSERT_THROWS(txnRouter.commitTransaction(operationContext()), AssertionException);
+    ASSERT_THROWS(txnRouter.commitTransaction(operationContext(), boost::none), AssertionException);
 }
 
 void checkSessionDetails(const BSONObj& cmdObj,
@@ -625,6 +679,12 @@ void checkSessionDetails(const BSONObj& cmdObj,
     }
 }
 
+void checkWriteConcern(const BSONObj& cmdObj, const WriteConcernOptions& expectedWC) {
+    auto writeCocernElem = cmdObj["writeConcern"];
+    ASSERT_FALSE(writeCocernElem.eoo());
+    ASSERT_BSONOBJ_EQ(expectedWC.toBSON(), writeCocernElem.Obj());
+}
+
 TEST_F(TransactionRouterTest, SendCommitDirectlyForSingleParticipants) {
     LogicalSessionId lsid(makeLogicalSessionIdForTest());
     TxnNumber txnNum{3};
@@ -633,14 +693,15 @@ TEST_F(TransactionRouterTest, SendCommitDirectlyForSingleParticipants) {
     opCtx->setLogicalSessionId(lsid);
     opCtx->setTxnNumber(txnNum);
 
-    ScopedRouterSession scopedSession(opCtx);
+    RouterOperationContextSession scopedSession(opCtx);
     auto txnRouter = TransactionRouter::get(opCtx);
 
-    txnRouter->beginOrContinueTxn(opCtx, txnNum, true);
+    txnRouter->beginOrContinueTxn(opCtx, txnNum, TransactionRouter::TransactionActions::kStart);
     txnRouter->setDefaultAtClusterTime(operationContext());
     txnRouter->attachTxnFieldsIfNeeded(shard1, {});
 
-    auto future = launchAsync([&] { txnRouter->commitTransaction(operationContext()); });
+    auto future =
+        launchAsync([&] { txnRouter->commitTransaction(operationContext(), boost::none); });
 
     onCommand([&](const RemoteCommandRequest& request) {
         ASSERT_EQ(hostAndPort1, request.target);
@@ -657,7 +718,7 @@ TEST_F(TransactionRouterTest, SendCommitDirectlyForSingleParticipants) {
     future.timed_get(kFutureTimeout);
 }
 
-TEST_F(TransactionRouterTest, SendCoordinateCommitForMultipleParticipants) {
+TEST_F(TransactionRouterTest, SendCoordinateCommitForMultipleParticipantsWithRecoveryToken) {
     LogicalSessionId lsid(makeLogicalSessionIdForTest());
     TxnNumber txnNum{3};
 
@@ -665,15 +726,19 @@ TEST_F(TransactionRouterTest, SendCoordinateCommitForMultipleParticipants) {
     opCtx->setLogicalSessionId(lsid);
     opCtx->setTxnNumber(txnNum);
 
-    ScopedRouterSession scopedSession(opCtx);
+    RouterOperationContextSession scopedSession(opCtx);
     auto txnRouter = TransactionRouter::get(opCtx);
 
-    txnRouter->beginOrContinueTxn(opCtx, txnNum, true);
+    txnRouter->beginOrContinueTxn(opCtx, txnNum, TransactionRouter::TransactionActions::kStart);
     txnRouter->setDefaultAtClusterTime(operationContext());
     txnRouter->attachTxnFieldsIfNeeded(shard1, {});
     txnRouter->attachTxnFieldsIfNeeded(shard2, {});
 
-    auto future = launchAsync([&] { txnRouter->commitTransaction(operationContext()); });
+    txnRouter->beginOrContinueTxn(opCtx, txnNum, TransactionRouter::TransactionActions::kCommit);
+
+    TxnRecoveryToken recoveryToken(shard1);
+    auto future =
+        launchAsync([&] { txnRouter->commitTransaction(operationContext(), recoveryToken); });
 
     onCommand([&](const RemoteCommandRequest& request) {
         ASSERT_EQ(hostAndPort1, request.target);
@@ -682,11 +747,15 @@ TEST_F(TransactionRouterTest, SendCoordinateCommitForMultipleParticipants) {
         auto cmdName = request.cmdObj.firstElement().fieldNameStringData();
         ASSERT_EQ(cmdName, "coordinateCommitTransaction");
 
+        std::set<std::string> expectedParticipants = {shard1.toString(), shard2.toString()};
         auto participantElements = request.cmdObj["participants"].Array();
-        ASSERT_EQ(2u, participantElements.size());
+        ASSERT_EQ(expectedParticipants.size(), participantElements.size());
 
-        ASSERT_BSONOBJ_EQ(BSON("shardId" << shard1.toString()), participantElements.front().Obj());
-        ASSERT_BSONOBJ_EQ(BSON("shardId" << shard2.toString()), participantElements.back().Obj());
+        for (const auto& element : participantElements) {
+            auto shardId = element["shardId"].valuestr();
+            ASSERT_EQ(1ull, expectedParticipants.count(shardId));
+            expectedParticipants.erase(shardId);
+        }
 
         checkSessionDetails(request.cmdObj, lsid, txnNum, true);
 
@@ -696,12 +765,80 @@ TEST_F(TransactionRouterTest, SendCoordinateCommitForMultipleParticipants) {
     future.timed_get(kFutureTimeout);
 }
 
-TEST_F(TransactionRouterTest, SnapshotErrorsResetAtClusterTime) {
+TEST_F(TransactionRouterTest, CommitWithRecoveryTokenWithNoParticipants) {
+    LogicalSessionId lsid(makeLogicalSessionIdForTest());
     TxnNumber txnNum{3};
 
-    TransactionRouter txnRouter({});
-    txnRouter.checkOut();
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum, true);
+    auto opCtx = operationContext();
+    opCtx->setLogicalSessionId(lsid);
+    opCtx->setTxnNumber(txnNum);
+
+    WriteConcernOptions writeConcern(10, WriteConcernOptions::SyncMode::NONE, 0);
+    opCtx->setWriteConcern(writeConcern);
+
+    RouterOperationContextSession scopedSession(opCtx);
+    auto txnRouter = TransactionRouter::get(opCtx);
+    txnRouter->beginOrContinueTxn(opCtx, txnNum, TransactionRouter::TransactionActions::kCommit);
+
+    TxnRecoveryToken recoveryToken(shard1);
+    auto future =
+        launchAsync([&] { txnRouter->commitTransaction(operationContext(), recoveryToken); });
+
+    onCommand([&](const RemoteCommandRequest& request) {
+        ASSERT_EQ(hostAndPort1, request.target);
+        ASSERT_EQ("admin", request.dbname);
+
+        auto cmdName = request.cmdObj.firstElement().fieldNameStringData();
+        ASSERT_EQ(cmdName, "coordinateCommitTransaction");
+
+        auto participantElements = request.cmdObj["participants"].Array();
+        ASSERT_TRUE(participantElements.empty());
+
+        checkSessionDetails(request.cmdObj, lsid, txnNum, true);
+        checkWriteConcern(request.cmdObj, writeConcern);
+
+        return BSON("ok" << 1);
+    });
+
+    future.timed_get(kFutureTimeout);
+}
+
+TEST_F(TransactionRouterTest, CommitWithRecoveryTokenWithUnknownShard) {
+    LogicalSessionId lsid(makeLogicalSessionIdForTest());
+    TxnNumber txnNum{3};
+
+    auto opCtx = operationContext();
+    opCtx->setLogicalSessionId(lsid);
+    opCtx->setTxnNumber(txnNum);
+
+    WriteConcernOptions writeConcern(10, WriteConcernOptions::SyncMode::NONE, 0);
+    opCtx->setWriteConcern(writeConcern);
+
+    RouterOperationContextSession scopedSession(opCtx);
+    auto txnRouter = TransactionRouter::get(opCtx);
+    txnRouter->beginOrContinueTxn(opCtx, txnNum, TransactionRouter::TransactionActions::kCommit);
+
+    TxnRecoveryToken recoveryToken(ShardId("magicShard"));
+
+    auto future =
+        launchAsync([&] { txnRouter->commitTransaction(operationContext(), recoveryToken); });
+
+    ShardType shardType;
+    shardType.setName(shard1.toString());
+    shardType.setHost(hostAndPort1.toString());
+
+    // ShardRegistry will try to perform a reload since it doesn't know about the shard.
+    expectGetShards({shardType});
+
+    ASSERT_THROWS_CODE(future.timed_get(kFutureTimeout), DBException, ErrorCodes::ShardNotFound);
+}
+
+TEST_F(TransactionRouterTestWithDefaultSession, SnapshotErrorsResetAtClusterTime) {
+    TxnNumber txnNum{3};
+
+    auto& txnRouter(*TransactionRouter::get(operationContext()));
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
     txnRouter.setDefaultAtClusterTime(operationContext());
 
     BSONObj expectedReadConcern = BSON("level"
@@ -722,7 +859,10 @@ TEST_F(TransactionRouterTest, SnapshotErrorsResetAtClusterTime) {
     LogicalClock::get(operationContext())->setClusterTimeFromTrustedSource(laterTime);
 
     // Simulate a snapshot error.
-    txnRouter.onSnapshotError();
+    ASSERT(txnRouter.canContinueOnSnapshotError());
+    auto future = launchAsync([&] { txnRouter.onSnapshotError(operationContext(), kDummyStatus); });
+    expectAbortTransactions({hostAndPort1}, getSessionId(), txnNum);
+    future.timed_get(kFutureTimeout);
 
     txnRouter.setDefaultAtClusterTime(operationContext());
 
@@ -739,12 +879,13 @@ TEST_F(TransactionRouterTest, SnapshotErrorsResetAtClusterTime) {
     }
 }
 
-TEST_F(TransactionRouterTest, CannotChangeAtClusterTimeAfterStatementThatSelectedIt) {
+TEST_F(TransactionRouterTestWithDefaultSession,
+       CannotChangeAtClusterTimeAfterStatementThatSelectedIt) {
     TxnNumber txnNum{3};
 
-    TransactionRouter txnRouter({});
-    txnRouter.checkOut();
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum, true);
+    auto& txnRouter(*TransactionRouter::get(operationContext()));
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
     txnRouter.setDefaultAtClusterTime(operationContext());
 
     BSONObj expectedReadConcern = BSON("level"
@@ -782,7 +923,8 @@ TEST_F(TransactionRouterTest, CannotChangeAtClusterTimeAfterStatementThatSelecte
     // Later statements cannot change atClusterTime.
 
     repl::ReadConcernArgs::get(operationContext()) = repl::ReadConcernArgs();
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum, false);
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kContinue);
 
     LogicalTime laterTimeNewStmt(Timestamp(1000, 1));
     ASSERT_GT(laterTimeNewStmt, laterTimeSameStmt);
@@ -798,12 +940,12 @@ TEST_F(TransactionRouterTest, CannotChangeAtClusterTimeAfterStatementThatSelecte
     }
 }
 
-TEST_F(TransactionRouterTest, SnapshotErrorsClearsAllParticipants) {
+TEST_F(TransactionRouterTestWithDefaultSession, SnapshotErrorsClearsAllParticipants) {
     TxnNumber txnNum{3};
 
-    TransactionRouter txnRouter({});
-    txnRouter.checkOut();
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum, true);
+    auto& txnRouter(*TransactionRouter::get(operationContext()));
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
     txnRouter.setDefaultAtClusterTime(operationContext());
 
     // Successfully start a transaction on two shards, selecting one as the coordinator.
@@ -817,7 +959,10 @@ TEST_F(TransactionRouterTest, SnapshotErrorsClearsAllParticipants) {
     // Simulate a snapshot error and an internal retry that only re-targets one of the original two
     // shards.
 
-    txnRouter.onSnapshotError();
+    ASSERT(txnRouter.canContinueOnSnapshotError());
+    auto future = launchAsync([&] { txnRouter.onSnapshotError(operationContext(), kDummyStatus); });
+    expectAbortTransactions({hostAndPort1, hostAndPort2}, getSessionId(), txnNum);
+    future.timed_get(kFutureTimeout);
 
     txnRouter.setDefaultAtClusterTime(operationContext());
 
@@ -845,36 +990,34 @@ TEST_F(TransactionRouterTest, SnapshotErrorsClearsAllParticipants) {
     }
 }
 
-TEST_F(TransactionRouterTest, OnSnapshotErrorThrowsAfterFirstCommand) {
+TEST_F(TransactionRouterTestWithDefaultSession, CannotContinueOnSnapshotErrorAfterFirstCommand) {
     TxnNumber txnNum{3};
 
-    TransactionRouter txnRouter({});
-    txnRouter.checkOut();
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum, true);
+    auto& txnRouter(*TransactionRouter::get(operationContext()));
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
     txnRouter.setDefaultAtClusterTime(operationContext());
 
-    // Should not throw.
-    txnRouter.onSnapshotError();
+    ASSERT(txnRouter.canContinueOnSnapshotError());
 
     txnRouter.setDefaultAtClusterTime(operationContext());
 
     repl::ReadConcernArgs::get(operationContext()) = repl::ReadConcernArgs();
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum, false);
-    ASSERT_THROWS_CODE(
-        txnRouter.onSnapshotError(), AssertionException, ErrorCodes::NoSuchTransaction);
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kContinue);
+    ASSERT_FALSE(txnRouter.canContinueOnSnapshotError());
 
     repl::ReadConcernArgs::get(operationContext()) = repl::ReadConcernArgs();
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum, false);
-    ASSERT_THROWS_CODE(
-        txnRouter.onSnapshotError(), AssertionException, ErrorCodes::NoSuchTransaction);
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kContinue);
+    ASSERT_FALSE(txnRouter.canContinueOnSnapshotError());
 }
 
-TEST_F(TransactionRouterTest, ParticipantsRememberStmtIdCreatedAt) {
-    TransactionRouter txnRouter({});
-    txnRouter.checkOut();
-
+TEST_F(TransactionRouterTestWithDefaultSession, ParticipantsRememberStmtIdCreatedAt) {
     TxnNumber txnNum{3};
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum, true);
+    auto& txnRouter(*TransactionRouter::get(operationContext()));
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
     txnRouter.setDefaultAtClusterTime(operationContext());
 
     // Transaction 1 contacts shard1 and shard2 during the first command, then shard3 in the second
@@ -884,18 +1027,19 @@ TEST_F(TransactionRouterTest, ParticipantsRememberStmtIdCreatedAt) {
     txnRouter.attachTxnFieldsIfNeeded(shard1, {});
     txnRouter.attachTxnFieldsIfNeeded(shard2, {});
 
-    ASSERT_EQ(txnRouter.getParticipant(shard1)->getStmtIdCreatedAt(), initialStmtId);
-    ASSERT_EQ(txnRouter.getParticipant(shard2)->getStmtIdCreatedAt(), initialStmtId);
+    ASSERT_EQ(txnRouter.getParticipant(shard1)->stmtIdCreatedAt, initialStmtId);
+    ASSERT_EQ(txnRouter.getParticipant(shard2)->stmtIdCreatedAt, initialStmtId);
 
     repl::ReadConcernArgs::get(operationContext()) = repl::ReadConcernArgs();
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum, false);
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kContinue);
 
     ShardId shard3("shard3");
     txnRouter.attachTxnFieldsIfNeeded(shard3, {});
-    ASSERT_EQ(txnRouter.getParticipant(shard3)->getStmtIdCreatedAt(), initialStmtId + 1);
+    ASSERT_EQ(txnRouter.getParticipant(shard3)->stmtIdCreatedAt, initialStmtId + 1);
 
-    ASSERT_EQ(txnRouter.getParticipant(shard1)->getStmtIdCreatedAt(), initialStmtId);
-    ASSERT_EQ(txnRouter.getParticipant(shard2)->getStmtIdCreatedAt(), initialStmtId);
+    ASSERT_EQ(txnRouter.getParticipant(shard1)->stmtIdCreatedAt, initialStmtId);
+    ASSERT_EQ(txnRouter.getParticipant(shard2)->stmtIdCreatedAt, initialStmtId);
 
     // Transaction 2 contacts shard3 and shard2 during the first command, then shard1 in the second
     // command.
@@ -903,28 +1047,31 @@ TEST_F(TransactionRouterTest, ParticipantsRememberStmtIdCreatedAt) {
     repl::ReadConcernArgs::get(operationContext()) =
         repl::ReadConcernArgs(repl::ReadConcernLevel::kSnapshotReadConcern);
     TxnNumber txnNum2{5};
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum2, true);
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum2, TransactionRouter::TransactionActions::kStart);
     txnRouter.setDefaultAtClusterTime(operationContext());
 
     txnRouter.attachTxnFieldsIfNeeded(shard3, {});
     txnRouter.attachTxnFieldsIfNeeded(shard2, {});
 
-    ASSERT_EQ(txnRouter.getParticipant(shard3)->getStmtIdCreatedAt(), initialStmtId);
-    ASSERT_EQ(txnRouter.getParticipant(shard2)->getStmtIdCreatedAt(), initialStmtId);
+    ASSERT_EQ(txnRouter.getParticipant(shard3)->stmtIdCreatedAt, initialStmtId);
+    ASSERT_EQ(txnRouter.getParticipant(shard2)->stmtIdCreatedAt, initialStmtId);
 
     repl::ReadConcernArgs::get(operationContext()) = repl::ReadConcernArgs();
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum2, false);
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum2, TransactionRouter::TransactionActions::kContinue);
 
     txnRouter.attachTxnFieldsIfNeeded(shard1, {});
-    ASSERT_EQ(txnRouter.getParticipant(shard1)->getStmtIdCreatedAt(), initialStmtId + 1);
+    ASSERT_EQ(txnRouter.getParticipant(shard1)->stmtIdCreatedAt, initialStmtId + 1);
 }
 
-TEST_F(TransactionRouterTest, AllParticipantsAndCoordinatorClearedOnStaleErrorOnFirstCommand) {
+TEST_F(TransactionRouterTestWithDefaultSession,
+       AllParticipantsAndCoordinatorClearedOnStaleErrorOnFirstCommand) {
     TxnNumber txnNum{3};
 
-    TransactionRouter txnRouter({});
-    txnRouter.checkOut();
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum, true);
+    auto& txnRouter(*TransactionRouter::get(operationContext()));
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
     txnRouter.setDefaultAtClusterTime(operationContext());
 
     // Start a transaction on two shards, selecting one as the coordinator, but simulate a
@@ -938,7 +1085,11 @@ TEST_F(TransactionRouterTest, AllParticipantsAndCoordinatorClearedOnStaleErrorOn
 
     // Simulate stale error and internal retry that only re-targets one of the original shards.
 
-    txnRouter.onStaleShardOrDbError("find");
+    ASSERT(txnRouter.canContinueOnStaleShardOrDbError("find"));
+    auto future = launchAsync(
+        [&] { txnRouter.onStaleShardOrDbError(operationContext(), "find", kDummyStatus); });
+    expectAbortTransactions({hostAndPort1, hostAndPort2}, getSessionId(), txnNum);
+    future.timed_get(kFutureTimeout);
 
     ASSERT_FALSE(txnRouter.getCoordinatorId());
 
@@ -960,12 +1111,12 @@ TEST_F(TransactionRouterTest, AllParticipantsAndCoordinatorClearedOnStaleErrorOn
     }
 }
 
-TEST_F(TransactionRouterTest, OnlyNewlyCreatedParticipantsClearedOnStaleError) {
+TEST_F(TransactionRouterTestWithDefaultSession, OnlyNewlyCreatedParticipantsClearedOnStaleError) {
     TxnNumber txnNum{3};
 
-    TransactionRouter txnRouter({});
-    txnRouter.checkOut();
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum, true);
+    auto& txnRouter(*TransactionRouter::get(operationContext()));
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
     txnRouter.setDefaultAtClusterTime(operationContext());
 
     // First statement successfully targets one shard, selecing it as the coordinator.
@@ -979,12 +1130,17 @@ TEST_F(TransactionRouterTest, OnlyNewlyCreatedParticipantsClearedOnStaleError) {
     // least one of them.
 
     repl::ReadConcernArgs::get(operationContext()) = repl::ReadConcernArgs();
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum, false);
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kContinue);
 
     txnRouter.attachTxnFieldsIfNeeded(shard2, {});
     txnRouter.attachTxnFieldsIfNeeded(shard3, {});
 
-    txnRouter.onStaleShardOrDbError("find");
+    ASSERT(txnRouter.canContinueOnStaleShardOrDbError("find"));
+    auto future = launchAsync(
+        [&] { txnRouter.onStaleShardOrDbError(operationContext(), "find", kDummyStatus); });
+    expectAbortTransactions({hostAndPort2, hostAndPort3}, getSessionId(), txnNum);
+    future.timed_get(kFutureTimeout);
 
     // Shards 2 and 3 must start a transaction, but shard 1 must not.
     ASSERT_FALSE(txnRouter.attachTxnFieldsIfNeeded(shard1, {})["startTransaction"].trueValue());
@@ -992,12 +1148,13 @@ TEST_F(TransactionRouterTest, OnlyNewlyCreatedParticipantsClearedOnStaleError) {
     ASSERT_TRUE(txnRouter.attachTxnFieldsIfNeeded(shard3, {})["startTransaction"].trueValue());
 }
 
-TEST_F(TransactionRouterTest, RetriesCannotPickNewAtClusterTimeOnStatementAfterSelected) {
+TEST_F(TransactionRouterTestWithDefaultSession,
+       RetriesCannotPickNewAtClusterTimeOnStatementAfterSelected) {
     TxnNumber txnNum{3};
 
-    TransactionRouter txnRouter({});
-    txnRouter.checkOut();
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum, true);
+    auto& txnRouter(*TransactionRouter::get(operationContext()));
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
 
     // First statement selects an atClusterTime.
 
@@ -1007,13 +1164,15 @@ TEST_F(TransactionRouterTest, RetriesCannotPickNewAtClusterTimeOnStatementAfterS
     // change the atClusterTime.
 
     repl::ReadConcernArgs::get(operationContext()) = repl::ReadConcernArgs();
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum, false);
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kContinue);
 
     LogicalTime laterTime(Timestamp(1000, 1));
     ASSERT_GT(laterTime, kInMemoryLogicalTime);
     LogicalClock::get(operationContext())->setClusterTimeFromTrustedSource(laterTime);
 
-    txnRouter.onStaleShardOrDbError("find");
+    ASSERT(txnRouter.canContinueOnStaleShardOrDbError("find"));
+    txnRouter.onStaleShardOrDbError(operationContext(), "find", kDummyStatus);
     txnRouter.setDefaultAtClusterTime(operationContext());
 
     BSONObj expectedReadConcern = BSON("level"
@@ -1026,7 +1185,11 @@ TEST_F(TransactionRouterTest, RetriesCannotPickNewAtClusterTimeOnStatementAfterS
                                                          << "test"));
     ASSERT_BSONOBJ_EQ(expectedReadConcern, newCmd["readConcern"].Obj());
 
-    txnRouter.onViewResolutionError();
+    auto future =
+        launchAsync([&] { txnRouter.onViewResolutionError(operationContext(), kViewNss); });
+    expectAbortTransactions({hostAndPort1}, getSessionId(), txnNum);
+    future.timed_get(kFutureTimeout);
+
     txnRouter.setDefaultAtClusterTime(operationContext());
 
     newCmd = txnRouter.attachTxnFieldsIfNeeded(shard1,
@@ -1035,40 +1198,37 @@ TEST_F(TransactionRouterTest, RetriesCannotPickNewAtClusterTimeOnStatementAfterS
     ASSERT_BSONOBJ_EQ(expectedReadConcern, newCmd["readConcern"].Obj());
 }
 
-TEST_F(TransactionRouterTest, WritesCanOnlyBeRetriedIfFirstOverallCommand) {
+TEST_F(TransactionRouterTestWithDefaultSession, WritesCanOnlyBeRetriedIfFirstOverallCommand) {
     auto writeCmds = {"insert", "update", "delete", "findAndModify", "findandmodify"};
     auto otherCmds = {"find", "distinct", "aggregate", "killCursors", "getMore"};
 
     TxnNumber txnNum{3};
 
-    TransactionRouter txnRouter({});
-    txnRouter.checkOut();
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum, true);
+    auto& txnRouter(*TransactionRouter::get(operationContext()));
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
     txnRouter.setDefaultAtClusterTime(operationContext());
 
-    txnRouter.attachTxnFieldsIfNeeded(shard1, {});
-
     for (auto writeCmd : writeCmds) {
-        txnRouter.onStaleShardOrDbError(writeCmd);  // Should not throw.
+        ASSERT(txnRouter.canContinueOnStaleShardOrDbError(writeCmd));
     }
 
     for (auto cmd : otherCmds) {
-        txnRouter.onStaleShardOrDbError(cmd);  // Should not throw.
+        ASSERT(txnRouter.canContinueOnStaleShardOrDbError(cmd));
     }
 
     // Advance to the next command.
 
     repl::ReadConcernArgs::get(operationContext()) = repl::ReadConcernArgs();
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum, false);
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kContinue);
 
     for (auto writeCmd : writeCmds) {
-        ASSERT_THROWS_CODE(txnRouter.onStaleShardOrDbError(writeCmd),
-                           AssertionException,
-                           ErrorCodes::NoSuchTransaction);
+        ASSERT_FALSE(txnRouter.canContinueOnStaleShardOrDbError(writeCmd));
     }
 
     for (auto cmd : otherCmds) {
-        txnRouter.onStaleShardOrDbError(cmd);  // Should not throw.
+        ASSERT(txnRouter.canContinueOnStaleShardOrDbError(cmd));
     }
 }
 
@@ -1079,10 +1239,10 @@ TEST_F(TransactionRouterTest, AbortThrowsIfNoParticipants) {
     auto opCtx = operationContext();
     opCtx->setLogicalSessionId(lsid);
     opCtx->setTxnNumber(txnNum);
-    ScopedRouterSession scopedSession(opCtx);
 
+    RouterOperationContextSession scopedSession(opCtx);
     auto txnRouter = TransactionRouter::get(opCtx);
-    txnRouter->beginOrContinueTxn(opCtx, txnNum, true);
+    txnRouter->beginOrContinueTxn(opCtx, txnNum, TransactionRouter::TransactionActions::kStart);
     txnRouter->setDefaultAtClusterTime(operationContext());
 
     ASSERT_THROWS_CODE(
@@ -1097,10 +1257,10 @@ TEST_F(TransactionRouterTest, AbortForSingleParticipant) {
     opCtx->setLogicalSessionId(lsid);
     opCtx->setTxnNumber(txnNum);
 
-    ScopedRouterSession scopedSession(opCtx);
+    RouterOperationContextSession scopedSession(opCtx);
     auto txnRouter = TransactionRouter::get(opCtx);
 
-    txnRouter->beginOrContinueTxn(opCtx, txnNum, true);
+    txnRouter->beginOrContinueTxn(opCtx, txnNum, TransactionRouter::TransactionActions::kStart);
     txnRouter->setDefaultAtClusterTime(operationContext());
     txnRouter->attachTxnFieldsIfNeeded(shard1, {});
 
@@ -1130,50 +1290,45 @@ TEST_F(TransactionRouterTest, AbortForMultipleParticipants) {
     opCtx->setLogicalSessionId(lsid);
     opCtx->setTxnNumber(txnNum);
 
-    ScopedRouterSession scopedSession(opCtx);
+    RouterOperationContextSession scopedSession(opCtx);
     auto txnRouter = TransactionRouter::get(opCtx);
 
-    txnRouter->beginOrContinueTxn(opCtx, txnNum, true);
+    txnRouter->beginOrContinueTxn(opCtx, txnNum, TransactionRouter::TransactionActions::kStart);
     txnRouter->setDefaultAtClusterTime(operationContext());
     txnRouter->attachTxnFieldsIfNeeded(shard1, {});
     txnRouter->attachTxnFieldsIfNeeded(shard2, {});
 
     auto future = launchAsync([&] { return txnRouter->abortTransaction(operationContext()); });
 
-    onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
-        ASSERT_EQ(hostAndPort1, request.target);
-        ASSERT_EQ("admin", request.dbname);
+    std::map<HostAndPort, boost::optional<bool>> targets = {{hostAndPort1, true},
+                                                            {hostAndPort2, {}}};
 
-        auto cmdName = request.cmdObj.firstElement().fieldNameStringData();
-        ASSERT_EQ(cmdName, "abortTransaction");
+    while (!targets.empty()) {
+        onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
+            auto target = targets.find(request.target);
+            ASSERT(target != targets.end());
+            ASSERT_EQ("admin", request.dbname);
 
-        checkSessionDetails(request.cmdObj, lsid, txnNum, true);
+            auto cmdName = request.cmdObj.firstElement().fieldNameStringData();
+            ASSERT_EQ(cmdName, "abortTransaction");
 
-        return BSON("ok" << 1);
-    });
+            checkSessionDetails(request.cmdObj, lsid, txnNum, target->second);
 
-    onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
-        ASSERT_EQ(hostAndPort2, request.target);
-        ASSERT_EQ("admin", request.dbname);
-
-        auto cmdName = request.cmdObj.firstElement().fieldNameStringData();
-        ASSERT_EQ(cmdName, "abortTransaction");
-
-        checkSessionDetails(request.cmdObj, lsid, txnNum, boost::none);
-
-        return BSON("ok" << 1);
-    });
+            targets.erase(request.target);
+            return BSON("ok" << 1);
+        });
+    }
 
     auto response = future.timed_get(kFutureTimeout);
     ASSERT_FALSE(response.empty());
 }
 
-TEST_F(TransactionRouterTest, OnViewResolutionErrorClearsAllNewParticipants) {
+TEST_F(TransactionRouterTestWithDefaultSession, OnViewResolutionErrorClearsAllNewParticipants) {
     TxnNumber txnNum{3};
 
-    TransactionRouter txnRouter({});
-    txnRouter.checkOut();
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum, true);
+    auto& txnRouter(*TransactionRouter::get(operationContext()));
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
     txnRouter.setDefaultAtClusterTime(operationContext());
 
     // One shard is targeted by the first statement.
@@ -1186,7 +1341,10 @@ TEST_F(TransactionRouterTest, OnViewResolutionErrorClearsAllNewParticipants) {
     // Simulate a view resolution error on the first client statement that leads to a retry which
     // targets the same shard.
 
-    txnRouter.onViewResolutionError();
+    auto future =
+        launchAsync([&] { txnRouter.onViewResolutionError(operationContext(), kViewNss); });
+    expectAbortTransactions({hostAndPort1}, getSessionId(), txnNum);
+    future.timed_get(kFutureTimeout);
 
     // The only participant was the coordinator, so it should have been reset.
     ASSERT_FALSE(txnRouter.getCoordinatorId());
@@ -1198,14 +1356,17 @@ TEST_F(TransactionRouterTest, OnViewResolutionErrorClearsAllNewParticipants) {
     // Advance to a later client statement that targets a new shard.
 
     repl::ReadConcernArgs::get(operationContext()) = repl::ReadConcernArgs();
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum, false);
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kContinue);
 
     auto secondShardCmd = txnRouter.attachTxnFieldsIfNeeded(shard2, {});
     ASSERT_TRUE(secondShardCmd["startTransaction"].trueValue());
 
     // Simulate a view resolution error.
 
-    txnRouter.onViewResolutionError();
+    future = launchAsync([&] { txnRouter.onViewResolutionError(operationContext(), kViewNss); });
+    expectAbortTransactions({hostAndPort2}, getSessionId(), txnNum);
+    future.timed_get(kFutureTimeout);
 
     // Only the new participant shard was reset.
     firstShardCmd = txnRouter.attachTxnFieldsIfNeeded(shard1, {});
@@ -1220,14 +1381,15 @@ TEST_F(TransactionRouterTest, ImplicitAbortIsNoopWithNoParticipants) {
     auto opCtx = operationContext();
     opCtx->setLogicalSessionId(makeLogicalSessionIdForTest());
     opCtx->setTxnNumber(txnNum);
-    ScopedRouterSession scopedSession(opCtx);
 
+    RouterOperationContextSession scopedSession(opCtx);
     auto txnRouter = TransactionRouter::get(opCtx);
-    txnRouter->beginOrContinueTxn(opCtx, txnNum, true);
+
+    txnRouter->beginOrContinueTxn(opCtx, txnNum, TransactionRouter::TransactionActions::kStart);
     txnRouter->setDefaultAtClusterTime(operationContext());
 
     // Should not throw.
-    txnRouter->implicitlyAbortTransaction(opCtx);
+    txnRouter->implicitlyAbortTransaction(opCtx, kDummyStatus);
 }
 
 TEST_F(TransactionRouterTest, ImplicitAbortForSingleParticipant) {
@@ -1238,15 +1400,15 @@ TEST_F(TransactionRouterTest, ImplicitAbortForSingleParticipant) {
     opCtx->setLogicalSessionId(lsid);
     opCtx->setTxnNumber(txnNum);
 
-    ScopedRouterSession scopedSession(opCtx);
+    RouterOperationContextSession scopedSession(opCtx);
     auto txnRouter = TransactionRouter::get(opCtx);
 
-    txnRouter->beginOrContinueTxn(opCtx, txnNum, true);
+    txnRouter->beginOrContinueTxn(opCtx, txnNum, TransactionRouter::TransactionActions::kStart);
     txnRouter->setDefaultAtClusterTime(operationContext());
     txnRouter->attachTxnFieldsIfNeeded(shard1, {});
 
-    auto future =
-        launchAsync([&] { return txnRouter->implicitlyAbortTransaction(operationContext()); });
+    auto future = launchAsync(
+        [&] { return txnRouter->implicitlyAbortTransaction(operationContext(), kDummyStatus); });
 
     onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
         ASSERT_EQ(hostAndPort1, request.target);
@@ -1271,40 +1433,35 @@ TEST_F(TransactionRouterTest, ImplicitAbortForMultipleParticipants) {
     opCtx->setLogicalSessionId(lsid);
     opCtx->setTxnNumber(txnNum);
 
-    ScopedRouterSession scopedSession(opCtx);
+    RouterOperationContextSession scopedSession(opCtx);
     auto txnRouter = TransactionRouter::get(opCtx);
 
-    txnRouter->beginOrContinueTxn(opCtx, txnNum, true);
+    txnRouter->beginOrContinueTxn(opCtx, txnNum, TransactionRouter::TransactionActions::kStart);
     txnRouter->setDefaultAtClusterTime(operationContext());
     txnRouter->attachTxnFieldsIfNeeded(shard1, {});
     txnRouter->attachTxnFieldsIfNeeded(shard2, {});
 
-    auto future =
-        launchAsync([&] { return txnRouter->implicitlyAbortTransaction(operationContext()); });
+    auto future = launchAsync(
+        [&] { return txnRouter->implicitlyAbortTransaction(operationContext(), kDummyStatus); });
 
-    onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
-        ASSERT_EQ(hostAndPort1, request.target);
-        ASSERT_EQ("admin", request.dbname);
+    std::map<HostAndPort, boost::optional<bool>> targets = {{hostAndPort1, true},
+                                                            {hostAndPort2, {}}};
 
-        auto cmdName = request.cmdObj.firstElement().fieldNameStringData();
-        ASSERT_EQ(cmdName, "abortTransaction");
+    while (!targets.empty()) {
+        onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
+            auto target = targets.find(request.target);
+            ASSERT(target != targets.end());
+            ASSERT_EQ("admin", request.dbname);
 
-        checkSessionDetails(request.cmdObj, lsid, txnNum, true);
+            auto cmdName = request.cmdObj.firstElement().fieldNameStringData();
+            ASSERT_EQ(cmdName, "abortTransaction");
 
-        return BSON("ok" << 1);
-    });
+            checkSessionDetails(request.cmdObj, lsid, txnNum, target->second);
 
-    onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
-        ASSERT_EQ(hostAndPort2, request.target);
-        ASSERT_EQ("admin", request.dbname);
-
-        auto cmdName = request.cmdObj.firstElement().fieldNameStringData();
-        ASSERT_EQ(cmdName, "abortTransaction");
-
-        checkSessionDetails(request.cmdObj, lsid, txnNum, boost::none);
-
-        return BSON("ok" << 1);
-    });
+            targets.erase(request.target);
+            return BSON("ok" << 1);
+        });
+    }
 
     future.timed_get(kFutureTimeout);
 }
@@ -1317,15 +1474,15 @@ TEST_F(TransactionRouterTest, ImplicitAbortIgnoresErrors) {
     opCtx->setLogicalSessionId(lsid);
     opCtx->setTxnNumber(txnNum);
 
-    ScopedRouterSession scopedSession(opCtx);
+    RouterOperationContextSession scopedSession(opCtx);
     auto txnRouter = TransactionRouter::get(opCtx);
 
-    txnRouter->beginOrContinueTxn(opCtx, txnNum, true);
+    txnRouter->beginOrContinueTxn(opCtx, txnNum, TransactionRouter::TransactionActions::kStart);
     txnRouter->setDefaultAtClusterTime(operationContext());
     txnRouter->attachTxnFieldsIfNeeded(shard1, {});
 
-    auto future =
-        launchAsync([&] { return txnRouter->implicitlyAbortTransaction(operationContext()); });
+    auto future = launchAsync(
+        [&] { return txnRouter->implicitlyAbortTransaction(operationContext(), kDummyStatus); });
 
     onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
         ASSERT_EQ(hostAndPort1, request.target);
@@ -1343,32 +1500,35 @@ TEST_F(TransactionRouterTest, ImplicitAbortIgnoresErrors) {
     future.timed_get(kFutureTimeout);
 }
 
-TEST_F(TransactionRouterTest, ContinuingTransactionPlacesItsReadConcernOnOpCtx) {
+TEST_F(TransactionRouterTestWithDefaultSession, ContinuingTransactionPlacesItsReadConcernOnOpCtx) {
     TxnNumber txnNum{3};
 
-    TransactionRouter txnRouter({});
-    txnRouter.checkOut();
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum, true);
+    auto& txnRouter(*TransactionRouter::get(operationContext()));
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
     txnRouter.setDefaultAtClusterTime(operationContext());
 
     repl::ReadConcernArgs::get(operationContext()) = repl::ReadConcernArgs();
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum, false);
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kContinue);
 
     ASSERT(repl::ReadConcernArgs::get(operationContext()).getLevel() ==
            repl::ReadConcernLevel::kSnapshotReadConcern);
 }
 
-TEST_F(TransactionRouterTest, SubsequentStatementCanSelectAtClusterTimeIfNotSelectedYet) {
+TEST_F(TransactionRouterTestWithDefaultSession,
+       SubsequentStatementCanSelectAtClusterTimeIfNotSelectedYet) {
     TxnNumber txnNum{3};
 
-    TransactionRouter txnRouter({});
-    txnRouter.checkOut();
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum, true);
+    auto& txnRouter(*TransactionRouter::get(operationContext()));
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
 
     // First statement does not select an atClusterTime, but does not target any participants.
 
     repl::ReadConcernArgs::get(operationContext()) = repl::ReadConcernArgs();
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum, false);
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kContinue);
 
     // Subsequent statement does select an atClusterTime and does target a participant.
     txnRouter.setDefaultAtClusterTime(operationContext());
@@ -1386,7 +1546,8 @@ TEST_F(TransactionRouterTest, SubsequentStatementCanSelectAtClusterTimeIfNotSele
     // The next statement cannot change the atClusterTime.
 
     repl::ReadConcernArgs::get(operationContext()) = repl::ReadConcernArgs();
-    txnRouter.beginOrContinueTxn(operationContext(), txnNum, false);
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kContinue);
 
     LogicalTime laterTimeSameStmt(Timestamp(100, 1));
     ASSERT_GT(laterTimeSameStmt, kInMemoryLogicalTime);
@@ -1400,169 +1561,241 @@ TEST_F(TransactionRouterTest, SubsequentStatementCanSelectAtClusterTimeIfNotSele
     ASSERT_BSONOBJ_EQ(expectedReadConcern, newCmd["readConcern"].Obj());
 }
 
-TEST_F(TransactionRouterTest, MajorityReadConcernHasNoAtClusterTime) {
-    repl::ReadConcernArgs::get(operationContext()) =
-        repl::ReadConcernArgs(repl::ReadConcernLevel::kMajorityReadConcern);
+TEST_F(TransactionRouterTestWithDefaultSession, NonSnapshotReadConcernHasNoAtClusterTime) {
+    TxnNumber txnNum{3};
+    for (auto rcIt : supportedNonSnapshotRCLevels) {
+        repl::ReadConcernArgs::get(operationContext()) = repl::ReadConcernArgs(rcIt.second);
 
-    TransactionRouter txnRouter({});
-    txnRouter.checkOut();
-    txnRouter.beginOrContinueTxn(operationContext(), kTxnNumber, true);
+        auto& txnRouter(*TransactionRouter::get(operationContext()));
+        txnRouter.beginOrContinueTxn(
+            operationContext(), txnNum++, TransactionRouter::TransactionActions::kStart);
 
-    // No atClusterTime is placed on the router by default.
-    ASSERT_FALSE(txnRouter.getAtClusterTime());
+        // No atClusterTime is placed on the router by default.
+        ASSERT_FALSE(txnRouter.getAtClusterTime());
 
-    // Can't compute and set an atClusterTime.
-    txnRouter.setDefaultAtClusterTime(operationContext());
-    ASSERT_FALSE(txnRouter.getAtClusterTime());
+        // Can't compute and set an atClusterTime.
+        txnRouter.setDefaultAtClusterTime(operationContext());
+        ASSERT_FALSE(txnRouter.getAtClusterTime());
 
-    txnRouter.computeAndSetAtClusterTime(
-        operationContext(), true, {shard1}, NamespaceString("test.coll"), BSONObj(), BSONObj());
-    ASSERT_FALSE(txnRouter.getAtClusterTime());
-
-    txnRouter.computeAndSetAtClusterTimeForUnsharded(operationContext(), shard1);
-    ASSERT_FALSE(txnRouter.getAtClusterTime());
-
-    // Can't continue on snapshot errors.
-    ASSERT_THROWS_CODE(
-        txnRouter.onSnapshotError(), AssertionException, ErrorCodes::NoSuchTransaction);
+        // Can't continue on snapshot errors.
+        ASSERT_FALSE(txnRouter.canContinueOnSnapshotError());
+    }
 }
 
-TEST_F(TransactionRouterTest, AttachesMajorityReadConcernToNewParticipants) {
-    repl::ReadConcernArgs::get(operationContext()) =
-        repl::ReadConcernArgs(repl::ReadConcernLevel::kMajorityReadConcern);
+TEST_F(TransactionRouterTestWithDefaultSession,
+       SupportedNonSnapshotReadConcernLevelsArePassedThrough) {
+    TxnNumber txnNum{3};
+    for (auto rcIt : supportedNonSnapshotRCLevels) {
+        repl::ReadConcernArgs::get(operationContext()) = repl::ReadConcernArgs(rcIt.second);
 
-    TransactionRouter txnRouter({});
-    txnRouter.checkOut();
-    txnRouter.beginOrContinueTxn(operationContext(), kTxnNumber, true);
+        auto& txnRouter(*TransactionRouter::get(operationContext()));
+        txnRouter.beginOrContinueTxn(
+            operationContext(), txnNum++, TransactionRouter::TransactionActions::kStart);
+        txnRouter.setDefaultAtClusterTime(operationContext());
 
-    const BSONObj rcMajority = BSON("level"
-                                    << "majority");
+        const BSONObj expectedRC = BSON("level" << rcIt.first);
+        auto newCmd = txnRouter.attachTxnFieldsIfNeeded(shard1,
+                                                        BSON("insert"
+                                                             << "test"));
+        ASSERT_BSONOBJ_EQ(expectedRC, newCmd["readConcern"].Obj());
 
-    auto newCmd = txnRouter.attachTxnFieldsIfNeeded(shard1,
-                                                    BSON("insert"
-                                                         << "test"));
-    ASSERT_BSONOBJ_EQ(rcMajority, newCmd["readConcern"].Obj());
+        // Only attached on first command to a participant.
+        newCmd = txnRouter.attachTxnFieldsIfNeeded(shard1,
+                                                   BSON("insert"
+                                                        << "test"));
+        ASSERT(newCmd["readConcern"].eoo());
 
-
-    // Only attached on first command to a participant.
-    newCmd = txnRouter.attachTxnFieldsIfNeeded(shard1,
-                                               BSON("insert"
-                                                    << "test"));
-    ASSERT(newCmd["readConcern"].eoo());
-
-    // Attached for new participants after the first one.
-    newCmd = txnRouter.attachTxnFieldsIfNeeded(shard2,
-                                               BSON("insert"
-                                                    << "test"));
-    ASSERT_BSONOBJ_EQ(rcMajority, newCmd["readConcern"].Obj());
+        // Attached for new participants after the first one.
+        newCmd = txnRouter.attachTxnFieldsIfNeeded(shard2,
+                                                   BSON("insert"
+                                                        << "test"));
+        ASSERT_BSONOBJ_EQ(expectedRC, newCmd["readConcern"].Obj());
+    }
 }
 
-TEST_F(TransactionRouterTest, AttachingMajorityReadConcernPreservesAfterClusterTime) {
+
+TEST_F(TransactionRouterTestWithDefaultSession,
+       NonSnapshotReadConcernLevelsPreserveAfterClusterTime) {
     const auto clusterTime = LogicalTime(Timestamp(10, 1));
-    repl::ReadConcernArgs::get(operationContext()) =
-        repl::ReadConcernArgs(clusterTime, repl::ReadConcernLevel::kMajorityReadConcern);
+    TxnNumber txnNum{3};
+    for (auto rcIt : supportedNonSnapshotRCLevels) {
+        repl::ReadConcernArgs::get(operationContext()) =
+            repl::ReadConcernArgs(clusterTime, rcIt.second);
 
-    TransactionRouter txnRouter({});
-    txnRouter.checkOut();
-    txnRouter.beginOrContinueTxn(operationContext(), kTxnNumber, true);
+        auto& txnRouter(*TransactionRouter::get(operationContext()));
+        txnRouter.beginOrContinueTxn(
+            operationContext(), txnNum++, TransactionRouter::TransactionActions::kStart);
+        txnRouter.setDefaultAtClusterTime(operationContext());
 
-    // Call setDefaultAtClusterTime to simulate real command execution.
-    txnRouter.setDefaultAtClusterTime(operationContext());
-
-    auto newCmd = txnRouter.attachTxnFieldsIfNeeded(shard1,
-                                                    BSON("insert"
-                                                         << "test"));
-    ASSERT_BSONOBJ_EQ(BSON("level"
-                           << "majority"
-                           << "afterClusterTime"
-                           << clusterTime.asTimestamp()),
-                      newCmd["readConcern"].Obj());
+        auto newCmd = txnRouter.attachTxnFieldsIfNeeded(shard1,
+                                                        BSON("insert"
+                                                             << "test"));
+        ASSERT_BSONOBJ_EQ(
+            BSON("level" << rcIt.first << "afterClusterTime" << clusterTime.asTimestamp()),
+            newCmd["readConcern"].Obj());
+    }
 }
 
-TEST_F(TransactionRouterTest, AttachingMajorityReadConcernPreservesAfterOpTime) {
+TEST_F(TransactionRouterTestWithDefaultSession, NonSnapshotReadConcernLevelsPreserveAfterOpTime) {
     const auto opTime = repl::OpTime(Timestamp(10, 1), 2);
-    repl::ReadConcernArgs::get(operationContext()) =
-        repl::ReadConcernArgs(opTime, repl::ReadConcernLevel::kMajorityReadConcern);
+    TxnNumber txnNum{3};
+    for (auto rcIt : supportedNonSnapshotRCLevels) {
+        repl::ReadConcernArgs::get(operationContext()) = repl::ReadConcernArgs(opTime, rcIt.second);
 
-    TransactionRouter txnRouter({});
-    txnRouter.checkOut();
-    txnRouter.beginOrContinueTxn(operationContext(), kTxnNumber, true);
+        auto& txnRouter(*TransactionRouter::get(operationContext()));
+        txnRouter.beginOrContinueTxn(
+            operationContext(), txnNum++, TransactionRouter::TransactionActions::kStart);
 
-    // Call setDefaultAtClusterTime to simulate real command execution.
+        // Call setDefaultAtClusterTime to simulate real command execution.
+        txnRouter.setDefaultAtClusterTime(operationContext());
+
+        auto newCmd = txnRouter.attachTxnFieldsIfNeeded(shard1,
+                                                        BSON("insert"
+                                                             << "test"));
+        ASSERT_BSONOBJ_EQ(BSON("level" << rcIt.first << "afterOpTime" << opTime),
+                          newCmd["readConcern"].Obj());
+    }
+}
+
+TEST_F(TransactionRouterTestWithDefaultSession,
+       AbortBetweenStatementRetriesIgnoresNoSuchTransaction) {
+    TxnNumber txnNum{3};
+
+    auto& txnRouter(*TransactionRouter::get(operationContext()));
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
+
+    //
+    // NoSuchTransaction is ignored when it is the top-level error code.
+    //
+
     txnRouter.setDefaultAtClusterTime(operationContext());
+    txnRouter.attachTxnFieldsIfNeeded(shard1, {});
 
-    auto newCmd = txnRouter.attachTxnFieldsIfNeeded(shard1,
-                                                    BSON("insert"
-                                                         << "test"));
-    ASSERT_BSONOBJ_EQ(BSON("level"
-                           << "majority"
-                           << "afterOpTime"
-                           << opTime),
-                      newCmd["readConcern"].Obj());
+    ASSERT(txnRouter.canContinueOnSnapshotError());
+    auto future = launchAsync([&] { txnRouter.onSnapshotError(operationContext(), kDummyStatus); });
+
+    auto noSuchTransactionError = [&] {
+        BSONObjBuilder bob;
+        CommandHelpers::appendCommandStatusNoThrow(bob,
+                                                   Status(ErrorCodes::NoSuchTransaction, "dummy"));
+        return bob.obj();
+    }();
+
+    expectAbortTransactions({hostAndPort1}, getSessionId(), txnNum, noSuchTransactionError);
+
+    future.timed_get(kFutureTimeout);
+}
+
+TEST_F(TransactionRouterTestWithDefaultSession,
+       AbortBetweenStatementRetriesUsesIdempotentRetryPolicy) {
+    TxnNumber txnNum{3};
+
+    auto& txnRouter(*TransactionRouter::get(operationContext()));
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
+
+    //
+    // Retryable top-level error.
+    //
+
+    txnRouter.setDefaultAtClusterTime(operationContext());
+    txnRouter.attachTxnFieldsIfNeeded(shard1, {});
+
+    ASSERT(txnRouter.canContinueOnSnapshotError());
+    auto future = launchAsync([&] { txnRouter.onSnapshotError(operationContext(), kDummyStatus); });
+
+    auto retryableError = [&] {
+        BSONObjBuilder bob;
+        CommandHelpers::appendCommandStatusNoThrow(
+            bob, Status(ErrorCodes::InterruptedDueToStepDown, "dummy"));
+        return bob.obj();
+    }();
+
+    // The first abort fails with a retryable error, which should be retried.
+    expectAbortTransactions({hostAndPort1}, getSessionId(), txnNum, retryableError);
+    expectAbortTransactions({hostAndPort1}, getSessionId(), txnNum);
+
+    future.timed_get(kFutureTimeout);
+}
+
+TEST_F(TransactionRouterTestWithDefaultSession,
+       AbortBetweenStatementRetriesFailsWithNoSuchTransactionOnUnexpectedErrors) {
+    TxnNumber txnNum{3};
+
+    auto& txnRouter(*TransactionRouter::get(operationContext()));
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
+
+    //
+    // Non-retryable top-level error.
+    //
+
+    txnRouter.setDefaultAtClusterTime(operationContext());
+    txnRouter.attachTxnFieldsIfNeeded(shard1, {});
+
+    ASSERT(txnRouter.canContinueOnSnapshotError());
+    auto future = launchAsync([&] {
+        ASSERT_THROWS_CODE(txnRouter.onSnapshotError(operationContext(), kDummyStatus),
+                           AssertionException,
+                           ErrorCodes::NoSuchTransaction);
+    });
+    auto abortError = [&] {
+        BSONObjBuilder bob;
+        CommandHelpers::appendCommandStatusNoThrow(bob, Status(ErrorCodes::InternalError, "dummy"));
+        return bob.obj();
+    }();
+    expectAbortTransactions({hostAndPort1}, getSessionId(), txnNum, abortError);
+
+    future.timed_get(kFutureTimeout);
 }
 
 // Begins a transaction with snapshot level read concern and sets a default cluster time.
-class TransactionRouterStartedSnapshotTransactionTest : public TransactionRouterTest {
-public:
+class TransactionRouterTestWithDefaultSessionAndStartedSnapshot
+    : public TransactionRouterTestWithDefaultSession {
+protected:
+    const TxnNumber kTxnNumber = 10;
     const BSONObj rcLatestInMemoryAtClusterTime = BSON("level"
                                                        << "snapshot"
                                                        << "atClusterTime"
                                                        << kInMemoryLogicalTime.asTimestamp());
 
     void setUp() override {
-        TransactionRouterTest::setUp();
+        TransactionRouterTestWithDefaultSession::setUp();
 
-        operationContext()->setLogicalSessionId(makeLogicalSessionIdForTest());
-        operationContext()->setTxnNumber(kTxnNumber);
-
-        _scopedSession.emplace(operationContext());
-
-        txnRouter()->checkOut();
-        txnRouter()->beginOrContinueTxn(operationContext(), kTxnNumber, true);
-        txnRouter()->setDefaultAtClusterTime(operationContext());
+        auto& txnRouter(*TransactionRouter::get(operationContext()));
+        txnRouter.beginOrContinueTxn(
+            operationContext(), kTxnNumber, TransactionRouter::TransactionActions::kStart);
+        txnRouter.setDefaultAtClusterTime(operationContext());
     }
-
-    TransactionRouter* txnRouter() const {
-        return TransactionRouter::get(operationContext());
-    }
-
-private:
-    boost::optional<ScopedRouterSession> _scopedSession;
 };
 
-TEST_F(TransactionRouterStartedSnapshotTransactionTest, AddAtClusterTimeNormal) {
-    auto newCmd = txnRouter()->attachTxnFieldsIfNeeded(shard1,
-                                                       BSON("aggregate"
-                                                            << "testColl"
-                                                            << "readConcern"
-                                                            << BSON("level"
-                                                                    << "snapshot")));
+TEST_F(TransactionRouterTestWithDefaultSessionAndStartedSnapshot, AddAtClusterTimeNormal) {
+    auto& txnRouter(*TransactionRouter::get(operationContext()));
+    auto newCmd = txnRouter.attachTxnFieldsIfNeeded(shard1,
+                                                    BSON("aggregate"
+                                                         << "testColl"
+                                                         << "readConcern"
+                                                         << BSON("level"
+                                                                 << "snapshot")));
+
     ASSERT_BSONOBJ_EQ(rcLatestInMemoryAtClusterTime, newCmd["readConcern"].Obj());
 }
 
-TEST_F(TransactionRouterStartedSnapshotTransactionTest,
+TEST_F(TransactionRouterTestWithDefaultSessionAndStartedSnapshot,
        AddingAtClusterTimeOverwritesExistingAfterClusterTime) {
-    const auto existingAfterClusterTime = Timestamp(1, 1);
-    auto newCmd = txnRouter()->attachTxnFieldsIfNeeded(shard1,
-                                                       BSON("aggregate"
-                                                            << "testColl"
-                                                            << "readConcern"
-                                                            << BSON("level"
-                                                                    << "snapshot"
-                                                                    << "afterClusterTime"
-                                                                    << existingAfterClusterTime)));
-    ASSERT_BSONOBJ_EQ(rcLatestInMemoryAtClusterTime, newCmd["readConcern"].Obj());
-}
+    const Timestamp existingAfterClusterTime(1, 1);
 
-TEST_F(TransactionRouterStartedSnapshotTransactionTest,
-       AddingAtClusterTimeAddsLevelSnapshotIfNotThere) {
-    const auto existingAfterClusterTime = Timestamp(1, 1);
-    auto newCmd = txnRouter()->attachTxnFieldsIfNeeded(shard1,
-                                                       BSON("aggregate"
-                                                            << "testColl"
-                                                            << "readConcern"
-                                                            << BSON("afterClusterTime"
-                                                                    << existingAfterClusterTime)));
+    auto& txnRouter(*TransactionRouter::get(operationContext()));
+    auto newCmd = txnRouter.attachTxnFieldsIfNeeded(shard1,
+                                                    BSON("aggregate"
+                                                         << "testColl"
+                                                         << "readConcern"
+                                                         << BSON("level"
+                                                                 << "snapshot"
+                                                                 << "afterClusterTime"
+                                                                 << existingAfterClusterTime)));
+
     ASSERT_BSONOBJ_EQ(rcLatestInMemoryAtClusterTime, newCmd["readConcern"].Obj());
 }
 

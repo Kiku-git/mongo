@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -129,10 +128,11 @@ public:
                 // inclusive of the commit (and new writes to the committed chunk) that hasn't yet
                 // propagated back to this shard. This ensures the read your own writes causal
                 // consistency guarantee.
-                auto criticalSectionSignal =
-                    DatabaseShardingState::get(autoDb.getDb())
-                        .getCriticalSectionSignal(ShardingMigrationCriticalSection::kRead);
-                if (criticalSectionSignal) {
+                auto& dss = DatabaseShardingState::get(autoDb.getDb());
+                auto dssLock = DatabaseShardingState::DSSLock::lock(opCtx, &dss);
+
+                if (auto criticalSectionSignal = dss.getCriticalSectionSignal(
+                        ShardingMigrationCriticalSection::kRead, dssLock)) {
                     oss.setMigrationCriticalSectionSignal(criticalSectionSignal);
                 }
             }

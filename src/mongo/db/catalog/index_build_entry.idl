@@ -29,26 +29,18 @@
 global:
     cpp_namespace: "mongo"
     cpp_includes:
-        - "mongo/db/write_concern_options.h"
         - "mongo/util/uuid.h"
 
 imports:
+    - "mongo/db/catalog/commit_quorum.idl"
     - "mongo/idl/basic_types.idl"
     - "mongo/util/net/hostandport.idl"
-
-types:
-  commitQuorum:
-    bson_serialization_type: object
-    description: "commitQuorum type that shadows the behaviour of WriteConcernOptions."
-    cpp_type: "mongo::WriteConcernOptions"
-    serializer: "mongo::WriteConcernOptions::toBSON"
-    deserializer: "mongo::WriteConcernOptions::deserializerForIDL"
 
 structs:
     IndexBuildEntry:
         description: "A document that tracks the progress of an index build across replica set
                       members."
-        strict: true
+        strict: false
         fields:
             _id:
                 cpp_name: buildUUID
@@ -61,22 +53,15 @@ structs:
                 description: "Identifies the collection upon which the index is being built."
             commitQuorum:
                 optional: false
-                type: commitQuorum
-                description: "commitQuorum has the same behaviour as writeConcern, indicating how
-                              many replica set members are needed to commit the index build."
+                type: CommitQuorum
+                description: "commitQuorum can be set to the same values as writeConcern.w and
+                              indicates how many and/or which replica set members are needed for the
+                              primary to commit the index build."
             indexNames:
                 optional: false
                 type: array<string>
                 description: "An array of index names associated with this particular cross replica
                               set index build."
-            prepareIndexBuild:
-                optional: false
-                type: bool
-                default: false
-                description: "Indicates that the primary has entered the commit phase, and 
-                              secondaries are allowed to proceed with the index constraint 
-                              violations resolution phase when ready and then send 
-                              voteCommitIndexBuild."
             commitReadyMembers:
                 optional: true
                 type: array<HostAndPort>

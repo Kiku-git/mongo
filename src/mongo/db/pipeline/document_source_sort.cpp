@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -107,7 +106,7 @@ Value deserializeSortKey(size_t sortPatternSize, BSONObj bsonSortKey) {
  * places, rather than compiled in one place and linked, and so cannot provide a globally unique ID.
  */
 std::string nextFileName() {
-    static AtomicUInt32 documentSourceSortFileCounter;
+    static AtomicWord<unsigned> documentSourceSortFileCounter;
     return "extsort-doc-source-sort." +
         std::to_string(documentSourceSortFileCounter.fetchAndAdd(1));
 }
@@ -524,13 +523,14 @@ int DocumentSourceSort::compare(const Value& lhs, const Value& rhs) const {
     return 0;
 }
 
-intrusive_ptr<DocumentSource> DocumentSourceSort::getShardSource() {
-    return this;
-}
-
-NeedsMergerDocumentSource::MergingLogic DocumentSourceSort::mergingLogic() {
-    return {_limitSrc ? DocumentSourceLimit::create(pExpCtx, _limitSrc->getLimit()) : nullptr,
-            sortKeyPattern(SortKeySerialization::kForSortKeyMerging).toBson()};
+boost::optional<DocumentSource::MergingLogic> DocumentSourceSort::mergingLogic() {
+    MergingLogic split;
+    split.shardsStage = this;
+    split.inputSortPattern = sortKeyPattern(SortKeySerialization::kForSortKeyMerging).toBson();
+    if (_limitSrc) {
+        split.mergingStage = DocumentSourceLimit::create(pExpCtx, _limitSrc->getLimit());
+    }
+    return split;
 }
 
 bool DocumentSourceSort::canRunInParallelBeforeOut(

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -71,6 +70,16 @@ public:
      */
     FlatSet makeBSONEltFlatSet(const std::vector<BSONElement>& elements) const {
         return makeFlatSet(elements);
+    }
+
+    /**
+     * Constructs a BSONEltFlatSet whose equivalence classes are given by this comparator. This
+     * comparator must outlive the returned set.
+     * The elements in the input range must be sorted and unique.
+     */
+    template <typename InputIterator>
+    FlatSet makeBSONEltFlatSetFromSortedUniqueRange(InputIterator begin, InputIterator end) const {
+        return makeFlatSetFromSortedUnique(begin, end);
     }
 
     /**

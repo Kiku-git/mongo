@@ -30,6 +30,10 @@ selector:
   # there is a concurrent dropDatabase waiting for the global X lock.
   # TODO: SERVER-37876
   - jstests/concurrency/fsm_workloads/multi_statement_transaction_all_commands_same_session.js
+  # This workload starts and prepares many transactions, which can cause a deadlock when secondary
+  # application tries to acquire the global X lock.
+  # TODO: SERVER-37876
+  - jstests/concurrency/fsm_workloads/multi_statement_transaction_atomicity_isolation_metrics_test.js
   exclude_with_any_tags:
   - requires_sharding
 
@@ -39,20 +43,22 @@ selector:
 executor:
   archive:
     hooks:
-      - CheckReplDBHashInBackground
       - CheckReplDBHash
       - ValidateCollections
     tests: true
   config:
     shell_options:
       readMode: commands
+      global_vars:
+        TestData:
+          skipDropDatabaseOnDatabaseDropPending: true
   hooks:
   # The CheckReplDBHash hook waits until all operations have replicated to and have been applied
   # on the secondaries, so we run the ValidateCollections hook after it to ensure we're
   # validating the entire contents of the collection.
   #
   # TODO SERVER-26466: Add CheckReplOplogs hook to the concurrency suite.
-  - class: CheckReplDBHashInBackground
+  # TODO SERVER-39321: Re-enable and archive the CheckReplDBHashInBackground hook.
   - class: CheckReplDBHash
   - class: ValidateCollections
   - class: CleanupConcurrencyWorkloads
@@ -62,5 +68,4 @@ executor:
       oplogSize: 1024
       set_parameters:
         enableTestCommands: 1
-        numInitialSyncAttempts: 1
     num_nodes: 3

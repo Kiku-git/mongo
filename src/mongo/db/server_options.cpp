@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -41,5 +40,9 @@ namespace mongo {
  * sets it via the command line, which would pull in more dependencies.
  */
 ServerGlobalParams serverGlobalParams;
+
+std::string ServerGlobalParams::getPortSettingHelpText() {
+    return str::stream() << "Specify port number - " << DefaultDBPort << " by default";
+}
 
 }  // namespace mongo

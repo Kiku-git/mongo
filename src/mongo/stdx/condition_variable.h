@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -170,7 +169,7 @@ private:
         return true;
     }
 
-    AtomicUInt64 _notifyableCount;
+    AtomicWord<unsigned long long> _notifyableCount;
 
     stdx::mutex _mutex;
     std::list<Notifyable**> _notifyables;

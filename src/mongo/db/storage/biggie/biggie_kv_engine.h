@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -41,13 +40,14 @@
 
 namespace mongo {
 namespace biggie {
+
 class JournalListener;
 /**
  * The biggie storage engine is intended for unit and performance testing.
  */
-class KVEngine : public ::mongo::KVEngine {
+class KVEngine : public mongo::KVEngine {
 public:
-    KVEngine() : ::mongo::KVEngine() {}
+    KVEngine() : mongo::KVEngine() {}
 
     virtual ~KVEngine() {}
 
@@ -58,10 +58,13 @@ public:
                                      StringData ident,
                                      const CollectionOptions& options);
 
-    virtual std::unique_ptr<::mongo::RecordStore> getRecordStore(OperationContext* opCtx,
-                                                                 StringData ns,
-                                                                 StringData ident,
-                                                                 const CollectionOptions& options);
+    virtual std::unique_ptr<mongo::RecordStore> getRecordStore(OperationContext* opCtx,
+                                                               StringData ns,
+                                                               StringData ident,
+                                                               const CollectionOptions& options);
+
+    virtual std::unique_ptr<mongo::RecordStore> makeTemporaryRecordStore(OperationContext* opCtx,
+                                                                         StringData ident) override;
 
     virtual Status createSortedDataInterface(OperationContext* opCtx,
                                              StringData ident,
@@ -70,6 +73,12 @@ public:
     virtual mongo::SortedDataInterface* getSortedDataInterface(OperationContext* opCtx,
                                                                StringData ident,
                                                                const IndexDescriptor* desc);
+
+    virtual Status beginBackup(OperationContext* opCtx) {
+        return Status::OK();
+    }
+
+    virtual void endBackup(OperationContext* opCtx) {}
 
     virtual Status dropIdent(OperationContext* opCtx, StringData ident);
 
@@ -128,6 +137,11 @@ public:
     void setJournalListener(mongo::JournalListener* jl) final {}
 
     virtual Timestamp getAllCommittedTimestamp() const override {
+        RecordId id = _visibilityManager->getAllCommittedRecord();
+        return Timestamp(id.repr());
+    }
+
+    virtual Timestamp getOldestOpenReadTimestamp() const override {
         return Timestamp();
     }
 
@@ -151,6 +165,7 @@ private:
     std::shared_ptr<void> _catalogInfo;
     int _cachePressureForTest = 0;
     std::map<std::string, bool> _idents;  // TODO : replace with a query to _master.
+    std::unique_ptr<VisibilityManager> _visibilityManager;
 
     mutable stdx::mutex _masterLock;
     StringStore _master;

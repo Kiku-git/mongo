@@ -1,5 +1,3 @@
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -50,6 +48,10 @@ public:
                 FacetRequirement::kAllowed,
                 TransactionRequirement::kAllowed,
                 ChangeStreamRequirement::kWhitelist};
+    }
+
+    boost::optional<MergingLogic> mergingLogic() final {
+        return boost::none;
     }
 
     /**

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -58,6 +57,10 @@ public:
 
         constraints.canSwapWithMatch = true;
         return constraints;
+    }
+
+    boost::optional<MergingLogic> mergingLogic() final {
+        return boost::none;
     }
 
     DepsTracker::State getDependencies(DepsTracker* deps) const final;

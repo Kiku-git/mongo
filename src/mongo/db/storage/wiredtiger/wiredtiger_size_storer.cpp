@@ -1,6 +1,3 @@
-// wiredtiger_size_storer.cpp
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -101,7 +98,7 @@ std::shared_ptr<WiredTigerSizeStorer::SizeInfo> WiredTigerSizeStorer::load(Strin
 
     stdx::lock_guard<stdx::mutex> cursorLock(_cursorMutex);
     // Intentionally ignoring return value.
-    ON_BLOCK_EXIT(_cursor->reset, _cursor);
+    ON_BLOCK_EXIT([&] { _cursor->reset(_cursor); });
 
     _cursor->reset(_cursor);
 

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -31,16 +30,20 @@
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kReplication
 #define LOG_FOR_ELECTION(level) \
     MONGO_LOG_COMPONENT(level, ::mongo::logger::LogComponent::kReplicationElection)
+#define LOG_FOR_HEARTBEATS(level) \
+    MONGO_LOG_COMPONENT(level, ::mongo::logger::LogComponent::kReplicationHeartbeats)
 
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/repl/topology_coordinator.h"
+#include "mongo/db/repl/topology_coordinator_gen.h"
 
 #include <limits>
 #include <string>
 
 #include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/db/audit.h"
+#include "mongo/db/catalog/commit_quorum_options.h"
 #include "mongo/db/client.h"
 #include "mongo/db/mongod_options.h"
 #include "mongo/db/operation_context.h"
@@ -50,7 +53,6 @@
 #include "mongo/db/repl/member_data.h"
 #include "mongo/db/repl/repl_set_heartbeat_args_v1.h"
 #include "mongo/db/repl/repl_set_heartbeat_response.h"
-#include "mongo/db/repl/repl_set_html_summary.h"
 #include "mongo/db/repl/repl_set_request_votes_args.h"
 #include "mongo/db/repl/rslog.h"
 #include "mongo/db/server_parameters.h"
@@ -67,10 +69,6 @@ namespace mongo {
 namespace repl {
 
 MONGO_FAIL_POINT_DEFINE(forceSyncSourceCandidate);
-
-// Controls how caught up in replication a secondary with higher priority than the current primary
-// must be before it will call for a priority takeover election.
-MONGO_EXPORT_STARTUP_SERVER_PARAMETER(priorityTakeoverFreshnessWindowSeconds, int, 2);
 
 // If this fail point is enabled, TopologyCoordinator::shouldChangeSyncSource() will ignore
 // the option TopologyCoordinator::Options::maxSyncSourceLagSecs. The sync source will not be
@@ -734,6 +732,12 @@ HeartbeatResponseAction TopologyCoordinator::processHeartbeatResponse(
         nextHeartbeatStartDate = now + heartbeatInterval;
     }
 
+    if (hbStats.failed()) {
+        LOG_FOR_HEARTBEATS(0) << "Heartbeat to " << target << " failed after "
+                              << kMaxHeartbeatRetries
+                              << " retries, response status: " << hbResponse.getStatus();
+    }
+
     if (hbResponse.isOK() && hbResponse.getValue().hasConfig()) {
         const long long currentConfigVersion =
             _rsConfig.isInitialized() ? _rsConfig.getConfigVersion() : -2;
@@ -829,8 +833,16 @@ bool TopologyCoordinator::haveNumNodesReachedOpTime(const OpTime& targetOpTime,
     }
 
     for (auto&& memberData : _memberData) {
+        const auto isArbiter = _rsConfig.getMemberAt(memberData.getMemberId()).isArbiter();
+
+        // We do not count arbiters towards the write concern.
+        if (isArbiter) {
+            continue;
+        }
+
         const OpTime& memberOpTime =
             durablyWritten ? memberData.getLastDurableOpTime() : memberData.getLastAppliedOpTime();
+
         if (memberOpTime >= targetOpTime) {
             --numNodes;
         }
@@ -959,7 +971,17 @@ void TopologyCoordinator::setMyLastAppliedOpTime(OpTime opTime,
                                                  Date_t now,
                                                  bool isRollbackAllowed) {
     auto& myMemberData = _selfMemberData();
-    invariant(isRollbackAllowed || opTime >= myMemberData.getLastAppliedOpTime());
+    auto myLastAppliedOpTime = myMemberData.getLastAppliedOpTime();
+
+    if (!(isRollbackAllowed || opTime == myLastAppliedOpTime)) {
+        invariant(opTime > myLastAppliedOpTime);
+        // In pv1, oplog entries are ordered by non-decreasing term and strictly increasing
+        // timestamp. So, in pv1, its not possible for us to get opTime with higher term and
+        // timestamp lesser than or equal to our current lastAppliedOptime.
+        invariant(opTime.getTerm() == OpTime::kUninitializedTerm ||
+                  myLastAppliedOpTime.getTerm() == OpTime::kUninitializedTerm ||
+                  opTime.getTimestamp() > myLastAppliedOpTime.getTimestamp());
+    }
     myMemberData.setLastAppliedOpTime(opTime, now);
 }
 
@@ -1198,7 +1220,8 @@ bool TopologyCoordinator::_amIFreshEnoughForPriorityTakeover() const {
     }
 
     if (ourLastOpApplied.getTimestamp().getSecs() != latestKnownOpTime.getTimestamp().getSecs()) {
-        return ourLastOpApplied.getTimestamp().getSecs() + priorityTakeoverFreshnessWindowSeconds >=
+        return ourLastOpApplied.getTimestamp().getSecs() +
+            gPriorityTakeoverFreshnessWindowSeconds >=
             latestKnownOpTime.getTimestamp().getSecs();
     } else {
         return ourLastOpApplied.getTimestamp().getInc() + 1000 >=
@@ -1692,7 +1715,10 @@ void TopologyCoordinator::fillIsMasterForReplSet(IsMasterResponse* response) {
     }
 
     response->setReplSetVersion(_rsConfig.getConfigVersion());
-    response->setIsMaster(myState.primary());
+    // "ismaster" is false if we are not primary. If we're stepping down, we're waiting for the
+    // Replication State Transition Lock before we can change to secondary, but we should report
+    // "ismaster" false to indicate that we can't accept new writes.
+    response->setIsMaster(myState.primary() && !isSteppingDown());
     response->setIsSecondary(myState.secondary());
 
     const MemberConfig* curPrimary = _currentPrimaryMember();
@@ -2005,7 +2031,7 @@ std::string TopologyCoordinator::_getUnelectableReasonString(const UnelectableRe
         hasWrittenToStream = true;
         ss << "member is not caught up enough to the most up-to-date member to call for priority "
               "takeover - must be within "
-           << priorityTakeoverFreshnessWindowSeconds << " seconds";
+           << gPriorityTakeoverFreshnessWindowSeconds << " seconds";
     }
     if (ur & NotFreshEnoughForCatchupTakeover) {
         if (hasWrittenToStream) {
@@ -2343,7 +2369,7 @@ void TopologyCoordinator::_stepDownSelfAndReplaceWith(int newPrimary) {
 }
 
 bool TopologyCoordinator::updateLastCommittedOpTime() {
-    // If we're not primary or we're stepping down due to learning of a new term then  we must not
+    // If we're not primary or we're stepping down due to learning of a new term then we must not
     // advance the commit point.  If we are stepping down due to a user request, however, then it
     // is safe to advance the commit point, and in fact we must since the stepdown request may be
     // waiting for the commit point to advance enough to be able to safely complete the step down.
@@ -2617,17 +2643,6 @@ rpc::OplogQueryMetadata TopologyCoordinator::prepareOplogQueryMetadata(int rbid)
                                    _rsConfig.findMemberIndexByHostAndPort(getSyncSourceAddress()));
 }
 
-void TopologyCoordinator::summarizeAsHtml(ReplSetHtmlSummary* output) {
-    // TODO(dannenberg) consider putting both optimes into the htmlsummary.
-    output->setSelfOptime(getMyLastAppliedOpTime());
-    output->setConfig(_rsConfig);
-    output->setHBData(_memberData);
-    output->setSelfIndex(_selfIndex);
-    output->setPrimaryIndex(_currentPrimaryIndex);
-    output->setSelfState(getMemberState());
-    output->setSelfHeartbeatMessage(_hbmsg);
-}
-
 void TopologyCoordinator::processReplSetRequestVotes(const ReplSetRequestVotesArgs& args,
                                                      ReplSetRequestVotesResponse* response) {
     response->setTerm(_term);
@@ -2780,6 +2795,66 @@ TopologyCoordinator::latestKnownOpTimeSinceHeartbeatRestartPerMember() const {
         opTimesPerMember[memberId] = member.getHeartbeatAppliedOpTime();
     }
     return opTimesPerMember;
+}
+
+bool TopologyCoordinator::checkIfCommitQuorumCanBeSatisfied(
+    const CommitQuorumOptions& commitQuorum, const std::vector<MemberConfig>& members) const {
+    if (!commitQuorum.mode.empty() && commitQuorum.mode != CommitQuorumOptions::kMajority) {
+        StatusWith<ReplSetTagPattern> tagPatternStatus =
+            _rsConfig.findCustomWriteMode(commitQuorum.mode);
+        if (!tagPatternStatus.isOK()) {
+            return false;
+        }
+
+        ReplSetTagMatch matcher(tagPatternStatus.getValue());
+        for (auto&& member : members) {
+            for (MemberConfig::TagIterator it = member.tagsBegin(); it != member.tagsEnd(); ++it) {
+                if (matcher.update(*it)) {
+                    return true;
+                }
+            }
+        }
+
+        // Even if all the nodes in the set had a given write it still would not satisfy this
+        // commit quorum.
+        return false;
+    } else {
+        int nodesRemaining = 0;
+        if (!commitQuorum.mode.empty()) {
+            invariant(commitQuorum.mode == CommitQuorumOptions::kMajority);
+            nodesRemaining = _rsConfig.getWriteMajority();
+        } else {
+            nodesRemaining = commitQuorum.numNodes;
+        }
+
+        for (auto&& member : members) {
+            if (!member.isArbiter()) {  // Only count data-bearing nodes
+                --nodesRemaining;
+                if (nodesRemaining <= 0) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+}
+
+bool TopologyCoordinator::checkIfCommitQuorumIsSatisfied(
+    const CommitQuorumOptions& commitQuorum,
+    const std::vector<HostAndPort>& commitReadyMembers) const {
+    std::vector<MemberConfig> commitReadyMemberConfigs;
+    for (auto& commitReadyMember : commitReadyMembers) {
+        const MemberConfig* memberConfig = _rsConfig.findMemberByHostAndPort(commitReadyMember);
+
+        invariant(memberConfig);
+        commitReadyMemberConfigs.push_back(*memberConfig);
+    }
+
+    // Calling this with commit ready members only is the same as checking if the commit quorum is
+    // satisfied. Because the 'commitQuorum' is based on the participation of all the replica set
+    // members, and if the 'commitQuorum' can be satisfied with all the commit ready members, then
+    // the commit quorum is satisfied in this replica set configuration.
+    return checkIfCommitQuorumCanBeSatisfied(commitQuorum, commitReadyMemberConfigs);
 }
 
 }  // namespace repl

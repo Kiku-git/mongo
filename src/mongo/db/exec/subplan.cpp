@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -40,6 +39,7 @@
 #include "mongo/db/exec/multi_plan.h"
 #include "mongo/db/exec/scoped_timer.h"
 #include "mongo/db/matcher/extensions_callback_real.h"
+#include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/planner_access.h"
 #include "mongo/db/query/planner_analysis.h"
@@ -65,7 +65,7 @@ SubplanStage::SubplanStage(OperationContext* opCtx,
                            WorkingSet* ws,
                            const QueryPlannerParams& params,
                            CanonicalQuery* cq)
-    : RequiresCollectionStage(kStageType, opCtx, collection),
+    : RequiresAllIndicesStage(kStageType, opCtx, collection),
       _ws(ws),
       _plannerParams(params),
       _query(cq) {
@@ -434,6 +434,14 @@ Status SubplanStage::pickBestPlan(PlanYieldPolicy* yieldPolicy) {
     // Adds the amount of time taken by pickBestPlan() to executionTimeMillis. There's lots of
     // work that happens here, so this is needed for the time accounting to make sense.
     ScopedTimer timer(getClock(), &_commonStats.executionTimeMillis);
+
+    // During plan selection, the list of indices we are using to plan must remain stable, so the
+    // query will die during yield recovery if any index has been dropped. However, once plan
+    // selection completes successfully, we no longer need all indices to stick around. The selected
+    // plan should safely die on yield recovery if it is using the dropped index.
+    //
+    // Dismiss the requirement that no indices can be dropped when this method returns.
+    ON_BLOCK_EXIT([this] { releaseAllIndicesRequirement(); });
 
     // Plan each branch of the $or.
     Status subplanningStatus = planSubqueries();

@@ -1,6 +1,3 @@
-// string_data.h
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -103,6 +100,10 @@ public:
      * for constexpr creation of StringData's that are known at compile time.
      */
     constexpr friend StringData operator"" _sd(const char* c, std::size_t len);
+
+    explicit operator std::string() const {
+        return toString();
+    }
 
     /**
      * Constructs a StringData with begin and end iterators. begin points to the beginning of the

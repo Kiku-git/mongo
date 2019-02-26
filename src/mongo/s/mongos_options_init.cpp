@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -34,6 +33,7 @@
 
 #include <iostream>
 
+#include "mongo/db/server_options_base.h"
 #include "mongo/util/exit_code.h"
 #include "mongo/util/options_parser/startup_option_init.h"
 #include "mongo/util/options_parser/startup_options.h"
@@ -41,7 +41,7 @@
 
 namespace mongo {
 MONGO_GENERAL_STARTUP_OPTIONS_REGISTER(MongosOptions)(InitializerContext* context) {
-    return addMongosOptions(&moe::startupOptions);
+    return addGeneralServerOptions(&moe::startupOptions);
 }
 
 MONGO_INITIALIZER_GENERAL(MongosOptions,
@@ -72,7 +72,7 @@ MONGO_INITIALIZER_GENERAL(MongosOptions,
     return Status::OK();
 }
 
-MONGO_INITIALIZER_GENERAL(MongosOptions_Store,
+MONGO_INITIALIZER_GENERAL(CoreOptions_Store,
                           ("BeginStartupOptionStorage"),
                           ("EndStartupOptionStorage"))
 (InitializerContext* context) {

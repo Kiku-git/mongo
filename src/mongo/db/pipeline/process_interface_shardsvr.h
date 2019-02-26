@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -43,6 +42,10 @@ class MongoInterfaceShardServer final : public MongoInterfaceStandalone {
 public:
     using MongoInterfaceStandalone::MongoInterfaceStandalone;
 
+    void checkRoutingInfoEpochOrThrow(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                      const NamespaceString& nss,
+                                      ChunkVersion targetCollectionVersion) const final;
+
     std::pair<std::vector<FieldPath>, bool> collectDocumentKeyFieldsForHostedCollection(
         OperationContext* opCtx, const NamespaceString&, UUID) const final;
 
@@ -79,6 +82,9 @@ public:
                 bool upsert,
                 bool multi,
                 boost::optional<OID> targetEpoch) final;
+
+    std::unique_ptr<Pipeline, PipelineDeleter> attachCursorSourceToPipeline(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx, Pipeline* pipeline) final;
 };
 
 }  // namespace mongo

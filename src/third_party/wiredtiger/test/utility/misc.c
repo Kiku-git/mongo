@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2018 MongoDB, Inc.
+ * Public Domain 2014-2019 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -199,7 +199,7 @@ bool
 testutil_is_flag_set(const char *flag)
 {
 	const char *res;
-	bool enable_long_tests;
+	bool flag_being_set;
 
 	if (__wt_getenv(NULL, flag, &res) != 0 || res == NULL)
 		return (false);
@@ -208,11 +208,26 @@ testutil_is_flag_set(const char *flag)
 	 * This is a boolean test. So if the environment variable is set to any
 	 * value other than 0, we return success.
 	 */
-	enable_long_tests = res[0] != '0';
+	flag_being_set = res[0] != '0';
 
 	free((void *)res);
 
-	return (enable_long_tests);
+	return (flag_being_set);
+}
+
+/*
+ * testutil_print_command_line --
+ *	Print command line arguments for csuite tests.
+ */
+void
+testutil_print_command_line(int argc, char * const *argv)
+{
+	int i;
+
+	printf("Running test command: ");
+	for (i = 0; i < argc; i++)
+		printf("%s ", argv[i]);
+	printf("\n");
 }
 
 #ifndef _WIN32

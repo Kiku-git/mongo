@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -60,7 +59,7 @@ public:
     /**
      * Return a list of sessions that are currently attached to open cursors
      */
-    virtual LogicalSessionIdSet getOpenCursorSessions() const = 0;
+    virtual LogicalSessionIdSet getOpenCursorSessions(OperationContext* opCtx) const = 0;
 
     /**
      * Schedule a job to be run at regular intervals until the server shuts down.

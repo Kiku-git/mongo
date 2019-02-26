@@ -1,10 +1,6 @@
 /**
  * Test that mongos times out when the config server replica set only contains nodes that
  * are behind the majority opTime.
- *
- * This test triggers a compiler bug that causes a crash when compiling with optimizations on, see
- * SERVER-35632.
- * @tags: [blacklist_from_rhel_67_s390x]
  */
 
 // Checking UUID consistency involves mongos being able to do a read from the config server, but
@@ -47,17 +43,25 @@ TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
 
     assert(ErrorCodes.isExceededTimeLimitError(exception.code));
 
-    var msg = 'Command on database config timed out waiting for read concern to be satisfied.';
-    assert.soon(function() {
-        var logMessages =
-            assert.commandWorked(delayedConfigSecondary.adminCommand({getLog: 'global'})).log;
-        for (var i = 0; i < logMessages.length; i++) {
-            if (logMessages[i].indexOf(msg) != -1) {
-                return true;
+    let msgAA = 'command config.$cmd command: find { find: "databases"';
+    let msgAB = 'errCode:' + ErrorCodes.ClientDisconnect;
+    let msgB = 'Command on database config timed out waiting for read concern to be satisfied.';
+    assert.soon(
+        function() {
+            var logMessages =
+                assert.commandWorked(delayedConfigSecondary.adminCommand({getLog: 'global'})).log;
+            for (var i = 0; i < logMessages.length; i++) {
+                if ((logMessages[i].indexOf(msgAA) != -1 && logMessages[i].indexOf(msgAB) != -1) ||
+                    logMessages[i].indexOf(msgB) != -1) {
+                    return true;
+                }
             }
-        }
-        return false;
-    }, 'Did not see any log entries containing the following message: ' + msg, 60000, 300);
+            return false;
+        },
+        'Did not see any log entries containing the following message: ' + msgAA + ' ... ' + msgAB +
+            ' or ' + msgB,
+        60000,
+        300);
 
     // Can't do clean shutdown with this failpoint on.
     delayedConfigSecondary.getDB('admin').adminCommand(

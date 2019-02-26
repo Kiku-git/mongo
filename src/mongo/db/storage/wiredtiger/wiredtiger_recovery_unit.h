@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -51,6 +50,41 @@ namespace mongo {
 
 class BSONObjBuilder;
 
+class WiredTigerOperationStats final : public StorageStats {
+public:
+    /**
+     *  There are two types of statistics provided by WiredTiger engine - data and wait.
+     */
+    enum class Section { DATA, WAIT };
+
+    BSONObj toBSON() final;
+
+    StorageStats& operator+=(const StorageStats&) final;
+
+    WiredTigerOperationStats& operator+=(const WiredTigerOperationStats&);
+
+    /**
+     * Fetches an operation's storage statistics from WiredTiger engine.
+     */
+    void fetchStats(WT_SESSION*, const std::string&, const std::string&);
+
+    std::shared_ptr<StorageStats> getCopy() final;
+
+private:
+    /**
+     * Each statistic in WiredTiger has an integer key, which this map associates with a section
+     * (either DATA or WAIT) and user-readable name.
+     */
+    static std::map<int, std::pair<StringData, Section>> _statNameMap;
+
+    /**
+     * Stores the value for each statistic returned by a WiredTiger cursor. Each statistic is
+     * associated with an integer key, which can be mapped to a name and section using the
+     * '_statNameMap'.
+     */
+    std::map<int, long long> _stats;
+};
+
 class WiredTigerRecoveryUnit final : public RecoveryUnit {
 public:
     WiredTigerRecoveryUnit(WiredTigerSessionCache* sc);
@@ -81,7 +115,7 @@ public:
 
     Status obtainMajorityCommittedSnapshot() override;
 
-    boost::optional<Timestamp> getPointInTimeReadTimestamp() const override;
+    boost::optional<Timestamp> getPointInTimeReadTimestamp() override;
 
     SnapshotId getSnapshotId() const override;
 
@@ -92,6 +126,10 @@ public:
     void clearCommitTimestamp() override;
 
     Timestamp getCommitTimestamp() const override;
+
+    void setDurableTimestamp(Timestamp timestamp) override;
+
+    Timestamp getDurableTimestamp() const override;
 
     void setPrepareTimestamp(Timestamp timestamp) override;
 
@@ -110,13 +148,15 @@ public:
 
     void setReadOnce(bool readOnce) override {
         // Do not allow a session to use readOnce and regular cursors at the same time.
-        invariant(!_active || readOnce == _readOnce || getSession()->cursorsOut() == 0);
+        invariant(!_isActive() || readOnce == _readOnce || getSession()->cursorsOut() == 0);
         _readOnce = readOnce;
     };
 
     bool getReadOnce() const override {
         return _readOnce;
     };
+
+    std::shared_ptr<StorageStats> getOperationStatistics() const override;
 
     // ---- WT STUFF
 
@@ -142,15 +182,64 @@ public:
         return _sessionCache;
     }
     bool inActiveTxn() const {
-        return _active;
+        return _isActive();
     }
     void assertInActiveTxn() const;
+
+    boost::optional<int64_t> getOplogVisibilityTs();
 
     static WiredTigerRecoveryUnit* get(OperationContext* opCtx) {
         return checked_cast<WiredTigerRecoveryUnit*>(opCtx->recoveryUnit());
     }
 
     static void appendGlobalStats(BSONObjBuilder& b);
+
+    /**
+     * State transitions:
+     *
+     *   /------------------------> Inactive <-----------------------------\
+     *   |                             |                                   |
+     *   |                             |                                   |
+     *   |              /--------------+--------------\                    |
+     *   |              |                             |                    | abandonSnapshot()
+     *   |              |                             |                    |
+     *   |   beginUOW() |                             | _txnOpen()         |
+     *   |              |                             |                    |
+     *   |              V                             V                    |
+     *   |    InactiveInUnitOfWork          ActiveNotInUnitOfWork ---------/
+     *   |              |                             |
+     *   |              |                             |
+     *   |   _txnOpen() |                             | beginUOW()
+     *   |              |                             |
+     *   |              \--------------+--------------/
+     *   |                             |
+     *   |                             |
+     *   |                             V
+     *   |                           Active
+     *   |                             |
+     *   |                             |
+     *   |              /--------------+--------------\
+     *   |              |                             |
+     *   |              |                             |
+     *   |   abortUOW() |                             | commitUOW()
+     *   |              |                             |
+     *   |              V                             V
+     *   |          Aborting                      Committing
+     *   |              |                             |
+     *   |              |                             |
+     *   |              |                             |
+     *   \--------------+-----------------------------/
+     *
+     */
+    enum class State {
+        kInactive,
+        kInactiveInUnitOfWork,
+        kActiveNotInUnitOfWork,
+        kActive,
+        kAborting,
+        kCommitting,
+    };
+    State getState_forTest() const;
 
 private:
     void _abort();
@@ -166,12 +255,41 @@ private:
      */
     Timestamp _beginTransactionAtAllCommittedTimestamp(WT_SESSION* session);
 
+    /**
+     * Starts a transaction at the no-overlap timestamp. Returns the timestamp the transaction
+     * was started at.
+     */
+    Timestamp _beginTransactionAtNoOverlapTimestamp(WT_SESSION* session);
+
+    /**
+     * Returns the timestamp at which the current transaction is reading.
+     */
+    Timestamp _getTransactionReadTimestamp(WT_SESSION* session);
+
+    /**
+     * Transitions to new state.
+     */
+    void _setState(State newState);
+
+    /**
+     * Returns true if active.
+     */
+    bool _isActive() const;
+
+    /**
+     * Returns true if currently managed by a WriteUnitOfWork.
+     */
+    bool _inUnitOfWork() const;
+
+    /**
+     * Returns true if currently running commit or rollback handlers
+     */
+    bool _isCommittingOrAborting() const;
+
     WiredTigerSessionCache* _sessionCache;  // not owned
     WiredTigerOplogManager* _oplogManager;  // not owned
     UniqueWiredTigerSession _session;
-    bool _areWriteUnitOfWorksBanned = false;
-    bool _inUnitOfWork;
-    bool _active;
+    State _state = State::kInactive;
     bool _isTimestamped = false;
 
     // Specifies which external source to use when setting read timestamps on transactions.
@@ -189,6 +307,7 @@ private:
     WiredTigerBeginTxnBlock::IgnorePrepared _ignorePrepared{
         WiredTigerBeginTxnBlock::IgnorePrepared::kIgnore};
     Timestamp _commitTimestamp;
+    Timestamp _durableTimestamp;
     Timestamp _prepareTimestamp;
     boost::optional<Timestamp> _lastTimestampSet;
     uint64_t _mySnapshotId;
@@ -196,7 +315,9 @@ private:
     Timestamp _readAtTimestamp;
     std::unique_ptr<Timer> _timer;
     bool _isOplogReader = false;
+    boost::optional<int64_t> _oplogVisibleTs = boost::none;
     typedef std::vector<std::unique_ptr<Change>> Changes;
     Changes _changes;
 };
-}
+
+}  // namespace mongo

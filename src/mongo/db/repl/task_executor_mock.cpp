@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -61,7 +60,7 @@ StatusWith<executor::TaskExecutor::CallbackHandle> TaskExecutorMock::scheduleWor
 StatusWith<executor::TaskExecutor::CallbackHandle> TaskExecutorMock::scheduleRemoteCommand(
     const executor::RemoteCommandRequest& request,
     const RemoteCommandCallbackFn& cb,
-    const transport::BatonHandle& baton) {
+    const BatonHandle& baton) {
     if (shouldFailScheduleRemoteCommandRequest(request)) {
         return Status(ErrorCodes::OperationFailed, "failed to schedule remote command");
     }

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -96,6 +95,10 @@ public:
      */
     GetModPathsReturn getModifiedPaths() const override {
         return {GetModPathsReturn::Type::kFiniteSet, std::set<std::string>{}, {}};
+    }
+
+    boost::optional<MergingLogic> mergingLogic() override {
+        return boost::none;
     }
 
     // Return documents from front of queue.

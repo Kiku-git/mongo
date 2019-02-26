@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -104,6 +103,13 @@ public:
 
     Status checkIfWriteConcernCanBeSatisfied(const WriteConcernOptions&) const override;
 
+    Status checkIfCommitQuorumCanBeSatisfied(
+        const CommitQuorumOptions& commitQuorum) const override;
+
+    StatusWith<bool> checkIfCommitQuorumIsSatisfied(
+        const CommitQuorumOptions& commitQuorum,
+        const std::vector<HostAndPort>& commitReadyMembers) const override;
+
     void setMyLastAppliedOpTime(const repl::OpTime&) override;
     void setMyLastDurableOpTime(const repl::OpTime&) override;
 
@@ -122,6 +128,7 @@ public:
                                        boost::optional<Date_t>) override;
 
     Status waitUntilOpTimeForRead(OperationContext*, const repl::ReadConcernArgs&) override;
+    Status awaitOpTimeCommitted(OperationContext* opCtx, repl::OpTime opTime) override;
 
     OID getElectionId() override;
 
@@ -205,8 +212,6 @@ public:
 
     bool getWriteConcernMajorityShouldJournal() override;
 
-    void summarizeAsHtml(repl::ReplSetHtmlSummary*) override;
-
     void dropAllSnapshots() override;
 
     long long getTerm() override;
@@ -223,9 +228,6 @@ public:
 
     size_t getNumUncommittedSnapshots() override;
 
-    repl::ReplSettings::IndexPrefetchConfig getIndexPrefetchConfig() const override;
-    void setIndexPrefetchConfig(const repl::ReplSettings::IndexPrefetchConfig) override;
-
     Status stepUpIfEligible(bool skipDryRun) override;
 
     Status abortCatchupIfNeeded() override;
@@ -235,6 +237,8 @@ public:
     boost::optional<Timestamp> getRecoveryTimestamp() override;
 
     bool setContainsArbiter() const override;
+
+    void attemptToAdvanceStableTimestamp() override;
 
 private:
     // Back pointer to the ServiceContext that has started the instance.

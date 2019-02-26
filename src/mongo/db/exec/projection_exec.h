@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -30,6 +29,8 @@
 
 #pragma once
 
+#include "boost/optional.hpp"
+
 #include "mongo/db/exec/working_set.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/matcher/expression.h"
@@ -40,6 +41,9 @@ namespace mongo {
 
 class CollatorInterface;
 
+/**
+ * A fully-featured executor for find projection.
+ */
 class ProjectionExec {
 public:
     /**
@@ -55,7 +59,6 @@ public:
     enum MetaProjection {
         META_GEONEAR_DIST,
         META_GEONEAR_POINT,
-        META_IX_KEY,
         META_RECORDID,
         META_SORT_KEY,
         META_TEXT_SCORE,
@@ -76,16 +79,104 @@ public:
     ~ProjectionExec();
 
     /**
-     * Apply this projection to the 'member'.  Changes the type to OWNED_OBJ.
+     * Indicates whether this is a returnKey projection which should be performed via
+     * 'computeReturnKeyProjection()'.
      */
-    Status transform(WorkingSetMember* member) const;
+    bool returnKey() const {
+        return _hasReturnKey;
+    }
+
+    /**
+     * Indicates whether 'sortKey' must be provided for 'computeReturnKeyProjection()' or
+     * 'project()'.
+     */
+    bool needsSortKey() const {
+        return _needsSortKey;
+    }
+
+    /**
+     * Indicates whether 'geoDistance' must be provided for 'project()'.
+     */
+    bool needsGeoNearDistance() const {
+        return _needsGeoNearDistance;
+    }
+
+    /**
+     * Indicates whether 'geoNearPoint' must be provided for 'project()'.
+     */
+    bool needsGeoNearPoint() const {
+        return _needsGeoNearPoint;
+    }
+
+    /**
+     * Indicates whether 'textScore' is going to be used in 'project()'.
+     */
+    bool needsTextScore() const {
+        return _needsTextScore;
+    }
+
+    /**
+     * Returns false if there are no meta fields to project.
+     */
+    bool hasMetaFields() const {
+        return !_meta.empty();
+    }
+
+    /**
+     * Performs a returnKey projection and provides index keys rather than projection results.
+     */
+    StatusWith<BSONObj> computeReturnKeyProjection(const BSONObj& indexKey,
+                                                   const BSONObj& sortKey) const;
+
+    /**
+     * Performs a projection given a BSONObj source. Meta fields must be provided if necessary.
+     * Their necessity can be queried via the 'needs*' functions.
+     */
+    StatusWith<BSONObj> project(const BSONObj& in,
+                                const boost::optional<const double> geoDistance = boost::none,
+                                const BSONObj& geoNearPoint = BSONObj(),
+                                const BSONObj& sortKey = BSONObj(),
+                                const boost::optional<const double> textScore = boost::none,
+                                const int64_t recordId = 0) const;
+
+    /**
+     * Performs a projection given index 'KeyData' to directly retrieve results. This function
+     * handles projections which do not qualify for the ProjectionNodeCovered fast-path but are
+     * still covered by indices.
+     */
+    StatusWith<BSONObj> projectCovered(
+        const std::vector<IndexKeyDatum>& keyData,
+        const boost::optional<const double> geoDistance = boost::none,
+        const BSONObj& geoNearPoint = BSONObj(),
+        const BSONObj& sortKey = BSONObj(),
+        const boost::optional<const double> textScore = boost::none,
+        const int64_t recordId = 0) const;
+
+    /**
+     * Determines if calls to the project method require that this object was created with the full
+     * query expression. We may need it for MatchDetails.
+     */
+    bool projectRequiresQueryExpression() const {
+        return ARRAY_OP_POSITIONAL == _arrayOpType;
+    }
+
 
 private:
+    /**
+     * Adds meta fields to the end of a projection.
+     */
+    BSONObj addMeta(BSONObjBuilder bob,
+                    const boost::optional<const double> geoDistance,
+                    const BSONObj& geoNearPoint,
+                    const BSONObj& sortKey,
+                    const boost::optional<const double> textScore,
+                    const int64_t recordId) const;
+
     //
     // Initialization
     //
 
-    ProjectionExec();
+    ProjectionExec() = default;
 
     /**
      * Add 'field' as a field name that is included or excluded as part of the projection.
@@ -110,16 +201,9 @@ private:
      * 'bob'.
      * Otherwise, returns error.
      */
-    Status transform(const BSONObj& in,
-                     BSONObjBuilder* bob,
-                     const MatchDetails* details = NULL) const;
-
-    /**
-     * See transform(...) above.
-     */
-    bool transformRequiresDetails() const {
-        return ARRAY_OP_POSITIONAL == _arrayOpType;
-    }
+    Status projectHelper(const BSONObj& in,
+                         BSONObjBuilder* bob,
+                         const MatchDetails* details = nullptr) const;
 
     /**
      * Appends the element 'e' to the builder 'bob', possibly descending into sub-fields of 'e'
@@ -137,10 +221,10 @@ private:
     void appendArray(BSONObjBuilder* bob, const BSONObj& array, bool nested = false) const;
 
     // True if default at this level is to include.
-    bool _include;
+    bool _include = true;
 
     // True if this level can't be skipped or included without recursing.
-    bool _special;
+    bool _special = false;
 
     // We must group projections with common prefixes together.
     // TODO: benchmark std::vector<pair> vs map
@@ -154,11 +238,11 @@ private:
     BSONObj _source;
 
     // Should we include the _id field?
-    bool _includeID;
+    bool _includeID = true;
 
     // Arguments from the $slice operator.
-    int _skip;
-    int _limit;
+    int _skip = 0;
+    int _limit = -1;
 
     // Used for $elemMatch and positional operator ($)
     Matchers _matchers;
@@ -166,17 +250,24 @@ private:
     // The matchers above point into BSONObjs and this is where those objs live.
     std::vector<BSONObj> _elemMatchObjs;
 
-    ArrayOpType _arrayOpType;
+    ArrayOpType _arrayOpType = ARRAY_OP_NORMAL;
 
-    // The full query expression.  Used when we need MatchDetails.
-    const MatchExpression* _queryExpression;
+    // The full query expression. Used when we need MatchDetails.
+    const MatchExpression* _queryExpression = nullptr;
 
     // Projections that aren't sourced from the document or index keys.
     MetaMap _meta;
 
     // Do we have a returnKey projection?  If so we *only* output the index key metadata, and
     // possibly the sort key for mongos to use.  If it's not found we output nothing.
-    bool _hasReturnKey;
+    bool _hasReturnKey = false;
+
+    // After parsing in the constructor, these fields will indicate the neccesity of metadata
+    // for $meta projection.
+    bool _needsSortKey = false;
+    bool _needsGeoNearDistance = false;
+    bool _needsGeoNearPoint = false;
+    bool _needsTextScore = false;
 
     // The field names associated with any sortKey meta-projection(s). Empty if there is no sortKey
     // meta-projection.

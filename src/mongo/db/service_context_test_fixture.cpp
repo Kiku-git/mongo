@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -48,6 +47,9 @@ ScopedGlobalServiceContextForTest::ScopedGlobalServiceContextForTest() {
 }
 
 ScopedGlobalServiceContextForTest::~ScopedGlobalServiceContextForTest() {
+    if (hasGlobalServiceContext()) {
+        getGlobalServiceContext()->waitForClientsToFinish();
+    }
     setGlobalServiceContext({});
 }
 
@@ -55,7 +57,8 @@ ServiceContext* ScopedGlobalServiceContextForTest::getServiceContext() {
     return getGlobalServiceContext();
 }
 
-ServiceContextTest::ServiceContextTest() : _threadClient(getGlobalServiceContext()) {}
+
+ServiceContextTest::ServiceContextTest() : _threadClient(getServiceContext()) {}
 
 Client* ServiceContextTest::getClient() {
     return Client::getCurrent();

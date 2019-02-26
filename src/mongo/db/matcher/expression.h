@@ -1,6 +1,3 @@
-// expression.h
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -117,6 +114,7 @@ public:
         // JSON Schema expressions.
         INTERNAL_SCHEMA_ALLOWED_PROPERTIES,
         INTERNAL_SCHEMA_ALL_ELEM_MATCH_FROM_INDEX,
+        INTERNAL_SCHEMA_BIN_DATA_SUBTYPE,
         INTERNAL_SCHEMA_COND,
         INTERNAL_SCHEMA_EQ,
         INTERNAL_SCHEMA_FMOD,

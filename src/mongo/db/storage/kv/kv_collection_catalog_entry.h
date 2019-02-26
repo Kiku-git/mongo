@@ -1,6 +1,3 @@
-// kv_collection_catalog_entry.h
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -42,11 +39,11 @@
 namespace mongo {
 
 class KVCatalog;
-class KVEngine;
+class KVStorageEngineInterface;
 
 class KVCollectionCatalogEntry final : public BSONCollectionCatalogEntry {
 public:
-    KVCollectionCatalogEntry(KVEngine* engine,
+    KVCollectionCatalogEntry(KVStorageEngineInterface* engine,
                              KVCatalog* catalog,
                              StringData ns,
                              StringData ident,
@@ -72,10 +69,31 @@ public:
 
     Status prepareForIndexBuild(OperationContext* opCtx,
                                 const IndexDescriptor* spec,
+                                IndexBuildProtocol indexBuildProtocol,
                                 bool isBackgroundSecondaryBuild) final;
+
+    bool isTwoPhaseIndexBuild(OperationContext* opCtx, StringData indexName) const final;
+
+    long getIndexBuildVersion(OperationContext* opCtx, StringData indexName) const final;
+
+    void setIndexBuildScanning(OperationContext* opCtx,
+                               StringData indexName,
+                               std::string sideWritesIdent,
+                               boost::optional<std::string> constraintViolationsIdent) final;
+
+    bool isIndexBuildScanning(OperationContext* opCtx, StringData indexName) const final;
+
+    void setIndexBuildDraining(OperationContext* opCtx, StringData indexName) final;
+
+    bool isIndexBuildDraining(OperationContext* opCtx, StringData indexName) const final;
 
     void indexBuildSuccess(OperationContext* opCtx, StringData indexName) final;
 
+    boost::optional<std::string> getSideWritesIdent(OperationContext* opCtx,
+                                                    StringData indexName) const final;
+
+    boost::optional<std::string> getConstraintViolationsIdent(OperationContext* opCtx,
+                                                              StringData indexName) const final;
     void updateTTLSetting(OperationContext* opCtx,
                           StringData idxName,
                           long long newExpireSeconds) final;
@@ -109,8 +127,8 @@ private:
     class AddIndexChange;
     class RemoveIndexChange;
 
-    KVEngine* _engine;    // not owned
-    KVCatalog* _catalog;  // not owned
+    KVStorageEngineInterface* const _engine;  // not owned
+    KVCatalog* _catalog;                      // not owned
     std::string _ident;
     std::unique_ptr<RecordStore> _recordStore;  // owned
 };

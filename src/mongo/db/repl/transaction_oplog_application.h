@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -41,7 +40,8 @@ namespace mongo {
  */
 Status applyCommitTransaction(OperationContext* opCtx,
                               const repl::OplogEntry& entry,
-                              repl::OplogApplication::Mode mode);
+                              repl::OplogApplication::Mode mode,
+                              boost::optional<Timestamp> stableTimestampForRecovery);
 
 /**
  * Apply `abortTransaction` oplog entry.

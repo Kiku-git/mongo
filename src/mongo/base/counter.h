@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -64,6 +63,6 @@ public:
     }
 
 private:
-    AtomicInt64 _counter;
+    AtomicWord<long long> _counter;
 };
 }  // namespace mongo

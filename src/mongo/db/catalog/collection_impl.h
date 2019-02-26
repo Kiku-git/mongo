@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -39,13 +38,15 @@
 namespace mongo {
 class IndexConsistency;
 class UUIDCatalog;
-class CollectionImpl final : virtual public Collection::Impl, virtual CappedCallback {
+class CollectionImpl final : public Collection, public CappedCallback {
 private:
     static const int kMagicNumber = 1357924;
 
 public:
-    explicit CollectionImpl(Collection* _this,
-                            OperationContext* opCtx,
+    enum ValidationAction { WARN, ERROR_V };
+    enum ValidationLevel { OFF, MODERATE, STRICT_V };
+
+    explicit CollectionImpl(OperationContext* opCtx,
                             StringData fullNS,
                             OptionalCollectionUUID uuid,
                             CollectionCatalogEntry* details,  // does not own
@@ -53,8 +54,6 @@ public:
                             DatabaseCatalogEntry* dbce);      // does not own
 
     ~CollectionImpl();
-
-    void init(OperationContext* opCtx) final;
 
     bool ok() const final {
         return _magic == kMagicNumber;
@@ -102,13 +101,9 @@ public:
         return _recordStore;
     }
 
-    CursorManager* getCursorManager() const final {
-        return _cursorManager.get();
-    }
-
     bool requiresIdIndex() const final;
 
-    Snapshotted<BSONObj> docFor(OperationContext* opCtx, const RecordId& loc) const final {
+    Snapshotted<BSONObj> docFor(OperationContext* opCtx, RecordId loc) const final {
         return Snapshotted<BSONObj>(opCtx->recoveryUnit()->getSnapshotId(),
                                     _recordStore->dataFor(opCtx, loc).releaseToBson());
     }
@@ -117,9 +112,7 @@ public:
      * @param out - contents set to the right docs if exists, or nothing.
      * @return true iff loc exists
      */
-    bool findDoc(OperationContext* opCtx,
-                 const RecordId& loc,
-                 Snapshotted<BSONObj>* out) const final;
+    bool findDoc(OperationContext* opCtx, RecordId loc, Snapshotted<BSONObj>* out) const final;
 
     std::unique_ptr<SeekableRecordCursor> getCursor(OperationContext* opCtx,
                                                     bool forward = true) const final;
@@ -142,7 +135,7 @@ public:
     void deleteDocument(
         OperationContext* opCtx,
         StmtId stmtId,
-        const RecordId& loc,
+        RecordId loc,
         OpDebug* opDebug,
         bool fromMigrate = false,
         bool noWarn = false,
@@ -202,7 +195,7 @@ public:
      * @return the post update location of the doc (may or may not be the same as oldLocation)
      */
     RecordId updateDocument(OperationContext* opCtx,
-                            const RecordId& oldLocation,
+                            RecordId oldLocation,
                             const Snapshotted<BSONObj>& oldDoc,
                             const BSONObj& newDoc,
                             bool indexesAffected,
@@ -219,7 +212,7 @@ public:
      * @return the contents of the updated record.
      */
     StatusWith<RecordData> updateDocumentWithDamages(OperationContext* opCtx,
-                                                     const RecordId& loc,
+                                                     RecordId loc,
                                                      const Snapshotted<RecordData>& oldRec,
                                                      const char* damageSource,
                                                      const mutablebson::DamageVector& damages,
@@ -262,10 +255,6 @@ public:
      */
     void cappedTruncateAfter(OperationContext* opCtx, RecordId end, bool inclusive) final;
 
-    using ValidationAction = Collection::ValidationAction;
-
-    using ValidationLevel = Collection::ValidationLevel;
-
     /**
      * Returns a non-ok Status if validator is not legal for this collection.
      */
@@ -275,9 +264,6 @@ public:
         MatchExpressionParser::AllowedFeatureSet allowedFeatures,
         boost::optional<ServerGlobalParams::FeatureCompatibility::Version>
             maxFeatureCompatibilityVersion = boost::none) const final;
-
-    static StatusWith<ValidationLevel> parseValidationLevel(StringData);
-    static StatusWith<ValidationAction> parseValidationAction(StringData);
 
     /**
      * Sets the validator for this collection.
@@ -310,6 +296,8 @@ public:
     //
 
     bool isCapped() const final;
+
+    CappedCallback* getCappedCallback() final;
 
     /**
      * Get a pointer to a capped insert notifier object. The caller can wait on this object
@@ -360,6 +348,9 @@ public:
      */
     const CollatorInterface* getDefaultCollator() const final;
 
+    StatusWith<std::vector<BSONObj>> addCollationDefaultsToIndexSpecsForCreate(
+        OperationContext* opCtx, const std::vector<BSONObj>& indexSpecs) const final;
+
     std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> makePlanExecutor(
         OperationContext* opCtx,
         PlanExecutor::YieldPolicy yieldPolicy,
@@ -367,15 +358,13 @@ public:
 
     void indexBuildSuccess(OperationContext* opCtx, IndexCatalogEntry* index) final;
 
-private:
+    void establishOplogCollectionForLogging(OperationContext* opCtx) final;
+
     inline DatabaseCatalogEntry* dbce() const final {
         return this->_dbce;
     }
 
-    inline CollectionCatalogEntry* details() const final {
-        return this->_details;
-    }
-
+private:
     /**
      * Returns a non-ok Status if document does not pass this collection's validator.
      */
@@ -422,8 +411,6 @@ private:
     ValidationAction _validationAction;
     ValidationLevel _validationLevel;
 
-    std::unique_ptr<CursorManager> _cursorManager;
-
     // Notifier object for awaitData. Threads polling a capped collection for new data can wait
     // on this object until notified of the arrival of new data.
     //
@@ -432,7 +419,5 @@ private:
 
     // The earliest snapshot that is allowed to use this collection.
     boost::optional<Timestamp> _minVisibleSnapshot;
-
-    Collection* _this;
 };
 }  // namespace mongo

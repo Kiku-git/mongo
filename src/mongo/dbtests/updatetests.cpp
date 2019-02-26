@@ -1,7 +1,3 @@
-// updatetests.cpp : unit tests relating to update requests
-//
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -31,6 +27,10 @@
  *    it in the license file.
  */
 
+/**
+ * unit tests relating to update requests
+ */
+
 #include "mongo/platform/basic.h"
 
 #include <iostream>
@@ -39,7 +39,6 @@
 #include "mongo/client/dbclient_cursor.h"
 #include "mongo/db/bson/dotted_path_support.h"
 #include "mongo/db/client.h"
-#include "mongo/db/db.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/json.h"
 #include "mongo/db/lasterror.h"
@@ -73,7 +72,7 @@ protected:
         _client.update(ns, Query(q), o, upsert);
     }
     bool error() {
-        return !_client.getPrevError().getField("err").isNull();
+        return !_client.getLastError().empty();
     }
 
     const ServiceContext::UniqueOperationContext _txnPtr = cc().makeOperationContext();

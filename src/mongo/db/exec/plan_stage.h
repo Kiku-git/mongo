@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -109,6 +108,17 @@ public:
     PlanStage(const char* typeName, OperationContext* opCtx)
         : _commonStats(typeName), _opCtx(opCtx) {}
 
+protected:
+    /**
+     * Obtain a PlanStage given a child stage. Called during the construction of derived
+     * PlanStage types with a single direct descendant.
+     */
+    PlanStage(OperationContext* opCtx, std::unique_ptr<PlanStage> child, const char* typeName)
+        : PlanStage(typeName, opCtx) {
+        _children.push_back(std::move(child));
+    }
+
+public:
     virtual ~PlanStage() {}
 
     using Children = std::vector<std::unique_ptr<PlanStage>>;
@@ -152,10 +162,6 @@ public:
         // on the WSM that the held WSID refers to.
         NEED_YIELD,
 
-        // Something went wrong but it's not an internal error.  Perhaps our collection was
-        // dropped or state deleted.
-        DEAD,
-
         // Something has gone unrecoverably wrong.  Stop running this query.
         // If the out parameter does not refer to an invalid working set member,
         // call WorkingSetCommon::getStatusMemberObject() to get details on the failure.
@@ -173,8 +179,6 @@ public:
             return "NEED_TIME";
         } else if (NEED_YIELD == state) {
             return "NEED_YIELD";
-        } else if (DEAD == state) {
-            return "DEAD";
         } else {
             verify(FAILURE == state);
             return "FAILURE";

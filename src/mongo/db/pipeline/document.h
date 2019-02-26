@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -306,7 +305,8 @@ private:
     friend class MutableDocument;
     friend class MutableValue;
 
-    explicit Document(const DocumentStorage* ptr) : _storage(ptr){};
+    explicit Document(boost::intrusive_ptr<const DocumentStorage>&& ptr)
+        : _storage(std::move(ptr)) {}
 
     const DocumentStorage& storage() const {
         return (_storage ? *_storage : DocumentStorage::emptyDoc());
@@ -391,7 +391,7 @@ private:
             // result in an allocation where none is needed, in practice this is only called
             // when we are about to add a field to the sub-document so this just changes where
             // the allocation is done.
-            _val = Value(Document(new DocumentStorage()));
+            _val = Value(Document(make_intrusive<DocumentStorage>()));
         }
 
         return _val._storage.genericRCPtr;
@@ -598,7 +598,7 @@ private:
         return const_cast<DocumentStorage&>(*storagePtr());
     }
     DocumentStorage& newStorage() {
-        reset(new DocumentStorage);
+        reset(make_intrusive<DocumentStorage>());
         return const_cast<DocumentStorage&>(*storagePtr());
     }
     DocumentStorage& clonedStorage() {

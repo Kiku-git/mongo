@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2018 MongoDB, Inc.
+ * Public Domain 2014-2019 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -578,6 +578,11 @@ cursor_statistics(WT_SESSION *session)
 	    "statistics:table:mytable",
 	    NULL, "statistics=(all,clear)", &cursor));
 	/*! [Statistics cursor clear configuration] */
+
+	/*! [Statistics cursor session] */
+	error_check(session->open_cursor(
+	    session, "statistics:session", NULL, NULL, &cursor));
+	/*! [Statistics cursor session] */
 }
 
 static void
@@ -901,7 +906,6 @@ transaction_ops(WT_SESSION *session_arg)
 	error_check(session->commit_transaction(session, NULL));
 	/*! [transaction isolation] */
 
-#ifdef HAVE_TIMESTAMPS
 	{
 	/*! [transaction prepare] */
 	/*
@@ -920,7 +924,6 @@ transaction_ops(WT_SESSION *session_arg)
 	    session, "commit_timestamp=2b"));
 	/*! [transaction prepare] */
 	}
-#endif
 
 	/*! [session isolation configuration] */
 	/* Open a session configured for read-uncommitted isolation. */
@@ -947,10 +950,9 @@ transaction_ops(WT_SESSION *session_arg)
 
 	error_check(session->begin_transaction(session, NULL));
 
-#ifdef HAVE_TIMESTAMPS
 	{
 	/*! [query timestamp] */
-	char timestamp_buf[2 * WT_TIMESTAMP_SIZE + 1];
+	char timestamp_buf[2 * sizeof(uint64_t) + 1];
 
 	/*! [transaction timestamp] */
 	error_check(
@@ -979,7 +981,6 @@ transaction_ops(WT_SESSION *session_arg)
 	/*! [rollback to stable] */
 	error_check(conn->rollback_to_stable(conn, NULL));
 	/*! [rollback to stable] */
-#endif
 }
 
 /*! [Implement WT_COLLATOR] */
@@ -1283,6 +1284,12 @@ main(int argc, char *argv[])
 	/*! [Configure file_extend] */
 	error_check(conn->close(conn, NULL));
 
+	/*! [Configure capacity] */
+	error_check(wiredtiger_open(
+	    home, NULL, "create,io_capacity=(total=40MB)", &conn));
+	/*! [Configure capacity] */
+	error_check(conn->close(conn, NULL));
+
 	/*! [Eviction configuration] */
 	/*
 	 * Configure eviction to begin at 90% full, and run until the cache
@@ -1353,6 +1360,26 @@ main(int argc, char *argv[])
 	printf("WiredTiger version is %d, %d (patch %d)\n",
 	    major_v, minor_v, patch);
 	/*! [Get the WiredTiger library version #2] */
+	}
+
+	{
+	/*! [Calculate a modify operation] */
+	WT_MODIFY mod[3];
+	int nmod = 3;
+	WT_ITEM prev, newv;
+	prev.data = "the quick brown fox jumped over the lazy dog. " \
+		"THE QUICK BROWN FOX JUMPED OVER THE LAZY DOG. " \
+		"the quick brown fox jumped over the lazy dog. " \
+		"THE QUICK BROWN FOX JUMPED OVER THE LAZY DOG. ";
+	prev.size = strlen(prev.data);
+	newv.data = "A quick brown fox jumped over the lazy dog. " \
+		"THE QUICK BROWN FOX JUMPED OVER THE LAZY DOG. " \
+		"then a quick brown fox jumped over the lazy dog. " \
+		"THE QUICK BROWN FOX JUMPED OVER THE LAZY DOG. " \
+		"then what?";
+	newv.size = strlen(newv.data);
+	error_check(wiredtiger_calc_modify(NULL, &prev, &newv, 20, mod, &nmod));
+	/*! [Calculate a modify operation] */
 	}
 
 	{

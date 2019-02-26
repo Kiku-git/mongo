@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -118,7 +117,7 @@ TEST(CalculateHashedSplitPointsTest, EmptyCollectionChunksEqualToShards) {
     checkCalculatedHashedSplitPoints(true, true, 3, 3, &expectedSplitPoints, &expectedSplitPoints);
 }
 
-TEST(CalculateHashedSplitPointsTest, EmptyCollectionHashedWithInitialSplitsReturnsEmptySplits) {
+TEST(CalculateHashedSplitPointsTest, EmptyCollectionHashedWithNoInitialSplitsReturnsEmptySplits) {
     const std::vector<BSONObj> expectedSplitPoints;
     checkCalculatedHashedSplitPoints(true, true, 2, 1, &expectedSplitPoints, &expectedSplitPoints);
 }
@@ -147,7 +146,7 @@ TEST(CalculateHashedSplitPointsTest, NotHashedWithInitialSplitsFails) {
                        ErrorCodes::InvalidOptions);
 }
 
-class GenerateInitialSplitChunksTest : public unittest::Test {
+class GenerateInitialSplitChunksTestBase : public unittest::Test {
 public:
     /**
      * Returns a vector of ChunkType objects for the given chunk ranges.
@@ -207,7 +206,7 @@ private:
     const Timestamp _timeStamp{Date_t::now()};
 };
 
-class GenerateInitialHashedSplitChunksTest : public GenerateInitialSplitChunksTest {
+class GenerateInitialHashedSplitChunksTest : public GenerateInitialSplitChunksTestBase {
 public:
     const std::vector<BSONObj>& hashedSplitPoints() {
         return _splitPoints;
@@ -263,7 +262,7 @@ TEST_F(GenerateInitialHashedSplitChunksTest,
     assertChunkVectorsAreEqual(expectedChunks, shardCollectionConfig.chunks);
 }
 
-class GenerateShardCollectionInitialZonedChunksTest : public GenerateInitialSplitChunksTest {
+class GenerateShardCollectionInitialZonedChunksTest : public GenerateInitialSplitChunksTestBase {
 public:
     /**
      * Calls generateShardCollectionInitialZonedChunks according to the given arguments

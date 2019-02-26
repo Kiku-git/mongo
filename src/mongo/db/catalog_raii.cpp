@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -54,11 +53,13 @@ void uassertLockTimeout(std::string resourceName, LockMode lockMode, bool isLock
 
 AutoGetDb::AutoGetDb(OperationContext* opCtx, StringData dbName, LockMode mode, Date_t deadline)
     : _dbLock(opCtx, dbName, mode, deadline), _db([&] {
-          uassertLockTimeout(str::stream() << "database " << dbName, mode, _dbLock.isLocked());
-          return DatabaseHolder::getDatabaseHolder().get(opCtx, dbName);
+          auto databaseHolder = DatabaseHolder::get(opCtx);
+          return databaseHolder->getDb(opCtx, dbName);
       }()) {
     if (_db) {
-        DatabaseShardingState::get(_db).checkDbVersion(opCtx);
+        auto& dss = DatabaseShardingState::get(_db);
+        auto dssLock = DatabaseShardingState::DSSLock::lock(opCtx, &dss);
+        dss.checkDbVersion(opCtx, dssLock);
     }
 }
 
@@ -74,9 +75,6 @@ AutoGetCollection::AutoGetCollection(OperationContext* opCtx,
               deadline),
       _resolvedNss(resolveNamespaceStringOrUUID(opCtx, nsOrUUID)) {
     _collLock.emplace(opCtx->lockState(), _resolvedNss.ns(), modeColl, deadline);
-    uassertLockTimeout(
-        str::stream() << "collection " << nsOrUUID.toString(), modeColl, _collLock->isLocked());
-
     // Wait for a configured amount of time after acquiring locks if the failpoint is enabled
     MONGO_FAIL_POINT_BLOCK(setAutoGetCollectionWait, customWait) {
         const BSONObj& data = customWait.getData();
@@ -88,6 +86,15 @@ AutoGetCollection::AutoGetCollection(OperationContext* opCtx,
               str::stream() << "Database for " << _resolvedNss.ns()
                             << " disappeared after successufully resolving "
                             << nsOrUUID.toString());
+
+    // In most cases we expect modifications for system.views to upgrade MODE_IX to MODE_X before
+    // taking the lock. One exception is a query by UUID of system.views in a transaction. Usual
+    // queries of system.views (by name, not UUID) within a transaction are rejected. However, if
+    // the query is by UUID we can't determine whether the namespace is actually system.views until
+    // we take the lock here. So we have this one last assertion.
+    uassert(51070,
+            "Modifications to system.views must take an exclusive lock",
+            !_resolvedNss.isSystemDotViews() || modeColl != MODE_IX);
 
     // If the database doesn't exists, we can't obtain a collection or check for views
     if (!db)
@@ -104,18 +111,20 @@ AutoGetCollection::AutoGetCollection(OperationContext* opCtx,
         // pending catalog changes. Instead, we must return an error in such situations. We ignore
         // this restriction for the oplog, since it never has pending catalog changes.
         auto readConcernLevel = repl::ReadConcernArgs::get(opCtx).getLevel();
-        auto mySnapshot = opCtx->recoveryUnit()->getPointInTimeReadTimestamp();
-        if (readConcernLevel == repl::ReadConcernLevel::kSnapshotReadConcern && mySnapshot &&
+        if (readConcernLevel == repl::ReadConcernLevel::kSnapshotReadConcern &&
             _resolvedNss != NamespaceString::kRsOplogNamespace) {
-            auto minSnapshot = _coll->getMinimumVisibleSnapshot();
-            uassert(
-                ErrorCodes::SnapshotUnavailable,
-                str::stream() << "Unable to read from a snapshot due to pending collection catalog "
-                                 "changes; please retry the operation. Snapshot timestamp is "
-                              << mySnapshot->toString()
-                              << ". Collection minimum is "
-                              << minSnapshot->toString(),
-                !minSnapshot || *mySnapshot >= *minSnapshot);
+            auto mySnapshot = opCtx->recoveryUnit()->getPointInTimeReadTimestamp();
+            if (mySnapshot) {
+                auto minSnapshot = _coll->getMinimumVisibleSnapshot();
+                uassert(ErrorCodes::SnapshotUnavailable,
+                        str::stream()
+                            << "Unable to read from a snapshot due to pending collection catalog "
+                               "changes; please retry the operation. Snapshot timestamp is "
+                            << mySnapshot->toString()
+                            << ". Collection minimum is "
+                            << minSnapshot->toString(),
+                        !minSnapshot || *mySnapshot >= *minSnapshot);
+            }
         }
 
         // If the collection exists, there is no need to check for views.
@@ -164,10 +173,13 @@ AutoGetOrCreateDb::AutoGetOrCreateDb(OperationContext* opCtx,
             _autoDb.emplace(opCtx, dbName, MODE_X, deadline);
         }
 
-        _db = DatabaseHolder::getDatabaseHolder().openDb(opCtx, dbName, &_justCreated);
+        auto databaseHolder = DatabaseHolder::get(opCtx);
+        _db = databaseHolder->openDb(opCtx, dbName, &_justCreated);
     }
 
-    DatabaseShardingState::get(_db).checkDbVersion(opCtx);
+    auto& dss = DatabaseShardingState::get(_db);
+    auto dssLock = DatabaseShardingState::DSSLock::lock(opCtx, &dss);
+    dss.checkDbVersion(opCtx, dssLock);
 }
 
 ConcealUUIDCatalogChangesBlock::ConcealUUIDCatalogChangesBlock(OperationContext* opCtx)

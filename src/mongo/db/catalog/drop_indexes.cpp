@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -116,7 +115,7 @@ Status wrappedRun(OperationContext* opCtx,
     }
 
     if (indexElem.type() == Object) {
-        std::vector<IndexDescriptor*> indexes;
+        std::vector<const IndexDescriptor*> indexes;
         collection->getIndexCatalog()->findIndexesByKeyPattern(
             opCtx, indexElem.embeddedObject(), false, &indexes);
         if (indexes.empty()) {
@@ -134,7 +133,7 @@ Status wrappedRun(OperationContext* opCtx,
                                         << indexes[1]->infoObj());
         }
 
-        IndexDescriptor* desc = indexes[0];
+        const IndexDescriptor* desc = indexes[0];
         if (desc->isIdIndex()) {
             return Status(ErrorCodes::InvalidOptions, "cannot drop _id index");
         }
@@ -166,7 +165,7 @@ Status wrappedRun(OperationContext* opCtx,
         for (auto indexNameElem : indexElem.Array()) {
             if (indexNameElem.type() != String) {
                 return Status(ErrorCodes::TypeMismatch,
-                              str::stream() << "dropIndexes " << collection->ns().ns() << " ("
+                              str::stream() << "dropIndexes " << collection->ns() << " ("
                                             << collection->uuid()
                                             << ") failed to drop multiple indexes "
                                             << indexElem.toString(false)
@@ -176,7 +175,7 @@ Status wrappedRun(OperationContext* opCtx,
             auto indexToDelete = indexNameElem.String();
             auto status = dropIndexByName(opCtx, collection, indexCatalog, indexToDelete);
             if (!status.isOK()) {
-                return status.withContext(str::stream() << "dropIndexes " << collection->ns().ns()
+                return status.withContext(str::stream() << "dropIndexes " << collection->ns()
                                                         << " ("
                                                         << collection->uuid()
                                                         << ") failed to drop multiple indexes "
@@ -207,7 +206,7 @@ Status dropIndexes(OperationContext* opCtx,
 
         if (userInitiatedWritesAndNotPrimary) {
             return Status(ErrorCodes::NotMaster,
-                          str::stream() << "Not primary while dropping indexes in " << nss.ns());
+                          str::stream() << "Not primary while dropping indexes in " << nss);
         }
 
         if (!serverGlobalParams.quiet.load()) {
@@ -220,7 +219,7 @@ Status dropIndexes(OperationContext* opCtx,
         if (!db || !collection) {
             if (db && db->getViewCatalog()->lookup(opCtx, nss.ns())) {
                 return Status(ErrorCodes::CommandNotSupportedOnView,
-                              str::stream() << "Cannot drop indexes on view " << nss.ns());
+                              str::stream() << "Cannot drop indexes on view " << nss);
             }
 
             return Status(ErrorCodes::NamespaceNotFound, "ns not found");

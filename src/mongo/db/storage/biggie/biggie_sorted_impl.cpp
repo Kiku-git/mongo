@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -39,6 +38,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/catalog/index_catalog_entry.h"
+#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/storage/biggie/biggie_recovery_unit.h"
 #include "mongo/db/storage/biggie/biggie_sorted_impl.h"
 #include "mongo/db/storage/biggie/store.h"
@@ -94,12 +94,11 @@ std::string createKeyString(const BSONObj& key,
     b.append("", prefixToUse);                                // prefix
     b.append("", std::string(ks.getBuffer(), ks.getSize()));  // key
 
-    std::unique_ptr<KeyString> retKs;
     if (isUnique)
-        retKs = std::make_unique<KeyString>(version, b.obj(), allAscending);
+        ks.resetToKey(b.obj(), allAscending);
     else
-        retKs = std::make_unique<KeyString>(version, b.obj(), allAscending, loc);
-    return std::string(retKs->getBuffer(), retKs->getSize());
+        ks.resetToKey(b.obj(), allAscending, loc);
+    return std::string(ks.getBuffer(), ks.getSize());
 }
 
 bool keysAreIdentical(std::string ks1, std::string ks2, bool isUnique) {
@@ -160,6 +159,7 @@ IndexKeyEntry keyStringToIndexKeyEntry(const std::string keyString,
 }  // namespace
 
 SortedDataBuilderInterface::SortedDataBuilderInterface(OperationContext* opCtx,
+                                                       bool unique,
                                                        bool dupsAllowed,
                                                        Ordering order,
                                                        const std::string& prefix,
@@ -168,6 +168,7 @@ SortedDataBuilderInterface::SortedDataBuilderInterface(OperationContext* opCtx,
                                                        const std::string& indexName,
                                                        const BSONObj& keyPattern)
     : _opCtx(opCtx),
+      _unique(unique),
       _dupsAllowed(dupsAllowed),
       _order(order),
       _prefix(prefix),
@@ -180,9 +181,8 @@ SortedDataBuilderInterface::SortedDataBuilderInterface(OperationContext* opCtx,
       _lastRID(-1) {}
 
 SpecialFormatInserted SortedDataBuilderInterface::commit(bool mayInterrupt) {
-    biggie::RecoveryUnit* ru = checked_cast<biggie::RecoveryUnit*>(_opCtx->recoveryUnit());
-    ru->beginUnitOfWork(_opCtx);
-    ru->commitUnitOfWork();
+    WriteUnitOfWork wunit(_opCtx);
+    wunit.commit();
     return SpecialFormatInserted::NoSpecialFormatInserted;
 }
 
@@ -190,7 +190,7 @@ StatusWith<SpecialFormatInserted> SortedDataBuilderInterface::addKey(const BSONO
                                                                      const RecordId& loc) {
     StringStore* workingCopy(RecoveryUnit::get(_opCtx)->getHead());
 
-    invariant(loc.isNormal());
+    invariant(loc.isNormal() || loc.isReserved());
     invariant(!hasFieldNames(key));
 
     std::unique_ptr<KeyString> newKS = keyToKeyString(key, _order);
@@ -209,8 +209,16 @@ StatusWith<SpecialFormatInserted> SortedDataBuilderInterface::addKey(const BSONO
                       "expected ascending (key, RecordId) order in bulk builder");
     }
 
-    if (!_dupsAllowed && twoKeyCmp == 0 && twoRIDCmp != 0) {
-        return buildDupKeyErrorStatus(key, _collectionNamespace, _indexName, _keyPattern);
+    std::string workingCopyInsertKey =
+        createKeyString(key, loc, _prefix, _order, /* isUnique */ _unique);
+
+    if (twoKeyCmp == 0 && twoRIDCmp != 0) {
+        if (!_dupsAllowed) {
+            return buildDupKeyErrorStatus(key, _collectionNamespace, _indexName, _keyPattern);
+        }
+        // Duplicate index entries are allowed on this unique index, so we put the RecordId in the
+        // KeyString until the unique constraint is resolved.
+        workingCopyInsertKey = createKeyString(key, loc, _prefix, _order, /* isUnique */ false);
     }
 
     std::string internalTbString(newKS->getTypeBits().getBuffer(), newKS->getTypeBits().getSize());
@@ -221,8 +229,6 @@ StatusWith<SpecialFormatInserted> SortedDataBuilderInterface::addKey(const BSONO
     std::memcpy(&data[0], &recIdRepr, sizeof(int64_t));
     std::memcpy(&data[0] + sizeof(int64_t), internalTbString.data(), internalTbString.length());
 
-    std::string workingCopyInsertKey =
-        createKeyString(key, loc, _prefix, _order, /* isUnique */ false);
     workingCopy->insert(StringStore::value_type(workingCopyInsertKey, data));
 
     _hasLast = true;
@@ -236,6 +242,7 @@ StatusWith<SpecialFormatInserted> SortedDataBuilderInterface::addKey(const BSONO
 SortedDataBuilderInterface* SortedDataInterface::getBulkBuilder(OperationContext* opCtx,
                                                                 bool dupsAllowed) {
     return new SortedDataBuilderInterface(opCtx,
+                                          _isUnique,
                                           dupsAllowed,
                                           _order,
                                           _prefix,
@@ -248,20 +255,37 @@ SortedDataBuilderInterface* SortedDataInterface::getBulkBuilder(OperationContext
 // We append \1 to all idents we get, and therefore the KeyString with ident + \0 will only be
 // before elements in this ident, and the KeyString with ident + \2 will only be after elements in
 // this ident.
-SortedDataInterface::SortedDataInterface(const Ordering& ordering, bool isUnique, StringData ident)
-    : _order(ordering),
+SortedDataInterface::SortedDataInterface(OperationContext* opCtx,
+                                         StringData ident,
+                                         const IndexDescriptor* desc)
+    : _order(Ordering::make(desc->keyPattern())),
       // All entries in this ident will have a prefix of ident + \1.
       _prefix(ident.toString().append(1, '\1')),
       // Therefore, the string ident + \2 will be greater than all elements in this ident.
       _identEnd(ident.toString().append(1, '\2')),
-      _isUnique(isUnique) {
+      _collectionNamespace(desc->parentNS()),
+      _indexName(desc->indexName()),
+      _keyPattern(desc->keyPattern()),
+      _isUnique(desc->unique()),
+      _isPartial(desc->isPartial()) {
     // This is the string representation of the KeyString before elements in this ident, which is
     // ident + \0. This is before all elements in this ident.
     _KSForIdentStart = createKeyString(
-        BSONObj(), RecordId::min(), ident.toString().append(1, '\0'), ordering, _isUnique);
+        BSONObj(), RecordId::min(), ident.toString().append(1, '\0'), _order, _isUnique);
     // Similarly, this is the string representation of the KeyString for something greater than
     // all other elements in this ident.
-    _KSForIdentEnd = createKeyString(BSONObj(), RecordId::min(), _identEnd, ordering, _isUnique);
+    _KSForIdentEnd = createKeyString(BSONObj(), RecordId::min(), _identEnd, _order, _isUnique);
+}
+
+SortedDataInterface::SortedDataInterface(const Ordering& ordering, bool isUnique, StringData ident)
+    : _order(ordering),
+      _prefix(ident.toString().append(1, '\1')),
+      _identEnd(ident.toString().append(1, '\2')),
+      _isUnique(isUnique),
+      _isPartial(false) {
+    _KSForIdentStart = createKeyString(
+        BSONObj(), RecordId::min(), ident.toString().append(1, '\0'), _order, _isUnique);
+    _KSForIdentEnd = createKeyString(BSONObj(), RecordId::min(), _identEnd, _order, _isUnique);
 }
 
 StatusWith<SpecialFormatInserted> SortedDataInterface::insert(OperationContext* opCtx,
@@ -304,16 +328,6 @@ StatusWith<SpecialFormatInserted> SortedDataInterface::insert(OperationContext* 
                     SpecialFormatInserted::NoSpecialFormatInserted);
             }
         }
-
-        // If dups are not allowed, then we need to check that we are not inserting something with
-        // an existing key but a different recordId. However, if the combination of key, recordId
-        // already exists, then we are fine, since we are allowed to insert duplicates.
-        if (!dupsAllowed) {
-            Status status = dupKeyCheck(opCtx, key, loc);
-            if (!status.isOK()) {
-                return status;
-            }
-        }
     } else {
         invariant(dupsAllowed);
     }
@@ -343,7 +357,7 @@ void SortedDataInterface::unindex(OperationContext* opCtx,
                                   bool dupsAllowed) {
     StringStore* workingCopy(RecoveryUnit::get(opCtx)->getHead());
     std::string removeKeyString;
-    size_t numErased = 0;
+    bool erased;
 
     if (_isUnique) {
         // For unique indexes, to unindex them we do the following:
@@ -357,9 +371,14 @@ void SortedDataInterface::unindex(OperationContext* opCtx,
             removeKeyString = createKeyString(key, loc, _prefix, _order, /* isUnique */ false);
         else
             removeKeyString = createKeyString(key, loc, _prefix, _order, /* isUnique */ true);
-        numErased = workingCopy->erase(removeKeyString);
 
-        if (numErased == 0) {
+        // Check that the record id matches when using partial indexes. We may be called to unindex
+        // records that are not present in the index due to the partial filter expression.
+        if (!ifPartialCheckRecordIdEquals(opCtx, removeKeyString, loc))
+            return;
+        erased = workingCopy->erase(removeKeyString);
+
+        if (!erased) {
             // If nothing above was erased, then we have to generate the KeyString with or without
             // the RecordId in it, and erase that. This could only happen on unique indexes where
             // duplicate index entries were/are allowed.
@@ -367,14 +386,17 @@ void SortedDataInterface::unindex(OperationContext* opCtx,
                 removeKeyString = createKeyString(key, loc, _prefix, _order, /* isUnique */ true);
             else
                 removeKeyString = createKeyString(key, loc, _prefix, _order, /* isUnique */ false);
-            numErased = workingCopy->erase(removeKeyString);
+
+            if (!ifPartialCheckRecordIdEquals(opCtx, removeKeyString, loc))
+                return;
+            erased = workingCopy->erase(removeKeyString);
         }
     } else {
         removeKeyString = createKeyString(key, loc, _prefix, _order, /* isUnique */ false);
-        numErased = workingCopy->erase(removeKeyString);
+        erased = workingCopy->erase(removeKeyString);
     }
 
-    if (numErased >= 1)
+    if (erased)
         RecoveryUnit::get(opCtx)->makeDirty();
 }
 
@@ -396,39 +418,34 @@ Status SortedDataInterface::truncate(OperationContext* opCtx) {
     return Status::OK();
 }
 
-Status SortedDataInterface::dupKeyCheck(OperationContext* opCtx,
-                                        const BSONObj& key,
-                                        const RecordId& loc) {
-    std::string workingCopyCheckKey = createKeyString(key, loc, _prefix, _order, _isUnique);
+Status SortedDataInterface::dupKeyCheck(OperationContext* opCtx, const BSONObj& key) {
+    invariant(_isUnique);
     StringStore* workingCopy(RecoveryUnit::get(opCtx)->getHead());
+
+    std::string minKey = createKeyString(key, RecordId::min(), _prefix, _order, _isUnique);
+    std::string maxKey = createKeyString(key, RecordId::max(), _prefix, _order, _isUnique);
 
     // We effectively do the same check as in insert. However, we also check to make sure that
     // the iterator returned to us by lower_bound also happens to be inside out ident.
-    auto workingCopyIt = workingCopy->find(workingCopyCheckKey);
-    if (workingCopyIt == workingCopy->end()) {
+    auto lowerBoundIterator = workingCopy->lower_bound(minKey);
+    if (lowerBoundIterator == workingCopy->end()) {
+        return Status::OK();
+    }
+    if (lowerBoundIterator->first.compare(maxKey) > 0) {
+        return Status::OK();
+    }
+    auto lower =
+        keyStringToIndexKeyEntry(lowerBoundIterator->first, lowerBoundIterator->second, _order);
+
+    ++lowerBoundIterator;
+    if (lowerBoundIterator == workingCopy->end()) {
         return Status::OK();
     }
 
-    if (_isUnique) {
-        // The RecordId is stored inside the index entry for unique indexes.
-        IndexKeyEntry entry =
-            keyStringToIndexKeyEntry(workingCopyIt->first, workingCopyIt->second, _order);
-        if (entry.loc == loc) {
-            return Status::OK();
-        }
+    auto next =
+        keyStringToIndexKeyEntry(lowerBoundIterator->first, lowerBoundIterator->second, _order);
+    if (key.woCompare(next.key, _order, false) == 0) {
         return buildDupKeyErrorStatus(key, _collectionNamespace, _indexName, _keyPattern);
-    } else {
-        std::string lowerBoundKey =
-            createKeyString(key, RecordId::min(), _prefix, _order, _isUnique);
-        auto lowerBoundIterator = workingCopy->lower_bound(lowerBoundKey);
-
-        if (lowerBoundIterator != workingCopy->end() &&
-            lowerBoundIterator->first != workingCopyCheckKey &&
-            lowerBoundIterator->first.compare(_KSForIdentEnd) < 0 &&
-            lowerBoundIterator->first.compare(
-                createKeyString(key, RecordId::max(), _prefix, _order, _isUnique)) <= 0) {
-            return buildDupKeyErrorStatus(key, _collectionNamespace, _indexName, _keyPattern);
-        }
     }
 
     return Status::OK();
@@ -489,6 +506,22 @@ std::unique_ptr<mongo::SortedDataInterface::Cursor> SortedDataInterface::newCurs
 
 Status SortedDataInterface::initAsEmpty(OperationContext* opCtx) {
     return Status::OK();
+}
+
+bool SortedDataInterface::ifPartialCheckRecordIdEquals(OperationContext* opCtx,
+                                                       const std::string key,
+                                                       const RecordId rid) const {
+    if (!_isPartial)
+        return true;
+
+    StringStore* workingCopy(RecoveryUnit::get(opCtx)->getHead());
+    auto workingCopyIt = workingCopy->find(key);
+    if (workingCopyIt == workingCopy->end())
+        return true;
+
+    IndexKeyEntry entry =
+        keyStringToIndexKeyEntry(workingCopyIt->first, workingCopyIt->second, _order);
+    return entry.loc == rid;
 }
 
 // Cursor
@@ -688,13 +721,20 @@ boost::optional<IndexKeyEntry> SortedDataInterface::Cursor::seekAfterProcessing(
     } else {
         // Otherwise, we seek to the nearest element to our key, but only to the right.
         if (_forward) {
-            _forwardIt = _workingCopy->lower_bound(workingCopyBound);
+            if (inclusive)
+                _forwardIt = _workingCopy->lower_bound(workingCopyBound);
+            else
+                _forwardIt = _workingCopy->upper_bound(workingCopyBound);
         } else {
             // Reverse iterators work with upper bound since upper bound will return the first
             // element past the argument, so when it becomes a reverse iterator, it goes
             // backwards one, (according to the C++ standard) and we end up in the right place.
-            _reverseIt =
-                StringStore::const_reverse_iterator(_workingCopy->upper_bound(workingCopyBound));
+            if (inclusive)
+                _reverseIt = StringStore::const_reverse_iterator(
+                    _workingCopy->upper_bound(workingCopyBound));
+            else
+                _reverseIt = StringStore::const_reverse_iterator(
+                    _workingCopy->lower_bound(workingCopyBound));
         }
         // Once again, we check to make sure the iterator didn't fall off the data structure and
         // still is in the ident.

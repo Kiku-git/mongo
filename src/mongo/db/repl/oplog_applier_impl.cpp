@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -46,7 +45,8 @@ OplogApplierImpl::OplogApplierImpl(executor::TaskExecutor* executor,
     : OplogApplier(executor, oplogBuffer, observer),
       _replCoord(replCoord),
       _syncTail(std::make_unique<SyncTail>(
-          observer, consistencyMarkers, storageInterface, multiSyncApply, writerPool, options)) {
+          observer, consistencyMarkers, storageInterface, multiSyncApply, writerPool, options)),
+      _beginApplyingOpTime(options.beginApplyingOpTime) {
     invariant(!options.relaxUniqueIndexConstraints);
 }
 

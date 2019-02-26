@@ -1,6 +1,3 @@
-// ttl.cpp
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -57,6 +54,7 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/server_parameters.h"
 #include "mongo/db/ttl_collection_cache.h"
+#include "mongo/db/ttl_gen.h"
 #include "mongo/util/background.h"
 #include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/exit.h"
@@ -70,14 +68,6 @@ Counter64 ttlDeletedDocuments;
 ServerStatusMetricField<Counter64> ttlPassesDisplay("ttl.passes", &ttlPasses);
 ServerStatusMetricField<Counter64> ttlDeletedDocumentsDisplay("ttl.deletedDocuments",
                                                               &ttlDeletedDocuments);
-
-MONGO_EXPORT_SERVER_PARAMETER(ttlMonitorEnabled, bool, true);
-MONGO_EXPORT_SERVER_PARAMETER(ttlMonitorSleepSecs, int, 60)
-    ->withValidator([](const int& newVal) {
-        if (newVal <= 0)
-            return Status(ErrorCodes::BadValue, "ttlMonitorSleepSecs must be strictly positive");
-        return Status::OK();
-    });  // used for testing
 
 class TTLMonitor : public BackgroundJob {
 public:
@@ -207,7 +197,7 @@ private:
             return;
         }
 
-        IndexDescriptor* desc = collection->getIndexCatalog()->findIndexByName(opCtx, name);
+        const IndexDescriptor* desc = collection->getIndexCatalog()->findIndexByName(opCtx, name);
         if (!desc) {
             LOG(1) << "index not found (index build in progress? index dropped?), skipping "
                    << "ttl job for: " << idx;
@@ -253,14 +243,14 @@ private:
         auto canonicalQuery = CanonicalQuery::canonicalize(opCtx, std::move(qr));
         invariant(canonicalQuery.getStatus());
 
-        DeleteStageParams params;
-        params.isMulti = true;
-        params.canonicalQuery = canonicalQuery.getValue().get();
+        auto params = std::make_unique<DeleteStageParams>();
+        params->isMulti = true;
+        params->canonicalQuery = canonicalQuery.getValue().get();
 
         auto exec =
             InternalPlanner::deleteWithIndexScan(opCtx,
                                                  collection,
-                                                 params,
+                                                 std::move(params),
                                                  desc,
                                                  startKey,
                                                  endKey,

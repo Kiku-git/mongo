@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -56,8 +55,8 @@ namespace mongo {
 
 void DurableViewCatalog::onExternalChange(OperationContext* opCtx, const NamespaceString& name) {
     dassert(opCtx->lockState()->isDbLockedForMode(name.db(), MODE_IX));
-    Database* db = DatabaseHolder::getDatabaseHolder().get(opCtx, name.db());
-
+    auto databaseHolder = DatabaseHolder::get(opCtx);
+    auto db = databaseHolder->getDb(opCtx, name.db());
     if (db) {
         opCtx->recoveryUnit()->onCommit(
             [db](boost::optional<Timestamp>) { db->getViewCatalog()->invalidate(); });

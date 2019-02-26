@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -32,7 +31,9 @@
 
 #include <boost/optional/optional_io.hpp>
 
+#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/query/query_test_service_context.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
@@ -55,8 +56,6 @@ TEST(CurOpTest, AddingAdditiveMetricsObjectsTogetherShouldAddFieldsTogether) {
     additiveMetricsToAdd.ninserted = 0;
     currentAdditiveMetrics.ndeleted = 3;
     additiveMetricsToAdd.ndeleted = 2;
-    currentAdditiveMetrics.nmoved = 0;
-    additiveMetricsToAdd.nmoved = 4;
     currentAdditiveMetrics.keysInserted = 6;
     additiveMetricsToAdd.keysInserted = 5;
     currentAdditiveMetrics.keysDeleted = 4;
@@ -83,8 +82,6 @@ TEST(CurOpTest, AddingAdditiveMetricsObjectsTogetherShouldAddFieldsTogether) {
               *additiveMetricsBeforeAdd.ninserted + *additiveMetricsToAdd.ninserted);
     ASSERT_EQ(*currentAdditiveMetrics.ndeleted,
               *additiveMetricsBeforeAdd.ndeleted + *additiveMetricsToAdd.ndeleted);
-    ASSERT_EQ(*currentAdditiveMetrics.nmoved,
-              *additiveMetricsBeforeAdd.nmoved + *additiveMetricsToAdd.nmoved);
     ASSERT_EQ(*currentAdditiveMetrics.keysInserted,
               *additiveMetricsBeforeAdd.keysInserted + *additiveMetricsToAdd.keysInserted);
     ASSERT_EQ(*currentAdditiveMetrics.keysDeleted,
@@ -105,8 +102,6 @@ TEST(CurOpTest, AddingUninitializedAdditiveMetricsFieldsShouldBeTreatedAsZero) {
     currentAdditiveMetrics.docsExamined = 4;
     currentAdditiveMetrics.nModified = 3;
     additiveMetricsToAdd.ninserted = 0;
-    currentAdditiveMetrics.nmoved = 0;
-    additiveMetricsToAdd.nmoved = 4;
     currentAdditiveMetrics.keysInserted = 6;
     additiveMetricsToAdd.keysInserted = 5;
     currentAdditiveMetrics.keysDeleted = 4;
@@ -133,8 +128,6 @@ TEST(CurOpTest, AddingUninitializedAdditiveMetricsFieldsShouldBeTreatedAsZero) {
     ASSERT_EQ(currentAdditiveMetrics.nMatched, boost::none);
 
     // The following field values should have changed after adding.
-    ASSERT_EQ(*currentAdditiveMetrics.nmoved,
-              *additiveMetricsBeforeAdd.nmoved + *additiveMetricsToAdd.nmoved);
     ASSERT_EQ(*currentAdditiveMetrics.keysInserted,
               *additiveMetricsBeforeAdd.keysInserted + *additiveMetricsToAdd.keysInserted);
     ASSERT_EQ(*currentAdditiveMetrics.keysDeleted,
@@ -158,17 +151,51 @@ TEST(CurOpTest, AdditiveMetricsFieldsShouldIncrementByN) {
     additiveMetrics.incrementWriteConflicts(1);
     additiveMetrics.incrementKeysInserted(5);
     additiveMetrics.incrementKeysDeleted(0);
-    additiveMetrics.incrementNmoved(1);
     additiveMetrics.incrementNinserted(3);
     additiveMetrics.incrementPrepareReadConflicts(2);
 
     ASSERT_EQ(*additiveMetrics.writeConflicts, 2);
     ASSERT_EQ(*additiveMetrics.keysInserted, 7);
     ASSERT_EQ(*additiveMetrics.keysDeleted, 0);
-    ASSERT_EQ(*additiveMetrics.nmoved, 1);
     ASSERT_EQ(*additiveMetrics.ninserted, 3);
     ASSERT_EQ(*additiveMetrics.prepareReadConflicts, 8);
 }
 
+TEST(CurOpTest, OptionalAdditiveMetricsNotDisplayedIfUninitialized) {
+    // 'basicFields' should always be present in the logs and profiler, for any operation.
+    std::vector<std::string> basicFields{"op", "ns", "command", "numYield", "locks", "millis"};
+
+    QueryTestServiceContext serviceContext;
+    auto opCtx = serviceContext.makeOperationContext();
+    SingleThreadedLockStats ls;
+
+    auto curop = CurOp::get(*opCtx);
+    const OpDebug& od = curop->debug();
+
+    // Create dummy command.
+    BSONObj command = BSON("a" << 3);
+
+    // Set dummy 'ns' and 'command'.
+    curop->setGenericOpRequestDetails(
+        opCtx.get(), NamespaceString("myDb.coll"), nullptr, command, NetworkOp::dbQuery);
+
+    BSONObjBuilder builder;
+    od.append(*curop, ls, builder);
+    auto bs = builder.done();
+
+    // Append should always include these basic fields.
+    for (const std::string& field : basicFields) {
+        ASSERT_TRUE(bs.hasField(field));
+    }
+
+    // Append should include only the basic fields when just initialized.
+    ASSERT_EQ(static_cast<size_t>(bs.nFields()), basicFields.size());
+
+    // 'reportString' should only contain basic fields.
+    std::string reportString = od.report(serviceContext.getClient(), *curop, nullptr);
+    std::string expectedReportString = "query myDb.coll command: { a: 3 } numYields:0 0ms";
+
+    ASSERT_EQ(reportString, expectedReportString);
+}
 }  // namespace
 }  // namespace mongo

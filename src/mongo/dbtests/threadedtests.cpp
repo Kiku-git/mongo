@@ -1,7 +1,3 @@
-// @file threadedtests.cpp - Tests for threaded code
-//
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -119,7 +115,7 @@ class ThreadPoolTest {
     static const unsigned iterations = 10000;
     static const unsigned nThreads = 8;
 
-    AtomicUInt32 counter;
+    AtomicWord<unsigned> counter;
     void increment(unsigned n) {
         for (unsigned i = 0; i < n; i++) {
             counter.fetchAndAdd(1);
@@ -177,7 +173,7 @@ private:
     char pad2[128];
     unsigned locks;
     char pad3[128];
-    AtomicInt32 k;
+    AtomicWord<int> k;
 
     virtual void validate() {
         if (once++ == 0) {
@@ -199,7 +195,7 @@ private:
                 break;
         }
     }
-    AtomicBool done;
+    AtomicWord<bool> done;
     virtual void subthread(int x) {
         if (x == 1) {
             watch();
@@ -300,8 +296,8 @@ public:
         // would have very little slack.
         add<Slack<SimpleMutex, stdx::lock_guard<SimpleMutex>>>();
 
-        add<IsAtomicWordAtomic<AtomicUInt32>>();
-        add<IsAtomicWordAtomic<AtomicUInt64>>();
+        add<IsAtomicWordAtomic<AtomicWord<unsigned>>>();
+        add<IsAtomicWordAtomic<AtomicWord<unsigned long long>>>();
         add<ThreadPoolTest>();
 
         add<TicketHolderWaits>();

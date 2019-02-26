@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -44,7 +43,7 @@ namespace {
 
 // Used to generate unique identifiers for requests so they can be traced throughout the
 // asynchronous networking logs
-AtomicUInt64 requestIdCounter(0);
+AtomicWord<unsigned long long> requestIdCounter(0);
 
 }  // namespace
 

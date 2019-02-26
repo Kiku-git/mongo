@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -125,10 +124,10 @@ TEST_F(DocumentSourceExchangeTest, SimpleExchange1Consumer) {
     boost::intrusive_ptr<Exchange> ex =
         new Exchange(spec, unittest::assertGet(Pipeline::create({source}, getExpCtx())));
 
-    auto input = ex->getNext(getExpCtx()->opCtx, 0);
+    auto input = ex->getNext(getExpCtx()->opCtx, 0, nullptr);
 
     size_t docs = 0;
-    for (; input.isAdvanced(); input = ex->getNext(getExpCtx()->opCtx, 0)) {
+    for (; input.isAdvanced(); input = ex->getNext(getExpCtx()->opCtx, 0, nullptr)) {
         ++docs;
     }
 
@@ -154,7 +153,7 @@ TEST_F(DocumentSourceExchangeTest, SimpleExchangeNConsumer) {
     std::vector<boost::intrusive_ptr<DocumentSourceExchange>> prods;
 
     for (size_t idx = 0; idx < nConsumers; ++idx) {
-        prods.push_back(new DocumentSourceExchange(getExpCtx(), ex, idx));
+        prods.push_back(new DocumentSourceExchange(getExpCtx(), ex, idx, nullptr));
     }
 
     std::vector<executor::TaskExecutor::CallbackHandle> handles;
@@ -171,6 +170,62 @@ TEST_F(DocumentSourceExchangeTest, SimpleExchangeNConsumer) {
                 for (; input.isAdvanced(); input = prods[id]->getNext()) {
                     sleepmillis(prng.nextInt32() % 20 + 1);
                     ++docs;
+                }
+                ASSERT_EQ(docs, nDocs / nConsumers);
+            });
+
+        handles.emplace_back(std::move(handle.getValue()));
+    }
+
+    for (auto& h : handles)
+        _executor->wait(h);
+}
+
+TEST_F(DocumentSourceExchangeTest, ExchangeNConsumerEarlyout) {
+    const size_t nDocs = 500;
+    auto source = getMockSource(500);
+
+    const size_t nConsumers = 2;
+
+    ASSERT_EQ(nDocs % nConsumers, 0u);
+
+    ExchangeSpec spec;
+    spec.setPolicy(ExchangePolicyEnum::kRoundRobin);
+    spec.setConsumers(nConsumers);
+    spec.setBufferSize(1024);
+
+    boost::intrusive_ptr<Exchange> ex =
+        new Exchange(spec, unittest::assertGet(Pipeline::create({source}, getExpCtx())));
+
+    std::vector<boost::intrusive_ptr<DocumentSourceExchange>> prods;
+
+    for (size_t idx = 0; idx < nConsumers; ++idx) {
+        prods.push_back(new DocumentSourceExchange(getExpCtx(), ex, idx, nullptr));
+    }
+
+    std::vector<executor::TaskExecutor::CallbackHandle> handles;
+
+    for (size_t id = 0; id < nConsumers; ++id) {
+        auto handle = _executor->scheduleWork(
+            [prods, id, nDocs, nConsumers](const executor::TaskExecutor::CallbackArgs& cb) {
+                PseudoRandom prng(getNewSeed());
+
+                auto input = prods[id]->getNext();
+
+                size_t docs = 0;
+
+                for (; input.isAdvanced(); input = prods[id]->getNext()) {
+                    sleepmillis(prng.nextInt32() % 20 + 1);
+                    ++docs;
+
+                    // The consumer 1 bails out early wihout consuming all its documents.
+                    if (id == 1 && docs == 100) {
+                        // Pretend we have seen all docs.
+                        docs = nDocs / nConsumers;
+
+                        prods[id]->dispose();
+                        break;
+                    }
                 }
                 ASSERT_EQ(docs, nDocs / nConsumers);
             });
@@ -199,7 +254,7 @@ TEST_F(DocumentSourceExchangeTest, BroadcastExchangeNConsumer) {
     std::vector<boost::intrusive_ptr<DocumentSourceExchange>> prods;
 
     for (size_t idx = 0; idx < nConsumers; ++idx) {
-        prods.push_back(new DocumentSourceExchange(getExpCtx(), ex, idx));
+        prods.push_back(new DocumentSourceExchange(getExpCtx(), ex, idx, nullptr));
     }
 
     std::vector<executor::TaskExecutor::CallbackHandle> handles;
@@ -250,7 +305,7 @@ TEST_F(DocumentSourceExchangeTest, RangeExchangeNConsumer) {
     std::vector<boost::intrusive_ptr<DocumentSourceExchange>> prods;
 
     for (size_t idx = 0; idx < nConsumers; ++idx) {
-        prods.push_back(new DocumentSourceExchange(getExpCtx(), ex, idx));
+        prods.push_back(new DocumentSourceExchange(getExpCtx(), ex, idx, nullptr));
     }
 
     std::vector<executor::TaskExecutor::CallbackHandle> handles;
@@ -316,7 +371,7 @@ TEST_F(DocumentSourceExchangeTest, RangeShardingExchangeNConsumer) {
     std::vector<boost::intrusive_ptr<DocumentSourceExchange>> prods;
 
     for (size_t idx = 0; idx < nConsumers; ++idx) {
-        prods.push_back(new DocumentSourceExchange(getExpCtx(), ex, idx));
+        prods.push_back(new DocumentSourceExchange(getExpCtx(), ex, idx, nullptr));
     }
 
     std::vector<executor::TaskExecutor::CallbackHandle> handles;
@@ -373,7 +428,7 @@ TEST_F(DocumentSourceExchangeTest, RangeRandomExchangeNConsumer) {
     std::vector<boost::intrusive_ptr<DocumentSourceExchange>> prods;
 
     for (size_t idx = 0; idx < nConsumers; ++idx) {
-        prods.push_back(new DocumentSourceExchange(getExpCtx(), ex, idx));
+        prods.push_back(new DocumentSourceExchange(getExpCtx(), ex, idx, nullptr));
     }
 
     std::vector<executor::TaskExecutor::CallbackHandle> handles;
@@ -413,6 +468,124 @@ TEST_F(DocumentSourceExchangeTest, RangeRandomExchangeNConsumer) {
     ASSERT_EQ(nDocs, processedDocs.load());
 }
 
+TEST_F(DocumentSourceExchangeTest, RandomExchangeNConsumerResourceYielding) {
+    const size_t nDocs = 500;
+    auto source = getRandomMockSource(nDocs, getNewSeed());
+
+    const std::vector<BSONObj> boundaries = {
+        BSON("a" << MINKEY), BSON("a" << 500), BSON("a" << MAXKEY)};
+
+    const size_t nConsumers = boundaries.size() - 1;
+
+    ASSERT(nDocs % nConsumers == 0);
+
+    ExchangeSpec spec;
+    spec.setPolicy(ExchangePolicyEnum::kKeyRange);
+    spec.setKey(BSON("a" << 1));
+    spec.setBoundaries(boundaries);
+    spec.setConsumers(nConsumers);
+
+    // Tiny buffer so if there are deadlocks possible they reproduce more often.
+    spec.setBufferSize(64);
+
+    // An "artifical" mutex that's not actually necessary for thread safety. We enforce that each
+    // thread holds this while it calls getNext(). This is to simulate the case where a thread may
+    // hold some "real" resources which need to be yielded while waiting, such as the Session, or
+    // the locks held in a transaction.
+    stdx::mutex artificalGlobalMutex;
+
+    boost::intrusive_ptr<Exchange> ex =
+        new Exchange(std::move(spec), unittest::assertGet(Pipeline::create({source}, getExpCtx())));
+
+    /**
+     * This class is used for an Exchange consumer to temporarily relinquish control of a mutex
+     * while it's blocked.
+     */
+    class MutexYielder : public ResourceYielder {
+    public:
+        MutexYielder(stdx::mutex* mutex) : _lock(*mutex, stdx::defer_lock) {}
+
+        void yield(OperationContext* opCtx) override {
+            _lock.unlock();
+        }
+
+        void unyield(OperationContext* opCtx) override {
+            _lock.lock();
+        }
+
+        stdx::unique_lock<stdx::mutex>& getLock() {
+            return _lock;
+        }
+
+    private:
+        stdx::unique_lock<stdx::mutex> _lock;
+    };
+
+    /**
+     * Used to keep track of each client and operation context.
+     */
+    struct ThreadInfo {
+        ServiceContext::UniqueClient client;
+        ServiceContext::UniqueOperationContext opCtx;
+        boost::intrusive_ptr<DocumentSourceExchange> documentSourceExchange;
+        MutexYielder* yielder;
+    };
+    std::vector<ThreadInfo> threads;
+
+    for (size_t idx = 0; idx < nConsumers; ++idx) {
+        ServiceContext::UniqueClient client = getServiceContext()->makeClient("exchange client");
+        ServiceContext::UniqueOperationContext opCtxOwned =
+            getServiceContext()->makeOperationContext(client.get());
+        OperationContext* opCtx = opCtxOwned.get();
+        auto yielder = std::make_unique<MutexYielder>(&artificalGlobalMutex);
+        auto yielderRaw = yielder.get();
+
+        threads.push_back(
+            ThreadInfo{std::move(client),
+                       std::move(opCtxOwned),
+                       new DocumentSourceExchange(
+                           new ExpressionContext(opCtx, nullptr), ex, idx, std::move(yielder)),
+                       yielderRaw});
+    }
+
+    std::vector<executor::TaskExecutor::CallbackHandle> handles;
+
+    AtomicWord<size_t> processedDocs{0};
+
+    for (size_t id = 0; id < nConsumers; ++id) {
+        ThreadInfo* threadInfo = &threads[id];
+        auto handle = _executor->scheduleWork(
+            [threadInfo, &processedDocs](const executor::TaskExecutor::CallbackArgs& cb) {
+
+                DocumentSourceExchange* exchange = threadInfo->documentSourceExchange.get();
+                const auto getNext = [exchange, threadInfo]() {
+                    // Will acquire 'artificalGlobalMutex'. Within getNext() it will be released and
+                    // reacquired by the MutexYielder if the Exchange has to block.
+                    threadInfo->yielder->getLock().lock();
+                    auto res = exchange->getNext();
+                    threadInfo->yielder->getLock().unlock();
+                    return res;
+                };
+
+                for (auto input = getNext(); input.isAdvanced(); input = getNext()) {
+                    // This helps randomizing thread scheduling forcing different threads to load
+                    // buffers. The sleep API is inherently imprecise so we cannot guarantee 100%
+                    // reproducibility.
+                    PseudoRandom prng(getNewSeed());
+                    sleepmillis(prng.nextInt32() % 50 + 1);
+                    processedDocs.fetchAndAdd(1);
+                }
+            });
+
+        handles.emplace_back(std::move(handle.getValue()));
+    }
+
+    for (auto& h : handles)
+        _executor->wait(h);
+
+    ASSERT_EQ(nDocs, processedDocs.load());
+}
+
 TEST_F(DocumentSourceExchangeTest, RangeRandomHashExchangeNConsumer) {
     const size_t nDocs = 500;
     auto source = getRandomMockSource(nDocs, getNewSeed());
@@ -441,7 +614,7 @@ TEST_F(DocumentSourceExchangeTest, RangeRandomHashExchangeNConsumer) {
     std::vector<boost::intrusive_ptr<DocumentSourceExchange>> prods;
 
     for (size_t idx = 0; idx < nConsumers; ++idx) {
-        prods.push_back(new DocumentSourceExchange(getExpCtx(), ex, idx));
+        prods.push_back(new DocumentSourceExchange(getExpCtx(), ex, idx, nullptr));
     }
 
     std::vector<executor::TaskExecutor::CallbackHandle> handles;

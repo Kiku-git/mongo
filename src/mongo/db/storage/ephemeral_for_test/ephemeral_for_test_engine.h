@@ -1,6 +1,3 @@
-// ephemeral_for_test_engine.h
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -56,6 +53,9 @@ public:
                                                         StringData ns,
                                                         StringData ident,
                                                         const CollectionOptions& options);
+
+    virtual std::unique_ptr<RecordStore> makeTemporaryRecordStore(OperationContext* opCtx,
+                                                                  StringData ident) override;
 
     virtual Status createSortedDataInterface(OperationContext* opCtx,
                                              StringData ident,
@@ -114,6 +114,10 @@ public:
 
     virtual Timestamp getAllCommittedTimestamp() const override {
         MONGO_UNREACHABLE;
+    }
+
+    virtual Timestamp getOldestOpenReadTimestamp() const override {
+        return Timestamp();
     }
 
 private:

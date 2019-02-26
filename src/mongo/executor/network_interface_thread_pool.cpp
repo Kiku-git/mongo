@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -147,7 +146,7 @@ void NetworkInterfaceThreadPool::consumeTasks(stdx::unique_lock<stdx::mutex> lk)
     }
 
     _consumingTasks = true;
-    const auto consumingTasksGuard = MakeGuard([&] { _consumingTasks = false; });
+    const auto consumingTasksGuard = makeGuard([&] { _consumingTasks = false; });
 
     decltype(_tasks) tasks;
 
@@ -156,7 +155,7 @@ void NetworkInterfaceThreadPool::consumeTasks(stdx::unique_lock<stdx::mutex> lk)
         swap(tasks, _tasks);
 
         lk.unlock();
-        const auto lkGuard = MakeGuard([&] { lk.lock(); });
+        const auto lkGuard = makeGuard([&] { lk.lock(); });
 
         for (auto&& task : tasks) {
             try {

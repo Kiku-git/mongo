@@ -48,7 +48,11 @@ var WriteConflictHelpers = (function() {
         session2.startTransaction();
 
         assert.commandWorked(session1Coll.runCommand(txn1Op));
-        assert.commandFailedWithCode(session2Coll.runCommand(txn2Op), ErrorCodes.WriteConflict);
+        const res = session2Coll.runCommand(txn2Op);
+        // Not a writeError but a total command failure
+        assert.eq(res.ok, 0);
+        assert(!res.hasOwnProperty("writeErrors"));
+        assert.commandFailedWithCode(res, ErrorCodes.WriteConflict);
 
         session1.commitTransaction();
         assert.commandFailedWithCode(session2.commitTransaction_forTesting(),
@@ -81,7 +85,11 @@ var WriteConflictHelpers = (function() {
         assert.commandWorked(session2Coll.runCommand(txn2Op));
         session2.commitTransaction();
 
-        assert.commandFailedWithCode(session1Coll.runCommand(txn1Op), ErrorCodes.WriteConflict);
+        const res = session1Coll.runCommand(txn1Op);
+        // Not a writeError but a total command failure
+        assert.eq(res.ok, 0);
+        assert(!res.hasOwnProperty("writeErrors"));
+        assert.commandFailedWithCode(res, ErrorCodes.WriteConflict);
         assert.commandFailedWithCode(session1.commitTransaction_forTesting(),
                                      ErrorCodes.NoSuchTransaction);
     }
@@ -108,7 +116,8 @@ var WriteConflictHelpers = (function() {
         // Make sure the collection is empty.
         assert.commandWorked(coll.remove({}, {writeConcern: {w: "majority"}}));
 
-        const conn = coll.getDB().getMongo();
+        const testDB = coll.getDB();
+        const conn = testDB.getMongo();
 
         // Initiate two sessions.
         const sessionOptions = {causalConsistency: false};
@@ -120,7 +129,19 @@ var WriteConflictHelpers = (function() {
                   tojson(txn2Op));
 
         // Run the specified write conflict test.
-        writeConflictTestCase(coll, session1, session2, txn1Op, txn2Op, initOp);
+        try {
+            writeConflictTestCase(coll, session1, session2, txn1Op, txn2Op, initOp);
+        } catch (e) {
+            jsTestLog("Write conflict test case '" + writeConflictTestCase.name + "' failed.");
+            // We make sure to abort any idle transactions.
+            let lsid1 = session1.getSessionId();
+            let lsid2 = session2.getSessionId();
+            print("Killing session with sessionID: " + tojson(lsid1));
+            assert.commandWorked(testDB.runCommand({killSessions: [lsid1]}));
+            print("Killing session with sessionID: " + tojson(lsid2));
+            assert.commandWorked(testDB.runCommand({killSessions: [lsid2]}));
+            throw e;
+        }
 
         // Check the final state of the collection.
         assert.sameMembers(expectedDocs, coll.find().toArray());

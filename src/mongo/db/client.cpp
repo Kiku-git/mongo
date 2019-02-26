@@ -1,6 +1,3 @@
-// client.cpp
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -167,6 +164,10 @@ ThreadClient::ThreadClient(StringData desc,
 ThreadClient::~ThreadClient() {
     invariant(currentClient);
     currentClient.reset(nullptr);
+}
+
+Client* ThreadClient::get() const {
+    return &cc();
 }
 
 }  // namespace mongo

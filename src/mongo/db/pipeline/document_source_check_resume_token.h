@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -36,7 +35,7 @@
 #include "mongo/db/pipeline/document_source_change_stream_gen.h"
 #include "mongo/db/pipeline/document_source_sort.h"
 #include "mongo/db/pipeline/resume_token.h"
-#include "mongo/db/query/query_knobs.h"
+#include "mongo/db/query/query_knobs_gen.h"
 
 namespace mongo {
 /**
@@ -73,35 +72,44 @@ public:
                 ChangeStreamRequirement::kChangeStreamStage};
     }
 
+    boost::optional<MergingLogic> mergingLogic() final {
+        return boost::none;
+    }
+
     Value serialize(boost::optional<ExplainOptions::Verbosity> explain = boost::none) const final;
 
     static boost::intrusive_ptr<DocumentSourceShardCheckResumability> create(
         const boost::intrusive_ptr<ExpressionContext>& expCtx, Timestamp ts);
+
+    static boost::intrusive_ptr<DocumentSourceShardCheckResumability> create(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx, ResumeTokenData token);
 
 private:
     /**
      * Use the create static method to create a DocumentSourceShardCheckResumability.
      */
     DocumentSourceShardCheckResumability(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                         Timestamp ts);
+                                         ResumeTokenData token);
 
-    Timestamp _resumeTimestamp;
-    bool _verifiedResumability;
+    void _assertOplogHasEnoughHistory(const GetNextResult& nextInput);
+
+    ResumeTokenData _tokenFromClient;
+    bool _verifiedOplogHasEnoughHistory = false;
+    bool _surpassedResumeToken = false;
 };
 
 /**
  * This stage is used internally for change streams to ensure that the resume token is in the
  * stream.  It is not intended to be created by the user.
  */
-class DocumentSourceEnsureResumeTokenPresent final : public DocumentSource,
-                                                     public NeedsMergerDocumentSource {
+class DocumentSourceEnsureResumeTokenPresent final : public DocumentSource {
 public:
     // Used to record the results of comparing the token data extracted from documents in the
     // resumed stream against the client's resume token.
     enum class ResumeStatus {
-        kFoundToken,    // The stream produced a document satisfying the client resume token.
-        kCannotResume,  // The stream's latest document is more recent than the resume token.
-        kCheckNextDoc   // The next document produced by the stream may contain the resume token.
+        kFoundToken,      // The stream produced a document satisfying the client resume token.
+        kSurpassedToken,  // The stream's latest document is more recent than the resume token.
+        kCheckNextDoc     // The next document produced by the stream may contain the resume token.
     };
 
     GetNextResult getNext() final;
@@ -119,41 +127,33 @@ public:
                 ChangeStreamRequirement::kChangeStreamStage};
     }
 
-    /**
-     * NeedsMergerDocumentSource methods; this has to run on the merger, since the resume point
-     * could be at any shard. Also add a DocumentSourceShardCheckResumability stage on the shards
-     * pipeline to ensure that each shard has enough oplog history to resume the change stream.
-     */
-    boost::intrusive_ptr<DocumentSource> getShardSource() final {
-        return DocumentSourceShardCheckResumability::create(pExpCtx,
-                                                            _tokenFromClient.getClusterTime());
-    };
-
-    MergingLogic mergingLogic() final {
+    boost::optional<MergingLogic> mergingLogic() final {
+        MergingLogic logic;
         // This stage must run on mongos to ensure it sees the resume token, which could have come
         // from any shard.  We also must include a mergingPresorted $sort stage to communicate to
         // the AsyncResultsMerger that we need to merge the streams in a particular order.
-        return {this, change_stream_constants::kSortSpec};
+        logic.mergingStage = this;
+        // Also add logic to the shards to ensure that each shard has enough oplog history to resume
+        // the change stream.
+        logic.shardsStage = DocumentSourceShardCheckResumability::create(pExpCtx, _tokenFromClient);
+        logic.inputSortPattern = change_stream_constants::kSortSpec;
+        return logic;
     };
 
     Value serialize(boost::optional<ExplainOptions::Verbosity> explain = boost::none) const final;
 
     static boost::intrusive_ptr<DocumentSourceEnsureResumeTokenPresent> create(
-        const boost::intrusive_ptr<ExpressionContext>& expCtx, ResumeToken token);
-
-    const ResumeToken& getTokenForTest() {
-        return _tokenFromClient;
-    }
+        const boost::intrusive_ptr<ExpressionContext>& expCtx, ResumeTokenData token);
 
 private:
     /**
      * Use the create static method to create a DocumentSourceEnsureResumeTokenPresent.
      */
     DocumentSourceEnsureResumeTokenPresent(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                           ResumeToken token);
+                                           ResumeTokenData token);
 
     ResumeStatus _resumeStatus = ResumeStatus::kCheckNextDoc;
-    ResumeToken _tokenFromClient;
+    ResumeTokenData _tokenFromClient;
 };
 
 }  // namespace mongo

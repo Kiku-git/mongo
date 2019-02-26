@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -141,6 +140,11 @@ public:
     int getNumMembers() const {
         return _members.size();
     }
+
+    /**
+     * Gets the number of data-bearing members in this configuration.
+     */
+    int getNumDataBearingMembers() const;
 
     /**
      * Gets a begin iterator over the MemberConfigs stored in this ReplSetConfig.

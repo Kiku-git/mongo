@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -56,9 +55,11 @@
 #endif
 
 // session_asio.h has some header dependencies that require it to be the last header.
+
 #ifdef __linux__
 #include "mongo/transport/baton_asio_linux.h"
 #endif
+
 #include "mongo/transport/session_asio.h"
 
 namespace mongo {
@@ -79,7 +80,7 @@ public:
 
     void cancel(const BatonHandle& baton = nullptr) override {
         // If we have a baton try to cancel that.
-        if (baton && baton->cancelTimer(*this)) {
+        if (baton && baton->networking() && baton->networking()->cancelTimer(*this)) {
             LOG(2) << "Canceled via baton, skipping asio cancel.";
             return;
         }
@@ -90,8 +91,9 @@ public:
 
 
     Future<void> waitUntil(Date_t expiration, const BatonHandle& baton = nullptr) override {
-        if (baton) {
-            return _asyncWait([&] { return baton->waitUntil(*this, expiration); }, baton);
+        if (baton && baton->networking()) {
+            return _asyncWait([&] { return baton->networking()->waitUntil(*this, expiration); },
+                              baton);
         } else {
             return _asyncWait([&] { _timer->expires_at(expiration.toSystemTimePoint()); });
         }
@@ -180,12 +182,12 @@ public:
         return Date_t(asio::system_timer::clock_type::now());
     }
 
-    void schedule(ScheduleMode mode, Task task) override {
-        if (mode == kDispatch) {
-            asio::dispatch(_ioContext, std::move(task));
-        } else {
-            asio::post(_ioContext, std::move(task));
-        }
+    void schedule(Task task) override {
+        asio::post(_ioContext, std::move(task));
+    }
+
+    void dispatch(Task task) override {
+        asio::dispatch(_ioContext, std::move(task));
     }
 
     bool onReactorThread() const override {
@@ -524,7 +526,7 @@ Future<SessionHandle> TransportLayerASIO::asyncConnect(HostAndPort peer,
               resolver(context),
               peer(std::move(peer)) {}
 
-        AtomicBool done{false};
+        AtomicWord<bool> done{false};
         Promise<SessionHandle> promise;
 
         stdx::mutex mutex;
@@ -739,26 +741,25 @@ Status TransportLayerASIO::setup() {
 
 #ifdef MONGO_CONFIG_SSL
     const auto& sslParams = getSSLGlobalParams();
-    auto sslManager = getSSLManager();
 
     if (_sslMode() != SSLParams::SSLMode_disabled && _listenerOptions.isIngress()) {
         _ingressSSLContext = stdx::make_unique<asio::ssl::context>(asio::ssl::context::sslv23);
 
         Status status =
-            sslManager->initSSLContext(_ingressSSLContext->native_handle(),
-                                       sslParams,
-                                       SSLManagerInterface::ConnectionDirection::kIncoming);
+            getSSLManager()->initSSLContext(_ingressSSLContext->native_handle(),
+                                            sslParams,
+                                            SSLManagerInterface::ConnectionDirection::kIncoming);
         if (!status.isOK()) {
             return status;
         }
     }
 
-    if (_listenerOptions.isEgress() && sslManager) {
+    if (_listenerOptions.isEgress() && getSSLManager()) {
         _egressSSLContext = stdx::make_unique<asio::ssl::context>(asio::ssl::context::sslv23);
         Status status =
-            sslManager->initSSLContext(_egressSSLContext->native_handle(),
-                                       sslParams,
-                                       SSLManagerInterface::ConnectionDirection::kOutgoing);
+            getSSLManager()->initSSLContext(_egressSSLContext->native_handle(),
+                                            sslParams,
+                                            SSLManagerInterface::ConnectionDirection::kOutgoing);
         if (!status.isOK()) {
             return status;
         }
@@ -776,6 +777,7 @@ Status TransportLayerASIO::start() {
         for (auto& acceptor : _acceptors) {
             acceptor.second.listen(serverGlobalParams.listenBacklog);
             _acceptConnection(acceptor.second);
+            log() << "Listening on " << acceptor.first.getAddr();
         }
 
         _listenerThread = stdx::thread([this] {
@@ -875,8 +877,8 @@ SSLParams::SSLModes TransportLayerASIO::_sslMode() const {
 }
 #endif
 
-BatonHandle TransportLayerASIO::makeBaton(OperationContext* opCtx) {
 #ifdef __linux__
+BatonHandle TransportLayerASIO::makeBaton(OperationContext* opCtx) const {
     auto baton = std::make_shared<BatonASIO>(opCtx);
 
     {
@@ -885,11 +887,9 @@ BatonHandle TransportLayerASIO::makeBaton(OperationContext* opCtx) {
         opCtx->setBaton(baton);
     }
 
-    return std::move(baton);
-#else
-    return nullptr;
-#endif
+    return baton;
 }
+#endif
 
 }  // namespace transport
 }  // namespace mongo

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -34,6 +33,7 @@
 
 #include "mongo/base/status.h"
 #include "mongo/db/catalog/index_catalog.h"
+#include "mongo/db/catalog/multi_index_block.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/platform/atomic_word.h"
@@ -61,14 +61,27 @@ class OperationContext;
  * before any other thread calls go() on any other IndexBuilder instance.  This is
  * ensured by the replication system, since commands are effectively run single-threaded
  * by the replication applier.
- * The argument "relaxConstraints" specifies whether we should honor or ignore index constraints,
+ * The argument "constraints" specifies whether we should honor or ignore index constraints,
  * The ignoring of constraints is for replication due to idempotency reasons.
+ * The argument "replicatedWrites" specifies whether or not this operation should replicate
+ * oplog entries associated with this index build.
  * The argument "initIndexTs" specifies the timestamp to be used to make the initial catalog write.
  */
 class IndexBuilder : public BackgroundJob {
 public:
+    /**
+     * Indicates whether or not to ignore indexing errors.
+     */
+    enum class IndexConstraints { kEnforce, kRelax };
+
+    /**
+     * Indicates whether or not to replicate writes.
+     */
+    enum class ReplicatedWrites { kReplicated, kUnreplicated };
+
     IndexBuilder(const BSONObj& index,
-                 bool relaxConstraints,
+                 IndexConstraints constraints,
+                 ReplicatedWrites replicatedWrites,
                  Timestamp initIndexTs = Timestamp::min());
     virtual ~IndexBuilder();
 
@@ -79,6 +92,9 @@ public:
      */
     virtual std::string name() const;
 
+    /**
+     * Instead of building the index in a background thread, build on the current thread.
+     */
     Status buildInForeground(OperationContext* opCtx, Database* db) const;
 
     /**
@@ -88,16 +104,24 @@ public:
      */
     static void waitForBgIndexStarting();
 
-private:
-    Status _build(OperationContext* opCtx,
-                  Database* db,
-                  bool allowBackgroundBuilding,
-                  Lock::DBLock* dbLock) const;
+    static bool canBuildInBackground();
 
+private:
+    Status _buildAndHandleErrors(OperationContext* opCtx,
+                                 Database* db,
+                                 bool buildInBackground,
+                                 Lock::DBLock* dbLock) const;
+
+    Status _build(OperationContext* opCtx,
+                  bool buildInBackground,
+                  Collection* coll,
+                  MultiIndexBlock& indexer,
+                  Lock::DBLock* dbLock) const;
     const BSONObj _index;
-    const bool _relaxConstraints;
+    const IndexConstraints _indexConstraints;
+    const ReplicatedWrites _replicatedWrites;
     const Timestamp _initIndexTs;
     std::string _name;  // name of this builder, not related to the index
-    static AtomicUInt32 _indexBuildCount;
+    static AtomicWord<unsigned> _indexBuildCount;
 };
 }

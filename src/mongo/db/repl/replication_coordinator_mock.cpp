@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -233,6 +232,10 @@ Status ReplicationCoordinatorMock::waitUntilOpTimeForReadUntil(OperationContext*
     return Status::OK();
 }
 
+Status ReplicationCoordinatorMock::awaitOpTimeCommitted(OperationContext* opCtx, OpTime opTime) {
+    return Status::OK();
+}
+
 OID ReplicationCoordinatorMock::getElectionId() {
     // TODO
     return OID();
@@ -376,6 +379,17 @@ Status ReplicationCoordinatorMock::checkIfWriteConcernCanBeSatisfied(
     return Status::OK();
 }
 
+Status ReplicationCoordinatorMock::checkIfCommitQuorumCanBeSatisfied(
+    const CommitQuorumOptions& commitQuorum) const {
+    return Status::OK();
+}
+
+StatusWith<bool> ReplicationCoordinatorMock::checkIfCommitQuorumIsSatisfied(
+    const CommitQuorumOptions& commitQuorum,
+    const std::vector<HostAndPort>& commitReadyMembers) const {
+    return true;
+}
+
 WriteConcernOptions ReplicationCoordinatorMock::getGetLastErrorDefault() {
     return WriteConcernOptions();
 }
@@ -431,8 +445,6 @@ bool ReplicationCoordinatorMock::getWriteConcernMajorityShouldJournal() {
     return true;
 }
 
-void ReplicationCoordinatorMock::summarizeAsHtml(ReplSetHtmlSummary* output) {}
-
 long long ReplicationCoordinatorMock::getTerm() {
     return _term;
 }
@@ -467,13 +479,6 @@ WriteConcernOptions ReplicationCoordinatorMock::populateUnsetWriteConcernOptions
     return wc;
 }
 
-ReplSettings::IndexPrefetchConfig ReplicationCoordinatorMock::getIndexPrefetchConfig() const {
-    return ReplSettings::IndexPrefetchConfig();
-}
-
-void ReplicationCoordinatorMock::setIndexPrefetchConfig(
-    const ReplSettings::IndexPrefetchConfig cfg) {}
-
 Status ReplicationCoordinatorMock::stepUpIfEligible(bool skipDryRun) {
     return Status::OK();
 }
@@ -497,6 +502,10 @@ boost::optional<Timestamp> ReplicationCoordinatorMock::getRecoveryTimestamp() {
 
 bool ReplicationCoordinatorMock::setContainsArbiter() const {
     return false;
+}
+
+void ReplicationCoordinatorMock::attemptToAdvanceStableTimestamp() {
+    return;
 }
 
 }  // namespace repl

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -645,6 +644,12 @@ Status ReplSetConfig::checkIfWriteConcernCanBeSatisfied(
         }
         return Status(ErrorCodes::UnsatisfiableWriteConcern, "Not enough data-bearing nodes");
     }
+}
+
+int ReplSetConfig::getNumDataBearingMembers() const {
+    int numArbiters =
+        std::count_if(begin(_members), end(_members), [](const auto& x) { return x.isArbiter(); });
+    return _members.size() - numArbiters;
 }
 
 const MemberConfig& ReplSetConfig::getMemberAt(size_t i) const {

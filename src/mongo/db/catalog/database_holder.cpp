@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -28,19 +27,34 @@
  *    it in the license file.
  */
 
-#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kStorage
-
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/catalog/database_holder.h"
 
 namespace mongo {
 
-DatabaseHolder::Impl::~Impl() = default;
+namespace {
 
-void DatabaseHolder::TUHook::hook() noexcept {}
+const auto getDatabaseHolderFromServiceContext =
+    ServiceContext::declareDecoration<std::unique_ptr<DatabaseHolder>>();
 
-MONGO_DEFINE_SHIM(DatabaseHolder::makeImpl);
-MONGO_DEFINE_SHIM(DatabaseHolder::getDatabaseHolder);
+}  // namespace
+
+DatabaseHolder* DatabaseHolder::get(ServiceContext* service) {
+    return getDatabaseHolderFromServiceContext(service).get();
+}
+
+DatabaseHolder* DatabaseHolder::get(ServiceContext& service) {
+    return getDatabaseHolderFromServiceContext(service).get();
+}
+
+DatabaseHolder* DatabaseHolder::get(OperationContext* opCtx) {
+    return get(opCtx->getServiceContext());
+}
+
+void DatabaseHolder::set(ServiceContext* service, std::unique_ptr<DatabaseHolder> databaseHolder) {
+    auto& holder = getDatabaseHolderFromServiceContext(service);
+    holder = std::move(databaseHolder);
+}
 
 }  // namespace mongo

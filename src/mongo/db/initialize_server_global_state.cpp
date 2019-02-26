@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -33,6 +32,7 @@
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/initialize_server_global_state.h"
+#include "mongo/db/initialize_server_global_state_gen.h"
 
 #include <boost/filesystem/operations.hpp>
 #include <iostream>
@@ -41,17 +41,12 @@
 
 #ifndef _WIN32
 #include <sys/stat.h>
-#include <sys/types.h>
 #include <sys/wait.h>
 #include <syslog.h>
 #endif
 
 #include "mongo/base/init.h"
-#include "mongo/client/authenticate.h"
 #include "mongo/config.h"
-#include "mongo/db/auth/authorization_manager.h"
-#include "mongo/db/auth/sasl_command_constants.h"
-#include "mongo/db/auth/security_key.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/server_parameters.h"
 #include "mongo/logger/console_appender.h"
@@ -66,7 +61,6 @@
 #include "mongo/platform/process_id.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
-#include "mongo/util/net/ssl_manager.h"
 #include "mongo/util/processinfo.h"
 #include "mongo/util/quick_exit.h"
 #include "mongo/util/signal_handlers_synchronous.h"
@@ -212,7 +206,6 @@ void forkServerOrDie() {
         quickExit(EXIT_FAILURE);
 }
 
-MONGO_EXPORT_SERVER_PARAMETER(maxLogSizeKB, int, logger::LogContext::kDefaultMaxLogSizeKB);
 // On POSIX platforms we need to set our umask before opening any log files, so this
 // should depend on MungeUmask above, but not on Windows.
 MONGO_INITIALIZER_GENERAL(
@@ -229,7 +222,7 @@ MONGO_INITIALIZER_GENERAL(
     using logger::StatusWithRotatableFileWriter;
 
     // Hook up this global into our logging encoder
-    MessageEventDetailsEncoder::setMaxLogSizeKBSource(maxLogSizeKB);
+    MessageEventDetailsEncoder::setMaxLogSizeKBSource(gMaxLogSizeKB);
 
     if (serverGlobalParams.logWithSyslog) {
 #ifdef _WIN32
@@ -245,10 +238,10 @@ MONGO_INITIALIZER_GENERAL(
         manager->getGlobalDomain()->clearAppenders();
         manager->getGlobalDomain()->attachAppender(
             std::make_unique<SyslogAppender<MessageEventEphemeral>>(
-                std::make_unique<logger::MessageEventWithContextEncoder>()));
+                std::make_unique<logger::MessageEventDetailsEncoder>()));
         manager->getNamedDomain("javascriptOutput")
             ->attachAppender(std::make_unique<SyslogAppender<MessageEventEphemeral>>(
-                std::make_unique<logger::MessageEventWithContextEncoder>()));
+                std::make_unique<logger::MessageEventDetailsEncoder>()));
 #endif  // defined(_WIN32)
     } else if (!serverGlobalParams.logpath.empty()) {
         fassert(16448, !serverGlobalParams.logWithSyslog);
@@ -357,14 +350,11 @@ MONGO_INITIALIZER(RegisterShortCircuitExitHandler)(InitializerContext*) {
 // is to set the bits for 'other' and 'group', but leave umask bits
 // bits for 'user' unaltered.
 namespace {
-#ifndef _WIN32
-MONGO_EXPORT_STARTUP_SERVER_PARAMETER(honorSystemUmask, bool, false);
-#endif
 
 MONGO_INITIALIZER_WITH_PREREQUISITES(MungeUmask, ("EndStartupOptionHandling"))
 (InitializerContext*) {
 #ifndef _WIN32
-    if (!honorSystemUmask) {
+    if (!gHonorSystemUmask) {
         umask(umask(S_IRWXU | S_IRWXG | S_IRWXO) | S_IRWXG | S_IRWXO);
     }
 #endif
@@ -387,35 +377,6 @@ bool initializeServerGlobalState(ServiceContext* service) {
             return false;
         }
     }
-
-    int clusterAuthMode = serverGlobalParams.clusterAuthMode.load();
-    if (!serverGlobalParams.keyFile.empty() &&
-        clusterAuthMode != ServerGlobalParams::ClusterAuthMode_x509) {
-        if (!setUpSecurityKey(serverGlobalParams.keyFile)) {
-            // error message printed in setUpPrivateKey
-            return false;
-        }
-    }
-
-    // Auto-enable auth unless we are in mixed auth/no-auth or clusterAuthMode was not provided.
-    // clusterAuthMode defaults to "keyFile" if a --keyFile parameter is provided.
-    if (clusterAuthMode != ServerGlobalParams::ClusterAuthMode_undefined &&
-        !serverGlobalParams.transitionToAuth) {
-        AuthorizationManager::get(service)->setAuthEnabled(true);
-    }
-
-#ifdef MONGO_CONFIG_SSL
-    if (clusterAuthMode == ServerGlobalParams::ClusterAuthMode_x509 ||
-        clusterAuthMode == ServerGlobalParams::ClusterAuthMode_sendX509) {
-        auth::setInternalUserAuthParams(
-            BSON(saslCommandMechanismFieldName
-                 << "MONGODB-X509"
-                 << saslCommandUserDBFieldName
-                 << "$external"
-                 << saslCommandUserFieldName
-                 << getSSLManager()->getSSLConfiguration().clientSubjectName.toString()));
-    }
-#endif
 
     return true;
 }

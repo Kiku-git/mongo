@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -122,7 +121,7 @@ private:
         return std::tie(_password, _salt, _iterationCount);
     }
 
-    static constexpr auto saltLength() {
+    static constexpr auto saltLength() -> decltype(HashBlock::kHashLength) {
         return HashBlock::kHashLength - 4;
     }
 
@@ -139,6 +138,47 @@ template <typename T>
 bool operator!=(const Presecrets<T>& lhs, const Presecrets<T>& rhs) {
     return !(lhs == rhs);
 }
+template <typename HashBlock>
+struct SecretsHolder {
+    HashBlock clientKey;
+    HashBlock storedKey;
+    HashBlock serverKey;
+};
+
+template <typename HashBlock>
+class LockedSecretsPolicy {
+public:
+    LockedSecretsPolicy() = default;
+
+    const SecretsHolder<HashBlock>* operator->() const {
+        return &(*_holder);
+    }
+    SecretsHolder<HashBlock>* operator->() {
+        return &(*_holder);
+    }
+
+private:
+    using SecureSecrets = SecureAllocatorAuthDomain::SecureHandle<SecretsHolder<HashBlock>>;
+
+    SecureSecrets _holder;
+};
+
+template <typename HashBlock>
+class UnlockedSecretsPolicy {
+public:
+    UnlockedSecretsPolicy() = default;
+
+    const SecretsHolder<HashBlock>* operator->() const {
+        return &_holder;
+    }
+
+    SecretsHolder<HashBlock>* operator->() {
+        return &_holder;
+    }
+
+private:
+    SecretsHolder<HashBlock> _holder;
+};
 
 /* Stores all of the keys, generated from a password, needed for a client or server to perform a
  * SCRAM handshake.
@@ -146,21 +186,13 @@ bool operator!=(const Presecrets<T>& lhs, const Presecrets<T>& rhs) {
  * May be unpopulated. SCRAMSecrets created via the default constructor are unpopulated.
  * The behavior is undefined if the accessors are called when unpopulated.
  */
-template <typename HashBlock>
+template <typename HashBlock, template <typename> class MemoryPolicy = LockedSecretsPolicy>
 class Secrets {
-private:
-    struct SecretsHolder {
-        HashBlock clientKey;
-        HashBlock storedKey;
-        HashBlock serverKey;
-    };
-    using SecureSecrets = SecureAllocatorAuthDomain::SecureHandle<SecretsHolder>;
-
 public:
     Secrets() = default;
 
     Secrets(StringData client, StringData stored, StringData server)
-        : _ptr(std::make_shared<SecureSecrets>()) {
+        : _ptr(std::make_shared<MemoryPolicy<HashBlock>>()) {
         if (!client.empty()) {
             (*_ptr)->clientKey = uassertStatusOK(HashBlock::fromBuffer(
                 reinterpret_cast<const unsigned char*>(client.rawData()), client.size()));
@@ -171,13 +203,13 @@ public:
             reinterpret_cast<const unsigned char*>(server.rawData()), stored.size()));
     }
 
-    Secrets(const HashBlock& saltedPassword) : _ptr(std::make_shared<SecureSecrets>()) {
+    Secrets(const HashBlock& saltedPassword) : _ptr(std::make_shared<MemoryPolicy<HashBlock>>()) {
         // ClientKey := HMAC(saltedPassword, "Client Key")
-        (*_ptr)->clientKey = HashBlock::computeHmac(
+        (*_ptr)->clientKey = (HashBlock::computeHmac(
             saltedPassword.data(),
             saltedPassword.size(),
             reinterpret_cast<const unsigned char*>(kClientKeyConst.rawData()),
-            kClientKeyConst.size());
+            kClientKeyConst.size()));
         // StoredKey := H(clientKey)
         (*_ptr)->storedKey = HashBlock::computeHash(clientKey().data(), clientKey().size());
 
@@ -255,7 +287,8 @@ public:
     static BSONObj generateCredentials(const std::vector<uint8_t>& salt,
                                        const std::string& password,
                                        int iterationCount) {
-        Secrets<HashBlock> secrets(Presecrets<HashBlock>(password, salt, iterationCount));
+        Secrets<HashBlock, MemoryPolicy> secrets(
+            Presecrets<HashBlock>(password, salt, iterationCount));
         const auto encodedSalt =
             base64::encode(reinterpret_cast<const char*>(salt.data()), salt.size());
         return BSON(kIterationCountFieldName << iterationCount << kSaltFieldName << encodedSalt
@@ -289,7 +322,7 @@ public:
     }
 
 private:
-    std::shared_ptr<SecureSecrets> _ptr;
+    std::shared_ptr<MemoryPolicy<HashBlock>> _ptr;
 };
 
 }  // namespace scram

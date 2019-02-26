@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -93,6 +92,10 @@ public:
         _latestOplogTimestamp = ts;
     }
 
+    void setPostBatchResumeToken(BSONObj token) {
+        _postBatchResumeToken = token.getOwned();
+    }
+
     long long numDocs() const {
         return _numDocs;
     }
@@ -122,6 +125,7 @@ private:
     bool _active = true;
     long long _numDocs = 0;
     Timestamp _latestOplogTimestamp;
+    BSONObj _postBatchResumeToken;
 };
 
 /**
@@ -198,6 +202,7 @@ public:
                    std::vector<BSONObj> batch,
                    boost::optional<long long> numReturnedSoFar = boost::none,
                    boost::optional<Timestamp> latestOplogTimestamp = boost::none,
+                   boost::optional<BSONObj> postBatchResumeToken = boost::none,
                    boost::optional<BSONObj> writeConcernError = boost::none);
 
     CursorResponse(CursorResponse&& other) = default;
@@ -240,6 +245,10 @@ public:
         return _latestOplogTimestamp;
     }
 
+    boost::optional<BSONObj> getPostBatchResumeToken() const {
+        return _postBatchResumeToken;
+    }
+
     boost::optional<BSONObj> getWriteConcernError() const {
         return _writeConcernError;
     }
@@ -259,6 +268,7 @@ private:
     std::vector<BSONObj> _batch;
     boost::optional<long long> _numReturnedSoFar;
     boost::optional<Timestamp> _latestOplogTimestamp;
+    boost::optional<BSONObj> _postBatchResumeToken;
     boost::optional<BSONObj> _writeConcernError;
 };
 

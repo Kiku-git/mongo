@@ -12,11 +12,18 @@ set -o errexit
 # parser to hang.
 #
 
-VERSION=2018.01alpha1
+IS_WSL=$(grep -q Microsoft /proc/version)
+
+VERSION=2018.01
 NAME=timelib
 TARBALL=$VERSION.tar.gz
 TARBALL_DIR=$NAME-$VERSION
-TEMP_DIR=/tmp/temp-$NAME-$VERSION
+if $IS_WSL; then
+    TEMP_DIR=$(wslpath -u $(powershell.exe -Command "Get-ChildItem Env:TEMP | Get-Content | Write-Host"))
+else
+    TEMP_DIR="/tmp"
+fi
+TEMP_DIR=$(mktemp -d $TEMP_DIR/$NAME.XXXXXX)
 DEST_DIR=`git rev-parse --show-toplevel`/src/third_party/$NAME-$VERSION
 
 # Check prerequisites: re2c, wget

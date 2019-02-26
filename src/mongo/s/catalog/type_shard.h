@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -69,6 +68,8 @@ public:
     static const BSONField<BSONArray> tags;
     static const BSONField<ShardState> state;
 
+    ShardType() = default;
+    ShardType(std::string name, std::string host, std::vector<std::string> tags = {});
 
     /**
      * Constructs a new ShardType object from BSON.

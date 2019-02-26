@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -39,6 +38,7 @@
 #include "mongo/db/curop.h"
 #include "mongo/db/read_concern.h"
 #include "mongo/db/repl/repl_client_info.h"
+#include "mongo/db/repl/speculative_majority_read_info.h"
 #include "mongo/db/s/implicit_create_collection.h"
 #include "mongo/db/s/scoped_operation_completion_sharding_actions.h"
 #include "mongo/db/s/shard_filtering_metadata_refresh.h"
@@ -84,6 +84,15 @@ public:
         }
     }
 
+    void waitForSpeculativeMajorityReadConcern(OperationContext* opCtx) const override {
+        auto speculativeReadInfo = repl::SpeculativeMajorityReadInfo::get(opCtx);
+        if (!speculativeReadInfo.isSpeculativeRead()) {
+            return;
+        }
+        uassertStatusOK(mongo::waitForSpeculativeMajorityReadConcern(opCtx, speculativeReadInfo));
+    }
+
+
     void waitForWriteConcern(OperationContext* opCtx,
                              const CommandInvocation* invocation,
                              const repl::OpTime& lastOpBeforeRun,
@@ -92,7 +101,7 @@ public:
         // Ensures that if we tried to do a write, we wait for write concern, even if that write was
         // a noop.
         if ((lastOpAfterRun == lastOpBeforeRun) &&
-            GlobalLockAcquisitionTracker::get(opCtx).getGlobalExclusiveLockTaken()) {
+            GlobalLockAcquisitionTracker::get(opCtx).getGlobalWriteLocked()) {
             repl::ReplClientInfo::forClient(opCtx->getClient()).setLastOpToSystemLastOpTime(opCtx);
             lastOpAfterRun = repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp();
         }
@@ -102,15 +111,6 @@ public:
             mongo::waitForWriteConcern(opCtx, lastOpAfterRun, opCtx->getWriteConcern(), &res);
 
         CommandHelpers::appendCommandWCStatus(commandResponseBuilder, waitForWCStatus, res);
-
-        // SERVER-22421: This code is to ensure error response backwards compatibility with the
-        // user management commands. This can be removed in 3.6.
-        if (!waitForWCStatus.isOK() && invocation->definition()->isUserManagementCommand()) {
-            BSONObj temp = commandResponseBuilder.asTempObj().copy();
-            commandResponseBuilder.resetToEmpty();
-            CommandHelpers::appendCommandStatusNoThrow(commandResponseBuilder, waitForWCStatus);
-            commandResponseBuilder.appendElementsUnique(temp);
-        }
     }
 
     void waitForLinearizableReadConcern(OperationContext* opCtx) const override {
@@ -118,7 +118,7 @@ public:
         // from the primary.
         if (repl::ReadConcernArgs::get(opCtx).getLevel() ==
             repl::ReadConcernLevel::kLinearizableReadConcern) {
-            uassertStatusOK(mongo::waitForLinearizableReadConcern(opCtx));
+            uassertStatusOK(mongo::waitForLinearizableReadConcern(opCtx, 0));
         }
     }
 

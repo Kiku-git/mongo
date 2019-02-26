@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2018 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -425,7 +425,7 @@ __cursor_row_slot_return(WT_CURSOR_BTREE *cbt, WT_ROW *rip, WT_UPDATE *upd)
 	 */
 	kpack = &_kpack;
 	memset(kpack, 0, sizeof(*kpack));
-	__wt_cell_unpack(cell, kpack);
+	__wt_cell_unpack(session, page, cell, kpack);
 	if (kpack->type == WT_CELL_KEY &&
 	    cbt->rip_saved != NULL && cbt->rip_saved == rip - 1) {
 		WT_ASSERT(session, cbt->row_key->size >= kpack->prefix);
@@ -470,6 +470,48 @@ value:
 		return (0);
 
 	/* Else, take the value from the original page cell. */
-	__wt_row_leaf_value_cell(page, rip, kpack, vpack);
+	__wt_row_leaf_value_cell(session, page, rip, kpack, vpack);
 	return (__wt_page_cell_data_ref(session, cbt->ref->page, vpack, vb));
+}
+/*
+ * __cursor_check_prepared_update --
+ *	Return whether prepared update at current position is visible or not.
+ */
+static inline int
+__cursor_check_prepared_update(WT_CURSOR_BTREE *cbt, bool *visiblep)
+{
+	WT_SESSION_IMPL *session;
+	WT_UPDATE *upd;
+
+	session = (WT_SESSION_IMPL *)cbt->iface.session;
+	/*
+	 * When retrying an operation due to a prepared conflict, the cursor is
+	 * at an update list which resulted in conflict. So, when retrying we
+	 * should examine the same update again instead of iterating to the next
+	 * object. We'll eventually find a valid update, else return
+	 * prepare-conflict until resolved.
+	 */
+	WT_RET(__wt_cursor_valid(cbt, &upd, visiblep));
+
+	/* The update that returned prepared conflict is now visible. */
+	F_CLR(cbt, WT_CBT_ITERATE_RETRY_NEXT | WT_CBT_ITERATE_RETRY_PREV);
+	if (*visiblep) {
+		/*
+		 * The underlying key-return function uses a comparison value
+		 * of 0 to indicate the search function has pre-built the key
+		 * we want to return. That's not the case, don't take that path.
+		 */
+		cbt->compare = 1;
+		/*
+		 * If a prepared delete operation is resolved, it will be
+		 * visible, but key is not valid. The update will be null in
+		 * that case and we continue with cursor navigation.
+		 */
+		if (upd != NULL)
+			WT_RET(__cursor_kv_return(session, cbt, upd));
+		else
+			*visiblep = false;
+	}
+
+	return (0);
 }

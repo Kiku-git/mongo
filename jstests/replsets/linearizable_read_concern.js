@@ -86,11 +86,24 @@ load('jstests/libs/write_concern_util.js');
     primary = replTest.getPrimary();
 
     jsTestLog("Starting linearizablility testing");
+
+    const cursorId = assert
+                         .commandWorked(primary.getDB("test").runCommand(
+                             {'find': 'foo', readConcern: {level: "linearizable"}, batchSize: 0}))
+                         .cursor.id;
     jsTestLog(
         "Setting up partitions such that the primary is isolated: [Secondary-Secondary] [Primary]");
     secondaries[0].disconnect(primary);
     secondaries[1].disconnect(primary);
 
+    jsTestLog(
+        "Testing to make sure that linearizable getMores will time out when the primary is isolated.");
+    assert.commandWorked(primary.getDB("test").foo.insert({_id: 0, x: 0}));
+    assert.commandFailedWithCode(
+        primary.getDB("test").runCommand({"getMore": cursorId, collection: "foo", batchSize: 1}),
+        ErrorCodes.LinearizableReadConcernError);
+
+    jsTestLog("Test that a linearizable read will timeout when the primary is isolated.");
     result = primary.getDB("test").runCommand(
         {"find": "foo", "readConcern": {level: "linearizable"}, "maxTimeMS": 3000});
     assert.commandFailedWithCode(result, ErrorCodes.MaxTimeMSExpired);
@@ -122,11 +135,8 @@ load('jstests/libs/write_concern_util.js');
     });
     assert.eq(primary, replTest.getPrimary(), "Primary unexpectedly changed mid test.");
     jsTestLog("Making Primary step down");
-    var stepDownException = assert.throws(function() {
-        var result = primary.adminCommand(
-            {"replSetStepDown": 100, secondaryCatchUpPeriodSecs: 0, "force": true});
-        print('replSetStepDown did not throw exception but returned: ' + tojson(result));
-    });
+    assert.commandWorked(primary.adminCommand(
+        {"replSetStepDown": 100, secondaryCatchUpPeriodSecs: 0, "force": true}));
     parallelShell();
     replTest.stopSet();
 }());

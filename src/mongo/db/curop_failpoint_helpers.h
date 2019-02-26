@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -50,11 +49,19 @@ public:
      * whileWaiting() may be used to do anything the caller needs done while hanging in the
      * failpoint. For example, the caller may use whileWaiting() to release and reacquire locks in
      * order to avoid deadlocks.
+     *
+     * If checkForInterrupt is false, the field "shouldCheckForInterrupt" may be set to 'true' at
+     * runtime to cause this method to uassert on interrupt.
+     *
+     * The field "shouldContinueOnInterrupt" may be set to 'true' to cause this method to continue
+     * on interrupt without asserting, regardless of whether checkForInterrupt or the field
+     * "shouldCheckForInterrupt" is set.
      */
     static void waitWhileFailPointEnabled(FailPoint* failPoint,
                                           OperationContext* opCtx,
                                           const std::string& curOpMsg,
                                           const std::function<void(void)>& whileWaiting = nullptr,
-                                          bool checkForInterrupt = false);
+                                          bool checkForInterrupt = false,
+                                          boost::optional<NamespaceString> nss = boost::none);
 };
 }

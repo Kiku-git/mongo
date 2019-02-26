@@ -3,15 +3,17 @@
  *
  * Unlike run_check_repl_dbhash.js, this version of the hook doesn't require that all operations
  * have finished replicating, nor does it require that the test has finished running. The dbHash
- * command is run inside of a transaction specifying atClusterTime in order for an identical
- * snapshot to be used by all members of the replica set.
+ * command reads at a particular clusterTime in order for an identical snapshot to be used by all
+ * members of the replica set.
  *
- * The find and getMore commands used to generate the collection diff run as part of the same
- * transaction as the dbHash command. This ensures the diagnostics for a dbhash mismatch aren't
- * subjected to changes from any operations in flight.
+ * The find and getMore commands used to generate the collection diff read at the same clusterTime
+ * as the dbHash command. While this ensures the diagnostics for a dbhash mismatch aren't subjected
+ * to changes from any operations in flight, it is possible for the collection or an index on the
+ * collection to be dropped due to no locks being held.
  *
- * If a transient transaction error occurs, then the dbhash check is retried until it succeeds, or
- * until it fails with a non-transient error.
+ * If a transient error occurs, then the dbhash check is retried until it succeeds, or until it
+ * fails with a non-transient error. The most common case of a transient error is attempting to read
+ * from a collection after a catalog operation has been performed on the collection or database.
  */
 'use strict';
 
@@ -23,8 +25,10 @@
             "Expected mongo shell to be connected a server, but global 'db' object isn't defined");
     }
 
+    let debugInfo = [];
+
     // We turn off printing the JavaScript stacktrace in doassert() to avoid generating an
-    // overwhelming amount of log messages when handling transient transaction errors.
+    // overwhelming amount of log messages when handling transient errors.
     TestData = TestData || {};
     TestData.traceExceptions = false;
 
@@ -67,20 +71,21 @@
     const kForeverSeconds = 1e9;
     const dbNames = new Set();
 
-    // We enable the "WTPreserveSnapshotHistoryIndefinitely" failpoint and extend the
-    // "transactionLifetimeLimitSeconds" server parameter to ensure that
-    //
-    //   (1) the same snapshot will be available to read at on the primary and secondaries, and
-    //
-    //   (2) the potentally long-running transaction isn't killed while we are part-way through
-    //       verifying data consistency.
+    // We enable the "WTPreserveSnapshotHistoryIndefinitely" failpoint to ensure that the same
+    // snapshot will be available to read at on the primary and secondaries.
     for (let session of sessions) {
         const db = session.getDatabase('admin');
 
-        assert.commandWorked(db.runCommand({
+        let preserveRes = assert.commandWorked(db.runCommand({
             configureFailPoint: 'WTPreserveSnapshotHistoryIndefinitely',
             mode: 'alwaysOn',
-        }));
+        }),
+                                               debugInfo);
+        debugInfo.push({
+            "node": db.getMongo(),
+            "session": session,
+            "preserveFailPointOpTime": preserveRes['operationTime']
+        });
 
         resetFns.push(() => {
             assert.commandWorked(db.runCommand({
@@ -88,35 +93,23 @@
                 mode: 'off',
             }));
         });
-
-        const res = assert.commandWorked(db.runCommand({
-            setParameter: 1,
-            transactionLifetimeLimitSeconds: kForeverSeconds,
-        }));
-
-        const transactionLifetimeLimitSecondsOriginal = res.was;
-        resetFns.push(() => {
-            assert.commandWorked(db.runCommand({
-                setParameter: 1,
-                transactionLifetimeLimitSeconds: transactionLifetimeLimitSecondsOriginal,
-            }));
-        });
     }
 
-    // We run the "listDatabases" command on each of the nodes after having enabled the
-    // "WTPreserveSnapshotHistoryIndefinitely" failpoint on all of the nodes so that
-    // 'sessions[0].getOperationTime()' is guaranteed to be greater than the clusterTime at which
-    // the secondaries have stopped truncating their snapshot history.
     for (let session of sessions) {
         const db = session.getDatabase('admin');
         const res = assert.commandWorked(db.runCommand({listDatabases: 1, nameOnly: true}));
         for (let dbInfo of res.databases) {
             dbNames.add(dbInfo.name);
         }
+        debugInfo.push({
+            "node": db.getMongo(),
+            "session": session,
+            "listDatabaseOpTime": res['operationTime']
+        });
     }
 
-    // Transactions cannot be run on the following databases. (The "local" database is also not
-    // replicated.)
+    // Transactions cannot be run on the following databases so we don't attempt to read at a
+    // clusterTime on them either. (The "local" database is also not replicated.)
     dbNames.delete('admin');
     dbNames.delete('config');
     dbNames.delete('local');
@@ -124,26 +117,62 @@
     const results = [];
 
     // The waitForSecondaries() function waits for all secondaries to have applied up to
-    // 'clusterTime' locally. This ensures that a later atClusterTime read inside a transaction
-    // doesn't stall as a result of a pending global X lock (e.g. from a dropDatabase command) on
-    // the primary preventing getMores on the oplog from receiving a response.
-    const waitForSecondaries = (clusterTime) => {
+    // 'clusterTime' locally. This ensures that a later $_internalReadAtClusterTime read doesn't
+    // fail as a result of the secondary's clusterTime being behind 'clusterTime'.
+    const waitForSecondaries = (clusterTime, signedClusterTime) => {
+        debugInfo.push({"waitForSecondaries": clusterTime, "signedClusterTime": signedClusterTime});
         for (let i = 1; i < sessions.length; ++i) {
             const session = sessions[i];
             const db = session.getDatabase('admin');
 
             // We advance the clusterTime on the secondary's session to ensure that 'clusterTime'
             // doesn't exceed the node's notion of the latest clusterTime.
-            session.advanceClusterTime(sessions[0].getClusterTime());
+            session.advanceClusterTime(signedClusterTime);
 
-            // We do an afterClusterTime read on a nonexistent collection to wait for the secondary
-            // to have applied up to 'clusterTime' and advanced its majority commit point.
-            assert.commandWorked(db.runCommand({
-                find: 'run_check_repl_dbhash_background',
-                readConcern: {level: 'majority', afterClusterTime: clusterTime},
-                limit: 1,
-                singleBatch: true,
-            }));
+            // We need to make sure the secondary has applied up to 'clusterTime' and advanced its
+            // majority commit point.
+
+            if (jsTest.options().enableMajorityReadConcern !== false) {
+                // If majority reads are supported, we can issue an afterClusterTime read on
+                // a nonexistent collection and wait on it. This has the advantage of being easier
+                // to debug in case of a timeout.
+                let res = assert.commandWorked(db.runCommand({
+                    find: 'run_check_repl_dbhash_background',
+                    readConcern: {level: 'majority', afterClusterTime: clusterTime},
+                    limit: 1,
+                    singleBatch: true,
+                }),
+                                               debugInfo);
+                debugInfo.push({
+                    "node": db.getMongo(),
+                    "session": session,
+                    "majorityReadOpTime": res['operationTime']
+                });
+            } else {
+                // If majority reads are not supported, then our only option is to poll for the
+                // appliedOpTime on the secondary to catch up.
+                assert.soon(
+                    function() {
+                        const rsStatus =
+                            assert.commandWorked(db.adminCommand({replSetGetStatus: 1}));
+
+                        // The 'atClusterTime' waits for the appliedOpTime to advance to
+                        // 'clusterTime'.
+                        const appliedOpTime = rsStatus.optimes.appliedOpTime;
+                        if (bsonWoCompare(appliedOpTime.ts, clusterTime) >= 0) {
+                            debugInfo.push({
+                                "node": db.getMongo(),
+                                "session": session,
+                                "appliedOpTime": appliedOpTime.ts
+                            });
+                        }
+
+                        return bsonWoCompare(appliedOpTime.ts, clusterTime) >= 0;
+                    },
+                    "The majority commit point on secondary " + i + " failed to reach " +
+                        clusterTime,
+                    10 * 60 * 1000);
+            }
         }
     };
 
@@ -152,9 +181,10 @@
     // isn't multi-versioned. Unlike with ReplSetTest#checkReplicatedDataHashes(), it is possible
     // for a collection catalog operation (e.g. a drop or rename) to have been applied on the
     // primary but not yet applied on the secondary.
-    const checkCollectionHashesForDB = (dbName) => {
+    const checkCollectionHashesForDB = (dbName, clusterTime) => {
         const result = [];
-        const hashes = rst.getHashesUsingSessions(sessions, dbName);
+        const hashes =
+            rst.getHashesUsingSessions(sessions, dbName, {readAtClusterTime: clusterTime});
         const hashesByUUID = hashes.map((response, i) => {
             const info = {};
 
@@ -199,6 +229,9 @@
                 }
 
                 if (primaryInfo.hash !== secondaryInfo.hash) {
+                    print("DBHash mismatch found for collection with uuid: " + uuid +
+                          ". Primary info: " + tojsononeline(primaryInfo) + ". Secondary info: " +
+                          tojsononeline(secondaryInfo));
                     const diff = rst.getCollectionDiffUsingSessions(
                         primarySession, secondarySession, dbName, primaryInfo.uuid);
 
@@ -216,55 +249,72 @@
     };
 
     for (let dbName of dbNames) {
+        let result;
+        let clusterTime;
         let hasTransientError;
 
-        do {
-            const clusterTime = sessions[0].getOperationTime();
-            waitForSecondaries(clusterTime);
-
-            for (let session of sessions) {
-                session.startTransaction(
-                    {readConcern: {level: 'snapshot', atClusterTime: clusterTime}});
+        // The isTransientError() function is responsible for setting hasTransientError to true.
+        const isTransientError = (e) => {
+            // It is possible for the ReplSetTest#getHashesUsingSessions() function to be
+            // interrupted due to active sessions being killed by a test running concurrently. We
+            // treat this as a transient error and simply retry running the dbHash check.
+            //
+            // Note that unlike auto_retry_transaction.js, we do not treat CursorKilled or
+            // CursorNotFound error responses as transient errors because the
+            // run_check_repl_dbhash_background.js hook would only establish a cursor via
+            // ReplSetTest#getCollectionDiffUsingSessions() upon detecting a dbHash mismatch. It is
+            // presumed to still useful to know that a bug exists even if we cannot get more
+            // diagnostics for it.
+            if (e.code === ErrorCodes.Interrupted || e.code === ErrorCodes.SnapshotUnavailable) {
+                hasTransientError = true;
+                return true;
             }
 
-            let commitErrorSessionId = undefined;
+            return false;
+        };
+
+        do {
+            // SERVER-38928: Due to races around advancing last applied, there's technically no
+            // guarantee that a primary will report a later operation time than its
+            // secondaries. Perform the snapshot read at the latest reported operation time.
+            clusterTime = sessions[0].getOperationTime();
+            let signedClusterTime = sessions[0].getClusterTime();
+            for (let sess of sessions.slice(1)) {
+                let ts = sess.getOperationTime();
+                if (timestampCmp(ts, clusterTime) > 0) {
+                    clusterTime = ts;
+                    signedClusterTime = sess.getClusterTime();
+                }
+            }
+            waitForSecondaries(clusterTime, signedClusterTime);
+
+            for (let session of sessions) {
+                debugInfo.push({
+                    "node": session.getClient(),
+                    "session": session,
+                    "readAtClusterTime": clusterTime
+                });
+            }
+
             hasTransientError = false;
 
             try {
-                const result = checkCollectionHashesForDB(dbName);
-
-                for (let session of sessions) {
-                    // commitTransaction() calls assert.commandWorked(), which may fail with a
-                    // WriteConflict error response, which is ignored.
-                    try {
-                        session.commitTransaction();
-                    } catch (e) {
-                        commitErrorSessionId = session.getSessionId();
-                        throw e;
-                    }
-                }
-
-                for (let mismatchInfo of result) {
-                    mismatchInfo.atClusterTime = clusterTime;
-                    results.push(mismatchInfo);
-                }
+                result = checkCollectionHashesForDB(dbName, clusterTime);
             } catch (e) {
-                for (let session of sessions) {
-                    if ((commitErrorSessionId === undefined) ||
-                        bsonWoCompare(session.getSessionId(), commitErrorSessionId) !== 0) {
-                        session.abortTransaction_forTesting();
-                    }
-                }
-
-                if (e.hasOwnProperty('errorLabels') &&
-                    e.errorLabels.includes('TransientTransactionError')) {
-                    hasTransientError = true;
+                if (isTransientError(e)) {
+                    debugInfo.push({"transientError": e});
                     continue;
                 }
 
+                jsTestLog(debugInfo);
                 throw e;
             }
         } while (hasTransientError);
+
+        for (let mismatchInfo of result) {
+            mismatchInfo.atClusterTime = clusterTime;
+            results.push(mismatchInfo);
+        }
     }
 
     for (let resetFn of resetFns) {

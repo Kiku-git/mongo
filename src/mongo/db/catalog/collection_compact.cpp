@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -35,7 +34,6 @@
 #include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/catalog/index_key_validate.h"
 #include "mongo/db/catalog/multi_index_block.h"
-#include "mongo/db/catalog/multi_index_block_impl.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/operation_context.h"
@@ -67,20 +65,9 @@ StatusWith<CompactStats> compactCollection(OperationContext* opCtx,
             return StatusWith<CompactStats>(status);
 
         // Compact all indexes (not including unfinished indexes)
-        std::unique_ptr<IndexCatalog::IndexIterator> ii(
-            indexCatalog->getIndexIterator(opCtx, false));
-        while (ii->more()) {
-            IndexCatalogEntry* entry = ii->next();
-            IndexDescriptor* descriptor = entry->descriptor();
-            IndexAccessMethod* iam = entry->accessMethod();
-
-            LOG(1) << "compacting index: " << descriptor->toString();
-            Status status = iam->compact(opCtx);
-            if (!status.isOK()) {
-                error() << "failed to compact index: " << descriptor->toString();
-                return status;
-            }
-        }
+        status = indexCatalog->compactIndexes(opCtx);
+        if (!status.isOK())
+            return StatusWith<CompactStats>(status);
 
         return StatusWith<CompactStats>(stats);
     }
@@ -94,7 +81,7 @@ StatusWith<CompactStats> compactCollection(OperationContext* opCtx,
         std::unique_ptr<IndexCatalog::IndexIterator> ii(
             indexCatalog->getIndexIterator(opCtx, false));
         while (ii->more()) {
-            IndexDescriptor* descriptor = ii->next()->descriptor();
+            const IndexDescriptor* descriptor = ii->next()->descriptor();
 
             // Compact always creates the new index in the foreground.
             const BSONObj spec =
@@ -129,28 +116,35 @@ StatusWith<CompactStats> compactCollection(OperationContext* opCtx,
 
     CompactStats stats;
 
-    MultiIndexBlockImpl indexer(opCtx, collection);
-    indexer.allowInterruption();
+    MultiIndexBlock indexer;
     indexer.ignoreUniqueConstraint();  // in compact we should be doing no checking
 
-    Status status = indexer.init(indexSpecs).getStatus();
+    // The 'indexer' could throw, so ensure build cleanup occurs.
+    ON_BLOCK_EXIT([&] { indexer.cleanUpAfterBuild(opCtx, collection); });
+
+    Status status =
+        indexer.init(opCtx, collection, indexSpecs, MultiIndexBlock::kNoopOnInitFn).getStatus();
     if (!status.isOK())
         return StatusWith<CompactStats>(status);
 
-    // The MMAPv1 storage engine used to add documents to indexer through the
-    // RecordStoreCompactAdaptor interface.
     status = recordStore->compact(opCtx);
     if (!status.isOK())
         return StatusWith<CompactStats>(status);
 
     log() << "starting index commits";
-    status = indexer.doneInserting();
+    status = indexer.dumpInsertsFromBulk(opCtx);
     if (!status.isOK())
         return StatusWith<CompactStats>(status);
 
     {
         WriteUnitOfWork wunit(opCtx);
-        indexer.commit();
+        status = indexer.commit(opCtx,
+                                collection,
+                                MultiIndexBlock::kNoopOnCreateEachFn,
+                                MultiIndexBlock::kNoopOnCommitFn);
+        if (!status.isOK()) {
+            return StatusWith<CompactStats>(status);
+        }
         wunit.commit();
     }
 

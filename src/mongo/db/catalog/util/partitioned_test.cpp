@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -235,7 +234,7 @@ TEST(PartitionedConcurrency, ShouldProtectConcurrentAccesses) {
     std::vector<stdx::thread> threads;
     const size_t opsPerThread = 1000;
 
-    AtomicUInt32 ready{0};
+    AtomicWord<unsigned> ready{0};
     for (size_t threadId = 1; threadId <= numThreads; ++threadId) {
         auto workerThreadBody = [&, threadId, opsPerThread]() {
 

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -52,6 +51,7 @@ struct ServerGlobalParams {
     bool isDefaultPort() const {
         return port == DefaultDBPort;
     }
+    static std::string getPortSettingHelpText();
 
     std::vector<std::string> bind_ips;  // --bind_ip
     bool enableIPv6 = false;
@@ -59,9 +59,7 @@ struct ServerGlobalParams {
 
     int listenBacklog = 0;  // --listenBacklog, real default is SOMAXCONN
 
-    bool indexBuildRetry = true;  // --noIndexBuildRetry
-
-    AtomicBool quiet{false};  // --quiet
+    AtomicWord<bool> quiet{false};  // --quiet
 
     ClusterRole clusterRole = ClusterRole::None;  // --configsvr/--shardsvr
 
@@ -121,8 +119,8 @@ struct ServerGlobalParams {
 
     AuthState authState = AuthState::kUndefined;
 
-    bool transitionToAuth = false;  // --transitionToAuth, mixed mode for rolling auth upgrade
-    AtomicInt32 clusterAuthMode;    // --clusterAuthMode, the internal cluster auth mode
+    bool transitionToAuth = false;    // --transitionToAuth, mixed mode for rolling auth upgrade
+    AtomicWord<int> clusterAuthMode;  // --clusterAuthMode, the internal cluster auth mode
 
     enum ClusterAuthModes {
         ClusterAuthMode_undefined,

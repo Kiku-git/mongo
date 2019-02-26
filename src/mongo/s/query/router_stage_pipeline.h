@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -54,6 +53,8 @@ public:
 
     std::size_t getNumRemotes() const final;
 
+    BSONObj getPostBatchResumeToken() const final;
+
 protected:
     Status doSetAwaitDataTimeout(Milliseconds awaitDataTimeout) final;
 
@@ -62,10 +63,15 @@ protected:
     void doDetachFromOperationContext() final;
 
 private:
+    BSONObj _validateAndConvertToBSON(const Document& event);
+
+    BSONObj _setPostBatchResumeTokenUUID(BSONObj pbrt) const;
+
     std::unique_ptr<Pipeline, PipelineDeleter> _mergePipeline;
 
-    // May be null if this pipeline is executing exclusively on mongos and will not contact the
-    // shards at all.
+    // May be null if this pipeline runs exclusively on mongos without contacting the shards at all.
     boost::intrusive_ptr<DocumentSourceMergeCursors> _mergeCursorsStage;
+
+    BSONObj _latestSortKey;
 };
 }  // namespace mongo

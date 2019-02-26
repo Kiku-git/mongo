@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -51,7 +50,7 @@ public:
      *
      * @return the status code under these circumstances:
      *     OK - if successful.
-     *     DuplicateKey - if the given name already exists in this registry.
+     *     51006 - if the given name already exists in this registry.
      *     CannotMutateObject - if this registry is already frozen.
      */
     Status addFailPoint(const std::string& name, FailPoint* failPoint);

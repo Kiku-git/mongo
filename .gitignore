@@ -83,6 +83,7 @@ scratch
 /mongos
 /mongoshim
 /mongosniff
+/mongotrafficreader
 /wt
 
 *.tgz
@@ -143,6 +144,8 @@ debian/mongodb
 .cproject
 .project
 .pydevproject
+.externalToolBuilders/
+.settings/
 
 # Idea CLion project artifacts
 .idea
@@ -151,8 +154,10 @@ CMakeLists.txt
 # XCode projects
 .xcworkspace
 
-# VSCode projects
+# Visual Studio and VSCode projects
 .vscode/
+.vs/
+x64/
 
 # Windows MSI builder artifacts
 *.msi
@@ -168,3 +173,4 @@ src/mongo/embedded/java/jar/build/
 local.properties
 
 compile_commands.json
+generated_resmoke_config

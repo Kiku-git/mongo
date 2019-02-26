@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -111,6 +110,13 @@ TEST(Decimal128Test, TestInt64ConstructorMin) {
     uint64_t lowBytes = 0x8000000000000000;
     ASSERT_EQUALS(val.high64, highBytes);
     ASSERT_EQUALS(val.low64, lowBytes);
+}
+
+TEST(Decimal128Test, TestPartsConstructor) {
+    Decimal128 expected(10);
+    Decimal128 val(0LL, Decimal128::kExponentBias, 0LL, 10LL);
+    ASSERT_EQUALS(val.getValue().low64, expected.getValue().low64);
+    ASSERT_EQUALS(val.getValue().low64, expected.getValue().low64);
 }
 
 TEST(Decimal128Test, TestDoubleConstructorQuant1) {
@@ -1067,12 +1073,109 @@ TEST(Decimal128Test, TestDecimal128DivisionCase2) {
 }
 
 TEST(Decimal128Test, TestDecimal128Quantize) {
-    Decimal128 expected("1.00001");
-    Decimal128 val("1.000008");
-    Decimal128 ref("0.00001");
-    Decimal128 result = val.quantize(ref);
-    ASSERT_EQUALS(result.getValue().low64, expected.getValue().low64);
-    ASSERT_EQUALS(result.getValue().high64, expected.getValue().high64);
+    {
+        Decimal128 expected("1.00001");
+        Decimal128 val("1.000008");
+        Decimal128 ref("0.00001");
+        Decimal128 result = val.quantize(ref);
+        ASSERT_EQUALS(result.getValue().low64, expected.getValue().low64);
+        ASSERT_EQUALS(result.getValue().high64, expected.getValue().high64);
+    }
+    {
+        Decimal128 expected("3.1");
+        Decimal128 val("3.14159");
+        Decimal128 ref("0.1");
+        Decimal128 result = val.quantize(ref);
+        ASSERT_EQUALS(result.getValue().low64, expected.getValue().low64);
+        ASSERT_EQUALS(result.getValue().high64, expected.getValue().high64);
+    }
+    {
+        Decimal128 expected("3.14");
+        Decimal128 val("3.14159");
+        Decimal128 ref("0.01");
+        Decimal128 result = val.quantize(ref);
+        ASSERT_EQUALS(result.getValue().low64, expected.getValue().low64);
+        ASSERT_EQUALS(result.getValue().high64, expected.getValue().high64);
+    }
+    {
+        Decimal128 expected("3.142");
+        Decimal128 val("3.14159");
+        Decimal128 ref("0.001");
+        Decimal128 result = val.quantize(ref);
+        ASSERT_EQUALS(result.getValue().low64, expected.getValue().low64);
+        ASSERT_EQUALS(result.getValue().high64, expected.getValue().high64);
+    }
+    {
+        Decimal128 expected("3.1416");
+        Decimal128 val("3.14159");
+        Decimal128 ref("0.0001");
+        Decimal128 result = val.quantize(ref);
+        ASSERT_EQUALS(result.getValue().low64, expected.getValue().low64);
+        ASSERT_EQUALS(result.getValue().high64, expected.getValue().high64);
+    }
+    {
+        Decimal128 expected("3.141");
+        Decimal128 val("3.14159");
+        Decimal128 ref("0.001");
+        Decimal128 result = val.quantize(ref, Decimal128::kRoundTowardZero);
+        ASSERT_EQUALS(result.getValue().low64, expected.getValue().low64);
+        ASSERT_EQUALS(result.getValue().high64, expected.getValue().high64);
+    }
+    {
+        Decimal128 expected("3.1415");
+        Decimal128 val("3.14159");
+        Decimal128 ref("0.0001");
+        Decimal128 result = val.quantize(ref, Decimal128::kRoundTowardZero);
+        ASSERT_EQUALS(result.getValue().low64, expected.getValue().low64);
+        ASSERT_EQUALS(result.getValue().high64, expected.getValue().high64);
+    }
+    {
+        Decimal128 expected("30.1415");
+        Decimal128 val("30.14159");
+        Decimal128 ref("0.0001");
+        Decimal128 result = val.quantize(ref, Decimal128::kRoundTowardZero);
+        ASSERT_EQUALS(result.getValue().low64, expected.getValue().low64);
+        ASSERT_EQUALS(result.getValue().high64, expected.getValue().high64);
+    }
+    {
+        Decimal128 expected("30.14159");
+        Decimal128 val("30.14159");
+        Decimal128 ref("0.00001");
+        Decimal128 result = val.quantize(ref, Decimal128::kRoundTowardZero);
+        ASSERT_EQUALS(result.getValue().low64, expected.getValue().low64);
+        ASSERT_EQUALS(result.getValue().high64, expected.getValue().high64);
+    }
+    {
+        Decimal128 expected("3000000000000000000000.141590000000");
+        Decimal128 val("3000000000000000000000.14159000000");
+        Decimal128 ref("0.000000000001");
+        Decimal128 result = val.quantize(ref, Decimal128::kRoundTowardZero);
+        ASSERT_EQUALS(result.getValue().low64, expected.getValue().low64);
+        ASSERT_EQUALS(result.getValue().high64, expected.getValue().high64);
+    }
+    {
+        Decimal128 expected("30000000000000000000000.141590000000");
+        Decimal128 val("30000000000000000000000.14159000000");
+        Decimal128 ref("0.000000000001");
+        Decimal128 result = val.quantize(ref, Decimal128::kRoundTowardZero);
+        ASSERT_EQUALS(result.getValue().low64, expected.getValue().low64);
+        ASSERT_EQUALS(result.getValue().high64, expected.getValue().high64);
+    }
+    {
+        Decimal128 expected("3000000000000000000000000.141590000000");
+        Decimal128 val("3000000000000000000000000.141590000");
+        Decimal128 ref("0.000000000001");
+        Decimal128 result = val.quantize(ref, Decimal128::kRoundTowardZero);
+        ASSERT_EQUALS(result.getValue().low64, expected.getValue().low64);
+        ASSERT_EQUALS(result.getValue().high64, expected.getValue().high64);
+    }
+    {
+        Decimal128 expected("3000000000000000000000000");
+        Decimal128 val("3000000000000000000000000.141590000");
+        Decimal128 result = val.quantize(Decimal128::kNormalizedZero, Decimal128::kRoundTowardZero);
+        ASSERT_EQUALS(result.getValue().low64, expected.getValue().low64);
+        ASSERT_EQUALS(result.getValue().high64, expected.getValue().high64);
+    }
 }
 
 TEST(Decimal128Test, TestDecimal128NormalizeSmallVals) {
@@ -1292,4 +1395,291 @@ TEST(Decimal128Test, TestDecimal128GetLargestNegativeExponentZero) {
     ASSERT_EQUALS(d.getValue().low64, largestNegativeExponentZeroLow64);
 }
 
+/**
+* Test data was generated using 64 bit versions of these functions, so we must test
+* approximate results.
+*/
+
+void assertDecimal128ApproxEqual(Decimal128 x, Decimal128 y) {
+    ASSERT_TRUE(x.subtract(y).toAbs().isLess(Decimal128("0.00000005")));
+}
+
+/**
+ * A few tests need exact comparisons to test boundary conditions
+ */
+
+void assertDecimal128ExactlyEqual(Decimal128 x, Decimal128 y) {
+    ASSERT_EQUALS(x.getValue().high64, y.getValue().high64);
+    ASSERT_EQUALS(x.getValue().low64, y.getValue().low64);
+}
+
+TEST(Decimal128Test, TestExp) {
+    assertDecimal128ApproxEqual(Decimal128("-1").exponential(),
+                                Decimal128("0.3678794411714423215955237701614609"));
+    assertDecimal128ApproxEqual(Decimal128("0").exponential(), Decimal128("1"));
+    assertDecimal128ApproxEqual(Decimal128("1").exponential(),
+                                Decimal128("2.718281828459045235360287471352662"));
+    assertDecimal128ApproxEqual(Decimal128("1.5").exponential(),
+                                Decimal128("4.481689070338064822602055460119276"));
+    assertDecimal128ApproxEqual(Decimal128("1.79769313486231E+308")
+                                    .exponential(Decimal128::RoundingMode::kRoundTowardNegative),
+                                Decimal128("9.999999999999999999999999999999999E+6144"));
+}
+
+TEST(Decimal128Test, TestSqrt) {
+    assertDecimal128ApproxEqual(Decimal128("0").squareRoot(), Decimal128("0"));
+    assertDecimal128ApproxEqual(Decimal128("1").squareRoot(), Decimal128("1"));
+    assertDecimal128ApproxEqual(Decimal128("25").squareRoot(), Decimal128("5"));
+    assertDecimal128ApproxEqual(Decimal128("25.5").squareRoot(),
+                                Decimal128("5.049752469181038976681692958534800"));
+    assertDecimal128ApproxEqual(Decimal128("1.79769313486231E+308")
+                                    .squareRoot(Decimal128::RoundingMode::kRoundTowardNegative),
+                                Decimal128("1.340780792994257506864497209340836E+154"));
+}
+
+TEST(Decimal128Test, TestAsin) {
+    assertDecimal128ApproxEqual(Decimal128("-1.0").asin(), Decimal128("-1.57079632679"));
+    assertDecimal128ApproxEqual(Decimal128("-0.9").asin(), Decimal128("-1.119769515"));
+    assertDecimal128ApproxEqual(Decimal128("-0.8").asin(), Decimal128("-0.927295218002"));
+    assertDecimal128ApproxEqual(Decimal128("-0.7").asin(), Decimal128("-0.775397496611"));
+    assertDecimal128ApproxEqual(Decimal128("-0.6").asin(), Decimal128("-0.643501108793"));
+    assertDecimal128ApproxEqual(Decimal128("-0.5").asin(), Decimal128("-0.523598775598"));
+    assertDecimal128ApproxEqual(Decimal128("-0.4").asin(), Decimal128("-0.411516846067"));
+    assertDecimal128ApproxEqual(Decimal128("-0.3").asin(), Decimal128("-0.304692654015"));
+    assertDecimal128ApproxEqual(Decimal128("-0.2").asin(), Decimal128("-0.20135792079"));
+    assertDecimal128ApproxEqual(Decimal128("-0.1").asin(), Decimal128("-0.100167421162"));
+    assertDecimal128ApproxEqual(Decimal128("0.0").asin(), Decimal128("0.0"));
+    assertDecimal128ApproxEqual(Decimal128("0.1").asin(), Decimal128("0.100167421162"));
+    assertDecimal128ApproxEqual(Decimal128("0.2").asin(), Decimal128("0.20135792079"));
+    assertDecimal128ApproxEqual(Decimal128("0.3").asin(), Decimal128("0.304692654015"));
+    assertDecimal128ApproxEqual(Decimal128("0.4").asin(), Decimal128("0.411516846067"));
+    assertDecimal128ApproxEqual(Decimal128("0.5").asin(), Decimal128("0.523598775598"));
+    assertDecimal128ApproxEqual(Decimal128("0.6").asin(), Decimal128("0.643501108793"));
+    assertDecimal128ApproxEqual(Decimal128("0.7").asin(), Decimal128("0.775397496611"));
+    assertDecimal128ApproxEqual(Decimal128("0.8").asin(), Decimal128("0.927295218002"));
+    assertDecimal128ApproxEqual(Decimal128("0.9").asin(), Decimal128("1.119769515"));
+    assertDecimal128ApproxEqual(Decimal128("1.0").asin(), Decimal128("1.57079632679"));
+}
+
+TEST(Decimal128Test, TestAcos) {
+    // The intel decimal library has a bug at -1 where it returns 0.
+    //
+    // uncomment this test when we update to the new intel decimal library.
+    // assertDecimal128ExactlyEqual(Decimal128("-1").acos(), Decimal128::kPi);
+    assertDecimal128ExactlyEqual(Decimal128("-0.9999999999999999999999999999999997").acos(),
+                                 Decimal128("3.141592653589793213967745955447722"));
+    // Back to normal tests.
+    assertDecimal128ApproxEqual(Decimal128("-0.9").acos(), Decimal128("2.69056584179"));
+    assertDecimal128ApproxEqual(Decimal128("-0.8").acos(), Decimal128("2.4980915448"));
+    assertDecimal128ApproxEqual(Decimal128("-0.7").acos(), Decimal128("2.34619382341"));
+    assertDecimal128ApproxEqual(Decimal128("-0.6").acos(), Decimal128("2.21429743559"));
+    assertDecimal128ApproxEqual(Decimal128("-0.5").acos(), Decimal128("2.09439510239"));
+    assertDecimal128ApproxEqual(Decimal128("-0.4").acos(), Decimal128("1.98231317286"));
+    assertDecimal128ApproxEqual(Decimal128("-0.3").acos(), Decimal128("1.87548898081"));
+    assertDecimal128ApproxEqual(Decimal128("-0.2").acos(), Decimal128("1.77215424759"));
+    assertDecimal128ApproxEqual(Decimal128("-0.1").acos(), Decimal128("1.67096374796"));
+    assertDecimal128ApproxEqual(Decimal128("0.0").acos(), Decimal128("1.57079632679"));
+    assertDecimal128ApproxEqual(Decimal128("0.1").acos(), Decimal128("1.47062890563"));
+    assertDecimal128ApproxEqual(Decimal128("0.2").acos(), Decimal128("1.369438406"));
+    assertDecimal128ApproxEqual(Decimal128("0.3").acos(), Decimal128("1.26610367278"));
+    assertDecimal128ApproxEqual(Decimal128("0.4").acos(), Decimal128("1.15927948073"));
+    assertDecimal128ApproxEqual(Decimal128("0.5").acos(), Decimal128("1.0471975512"));
+    assertDecimal128ApproxEqual(Decimal128("0.6").acos(), Decimal128("0.927295218002"));
+    assertDecimal128ApproxEqual(Decimal128("0.7").acos(), Decimal128("0.795398830184"));
+    assertDecimal128ApproxEqual(Decimal128("0.8").acos(), Decimal128("0.643501108793"));
+    assertDecimal128ApproxEqual(Decimal128("0.9").acos(), Decimal128("0.451026811796"));
+    assertDecimal128ApproxEqual(Decimal128("1.0").acos(), Decimal128("0.0"));
+}
+
+TEST(Decimal128Test, TestAcosh) {
+    assertDecimal128ApproxEqual(Decimal128("1.0").acosh(), Decimal128("0.0"));
+    assertDecimal128ApproxEqual(Decimal128("1.1").acosh(), Decimal128("0.443568254385"));
+    assertDecimal128ApproxEqual(Decimal128("1.5").acosh(), Decimal128("0.962423650119"));
+    assertDecimal128ApproxEqual(Decimal128("2").acosh(), Decimal128("1.31695789692"));
+    assertDecimal128ApproxEqual(Decimal128("2.5").acosh(), Decimal128("1.56679923697"));
+    assertDecimal128ApproxEqual(Decimal128("3").acosh(), Decimal128("1.76274717404"));
+}
+
+
+TEST(Decimal128Test, TestAtanh) {
+    assertDecimal128ApproxEqual(Decimal128("-0.9").atanh(), Decimal128("-1.47221948958"));
+    assertDecimal128ApproxEqual(Decimal128("-0.8").atanh(), Decimal128("-1.09861228867"));
+    assertDecimal128ApproxEqual(Decimal128("-0.7").atanh(), Decimal128("-0.867300527694"));
+    assertDecimal128ApproxEqual(Decimal128("-0.6").atanh(), Decimal128("-0.69314718056"));
+    assertDecimal128ApproxEqual(Decimal128("-0.5").atanh(), Decimal128("-0.549306144334"));
+    assertDecimal128ApproxEqual(Decimal128("-0.4").atanh(), Decimal128("-0.423648930194"));
+    assertDecimal128ApproxEqual(Decimal128("-0.3").atanh(), Decimal128("-0.309519604203"));
+    assertDecimal128ApproxEqual(Decimal128("-0.2").atanh(), Decimal128("-0.202732554054"));
+    assertDecimal128ApproxEqual(Decimal128("-0.1").atanh(), Decimal128("-0.100335347731"));
+    assertDecimal128ApproxEqual(Decimal128("0.0").atanh(), Decimal128("0.0"));
+    assertDecimal128ApproxEqual(Decimal128("0.1").atanh(), Decimal128("0.100335347731"));
+    assertDecimal128ApproxEqual(Decimal128("0.2").atanh(), Decimal128("0.202732554054"));
+    assertDecimal128ApproxEqual(Decimal128("0.3").atanh(), Decimal128("0.309519604203"));
+    assertDecimal128ApproxEqual(Decimal128("0.4").atanh(), Decimal128("0.423648930194"));
+    assertDecimal128ApproxEqual(Decimal128("0.5").atanh(), Decimal128("0.549306144334"));
+    assertDecimal128ApproxEqual(Decimal128("0.6").atanh(), Decimal128("0.69314718056"));
+    assertDecimal128ApproxEqual(Decimal128("0.7").atanh(), Decimal128("0.867300527694"));
+    assertDecimal128ApproxEqual(Decimal128("0.8").atanh(), Decimal128("1.09861228867"));
+    assertDecimal128ApproxEqual(Decimal128("0.9").atanh(), Decimal128("1.47221948958"));
+}
+
+TEST(Decimal128Test, TestAtan) {
+    assertDecimal128ApproxEqual(Decimal128("-1.5").atan(), Decimal128("-0.982793723247"));
+    assertDecimal128ApproxEqual(Decimal128("-1.0471975512").atan(), Decimal128("-0.80844879263"));
+    assertDecimal128ApproxEqual(Decimal128("-0.785398163397").atan(),
+                                Decimal128("-0.665773750028"));
+    assertDecimal128ApproxEqual(Decimal128("0").atan(), Decimal128("0.0"));
+    assertDecimal128ApproxEqual(Decimal128("0.785398163397").atan(), Decimal128("0.665773750028"));
+    assertDecimal128ApproxEqual(Decimal128("1.0471975512").atan(), Decimal128("0.80844879263"));
+    assertDecimal128ApproxEqual(Decimal128("1.5").atan(), Decimal128("0.982793723247"));
+}
+
+TEST(Decimal128Test, TestAtan2) {
+    assertDecimal128ApproxEqual(Decimal128("1.0").atan2(Decimal128("0.0")),
+                                Decimal128("1.57079632679"));
+    assertDecimal128ApproxEqual(Decimal128("0.866025403784").atan2(Decimal128("0.5")),
+                                Decimal128("1.0471975512"));
+    assertDecimal128ApproxEqual(Decimal128("0.707106781187").atan2(Decimal128("0.707106781187")),
+                                Decimal128("0.785398163397"));
+    assertDecimal128ApproxEqual(Decimal128("0.5").atan2(Decimal128("0.866025403784")),
+                                Decimal128("0.523598775598"));
+    assertDecimal128ApproxEqual(Decimal128("6.12323399574e-17").atan2(Decimal128("1.0")),
+                                Decimal128("6.12323399574e-17"));
+    assertDecimal128ApproxEqual(Decimal128("-0.5").atan2(Decimal128("0.866025403784")),
+                                Decimal128("-0.523598775598"));
+    assertDecimal128ApproxEqual(Decimal128("-0.707106781187").atan2(Decimal128("0.707106781187")),
+                                Decimal128("-0.785398163397"));
+    assertDecimal128ApproxEqual(Decimal128("-0.866025403784").atan2(Decimal128("0.5")),
+                                Decimal128("-1.0471975512"));
+    assertDecimal128ApproxEqual(Decimal128("-1.0").atan2(Decimal128("1.22464679915e-16")),
+                                Decimal128("-1.57079632679"));
+    assertDecimal128ApproxEqual(Decimal128("-0.866025403784").atan2(Decimal128("-0.5")),
+                                Decimal128("-2.09439510239"));
+    assertDecimal128ApproxEqual(Decimal128("-0.707106781187").atan2(Decimal128("-0.707106781187")),
+                                Decimal128("-2.35619449019"));
+    assertDecimal128ApproxEqual(Decimal128("-0.5").atan2(Decimal128("-0.866025403784")),
+                                Decimal128("-2.61799387799"));
+    assertDecimal128ApproxEqual(Decimal128("-1.83697019872e-16").atan2(Decimal128("-1.0")),
+                                Decimal128("-3.14159265359"));
+    assertDecimal128ApproxEqual(Decimal128("0.5").atan2(Decimal128("-0.866025403784")),
+                                Decimal128("2.61799387799"));
+    assertDecimal128ApproxEqual(Decimal128("0.707106781187").atan2(Decimal128("-0.707106781187")),
+                                Decimal128("2.35619449019"));
+    assertDecimal128ApproxEqual(Decimal128("0.866025403784").atan2(Decimal128("-0.5")),
+                                Decimal128("2.09439510239"));
+    assertDecimal128ApproxEqual(Decimal128("1.0").atan2(Decimal128("-2.44929359829e-16")),
+                                Decimal128("1.57079632679"));
+}
+
+TEST(Decimal128Test, TestCos) {
+    assertDecimal128ApproxEqual(Decimal128("0.0").cos(), Decimal128("1.0"));
+    assertDecimal128ApproxEqual(Decimal128("0.523598775598").cos(), Decimal128("0.866025403784"));
+    assertDecimal128ApproxEqual(Decimal128("0.785398163397").cos(), Decimal128("0.707106781187"));
+    assertDecimal128ApproxEqual(Decimal128("1.0471975512").cos(), Decimal128("0.5"));
+    assertDecimal128ApproxEqual(Decimal128("1.57079632679").cos(), Decimal128("6.12323399574e-17"));
+    assertDecimal128ApproxEqual(Decimal128("2.09439510239").cos(), Decimal128("-0.5"));
+    assertDecimal128ApproxEqual(Decimal128("2.35619449019").cos(), Decimal128("-0.707106781187"));
+    assertDecimal128ApproxEqual(Decimal128("2.61799387799").cos(), Decimal128("-0.866025403784"));
+    assertDecimal128ApproxEqual(Decimal128("3.14159265359").cos(), Decimal128("-1.0"));
+    assertDecimal128ApproxEqual(Decimal128("3.66519142919").cos(), Decimal128("-0.866025403784"));
+    assertDecimal128ApproxEqual(Decimal128("3.92699081699").cos(), Decimal128("-0.707106781187"));
+    assertDecimal128ApproxEqual(Decimal128("4.18879020479").cos(), Decimal128("-0.5"));
+    assertDecimal128ApproxEqual(Decimal128("4.71238898038").cos(),
+                                Decimal128("-1.83697019872e-16"));
+    assertDecimal128ApproxEqual(Decimal128("5.23598775598").cos(), Decimal128("0.5"));
+    assertDecimal128ApproxEqual(Decimal128("5.49778714378").cos(), Decimal128("0.707106781187"));
+    assertDecimal128ApproxEqual(Decimal128("5.75958653158").cos(), Decimal128("0.866025403784"));
+    assertDecimal128ApproxEqual(Decimal128("6.28318530718").cos(), Decimal128("1.0"));
+}
+
+TEST(Decimal128Test, TestCosh) {
+    assertDecimal128ApproxEqual(Decimal128("0.0").cosh(), Decimal128("1.0"));
+    assertDecimal128ApproxEqual(Decimal128("0.523598775598").cosh(), Decimal128("1.14023832108"));
+    assertDecimal128ApproxEqual(Decimal128("0.785398163397").cosh(), Decimal128("1.32460908925"));
+    assertDecimal128ApproxEqual(Decimal128("1.0471975512").cosh(), Decimal128("1.6002868577"));
+    assertDecimal128ApproxEqual(Decimal128("1.57079632679").cosh(), Decimal128("2.50917847866"));
+    assertDecimal128ApproxEqual(Decimal128("2.09439510239").cosh(), Decimal128("4.12183605387"));
+    assertDecimal128ApproxEqual(Decimal128("2.35619449019").cosh(), Decimal128("5.32275214952"));
+    assertDecimal128ApproxEqual(Decimal128("2.61799387799").cosh(), Decimal128("6.89057236498"));
+    assertDecimal128ApproxEqual(Decimal128("3.14159265359").cosh(), Decimal128("11.5919532755"));
+    assertDecimal128ApproxEqual(Decimal128("3.66519142919").cosh(), Decimal128("19.5446063168"));
+    assertDecimal128ApproxEqual(Decimal128("3.92699081699").cosh(), Decimal128("25.3868611924"));
+    assertDecimal128ApproxEqual(Decimal128("4.18879020479").cosh(), Decimal128("32.97906491"));
+    assertDecimal128ApproxEqual(Decimal128("4.71238898038").cosh(), Decimal128("55.6633808904"));
+    assertDecimal128ApproxEqual(Decimal128("5.23598775598").cosh(), Decimal128("93.9599750339"));
+    assertDecimal128ApproxEqual(Decimal128("5.49778714378").cosh(), Decimal128("122.07757934"));
+    assertDecimal128ApproxEqual(Decimal128("5.75958653158").cosh(), Decimal128("158.610147472"));
+    assertDecimal128ApproxEqual(Decimal128("6.28318530718").cosh(), Decimal128("267.746761484"));
+}
+
+TEST(Decimal128Test, TestSin) {
+    assertDecimal128ApproxEqual(Decimal128("0.0").sin(), Decimal128("0.0"));
+    assertDecimal128ApproxEqual(Decimal128("0.523598775598").sin(), Decimal128("0.5"));
+    assertDecimal128ApproxEqual(Decimal128("0.785398163397").sin(), Decimal128("0.707106781187"));
+    assertDecimal128ApproxEqual(Decimal128("1.0471975512").sin(), Decimal128("0.866025403784"));
+    assertDecimal128ApproxEqual(Decimal128("1.57079632679").sin(), Decimal128("1.0"));
+    assertDecimal128ApproxEqual(Decimal128("2.09439510239").sin(), Decimal128("0.866025403784"));
+    assertDecimal128ApproxEqual(Decimal128("2.35619449019").sin(), Decimal128("0.707106781187"));
+    assertDecimal128ApproxEqual(Decimal128("2.61799387799").sin(), Decimal128("0.5"));
+    assertDecimal128ApproxEqual(Decimal128("3.14159265359").sin(), Decimal128("1.22464679915e-16"));
+    assertDecimal128ApproxEqual(Decimal128("3.66519142919").sin(), Decimal128("-0.5"));
+    assertDecimal128ApproxEqual(Decimal128("3.92699081699").sin(), Decimal128("-0.707106781187"));
+    assertDecimal128ApproxEqual(Decimal128("4.18879020479").sin(), Decimal128("-0.866025403784"));
+    assertDecimal128ApproxEqual(Decimal128("4.71238898038").sin(), Decimal128("-1.0"));
+    assertDecimal128ApproxEqual(Decimal128("5.23598775598").sin(), Decimal128("-0.866025403784"));
+    assertDecimal128ApproxEqual(Decimal128("5.49778714378").sin(), Decimal128("-0.707106781187"));
+    assertDecimal128ApproxEqual(Decimal128("5.75958653158").sin(), Decimal128("-0.5"));
+    assertDecimal128ApproxEqual(Decimal128("6.28318530718").sin(),
+                                Decimal128("-2.44929359829e-16"));
+}
+
+TEST(Decimal128Test, TestSinh) {
+    assertDecimal128ApproxEqual(Decimal128("0.0").sinh(), Decimal128("0.0"));
+    assertDecimal128ApproxEqual(Decimal128("0.523598775598").sinh(), Decimal128("0.547853473888"));
+    assertDecimal128ApproxEqual(Decimal128("0.785398163397").sinh(), Decimal128("0.868670961486"));
+    assertDecimal128ApproxEqual(Decimal128("1.0471975512").sinh(), Decimal128("1.24936705052"));
+    assertDecimal128ApproxEqual(Decimal128("1.57079632679").sinh(), Decimal128("2.30129890231"));
+    assertDecimal128ApproxEqual(Decimal128("2.09439510239").sinh(), Decimal128("3.9986913428"));
+    assertDecimal128ApproxEqual(Decimal128("2.35619449019").sinh(), Decimal128("5.22797192468"));
+    assertDecimal128ApproxEqual(Decimal128("2.61799387799").sinh(), Decimal128("6.81762330413"));
+    assertDecimal128ApproxEqual(Decimal128("3.14159265359").sinh(), Decimal128("11.5487393573"));
+    assertDecimal128ApproxEqual(Decimal128("3.66519142919").sinh(), Decimal128("19.5190070464"));
+    assertDecimal128ApproxEqual(Decimal128("3.92699081699").sinh(), Decimal128("25.3671583194"));
+    assertDecimal128ApproxEqual(Decimal128("4.18879020479").sinh(), Decimal128("32.9639002901"));
+    assertDecimal128ApproxEqual(Decimal128("4.71238898038").sinh(), Decimal128("55.6543975994"));
+    assertDecimal128ApproxEqual(Decimal128("5.23598775598").sinh(), Decimal128("93.9546534685"));
+    assertDecimal128ApproxEqual(Decimal128("5.49778714378").sinh(), Decimal128("122.073483515"));
+    assertDecimal128ApproxEqual(Decimal128("5.75958653158").sinh(), Decimal128("158.606995057"));
+    assertDecimal128ApproxEqual(Decimal128("6.28318530718").sinh(), Decimal128("267.744894041"));
+}
+
+TEST(Decimal128Test, TestTan) {
+    assertDecimal128ApproxEqual(Decimal128("-1.5").tan(), Decimal128("-14.1014199472"));
+    assertDecimal128ApproxEqual(Decimal128("-1.0471975512").tan(), Decimal128("-1.73205080757"));
+    assertDecimal128ApproxEqual(Decimal128("-0.785398163397").tan(), Decimal128("-1.0"));
+    assertDecimal128ApproxEqual(Decimal128("0").tan(), Decimal128("0.0"));
+    assertDecimal128ApproxEqual(Decimal128("0.785398163397").tan(), Decimal128("1.0"));
+    assertDecimal128ApproxEqual(Decimal128("1.0471975512").tan(), Decimal128("1.73205080757"));
+    assertDecimal128ApproxEqual(Decimal128("1.5").tan(), Decimal128("14.1014199472"));
+}
+
+TEST(Decimal128Test, TestTanh) {
+    assertDecimal128ApproxEqual(Decimal128("0.0").tanh(), Decimal128("0.0"));
+    assertDecimal128ApproxEqual(Decimal128("0.523598775598").tanh(), Decimal128("0.480472778156"));
+    assertDecimal128ApproxEqual(Decimal128("0.785398163397").tanh(), Decimal128("0.655794202633"));
+    assertDecimal128ApproxEqual(Decimal128("1.0471975512").tanh(), Decimal128("0.780714435359"));
+    assertDecimal128ApproxEqual(Decimal128("1.57079632679").tanh(), Decimal128("0.917152335667"));
+    assertDecimal128ApproxEqual(Decimal128("2.09439510239").tanh(), Decimal128("0.970123821166"));
+    assertDecimal128ApproxEqual(Decimal128("2.35619449019").tanh(), Decimal128("0.982193380007"));
+    assertDecimal128ApproxEqual(Decimal128("2.61799387799").tanh(), Decimal128("0.989413207353"));
+    assertDecimal128ApproxEqual(Decimal128("3.14159265359").tanh(), Decimal128("0.996272076221"));
+    assertDecimal128ApproxEqual(Decimal128("3.66519142919").tanh(), Decimal128("0.998690213046"));
+    assertDecimal128ApproxEqual(Decimal128("3.92699081699").tanh(), Decimal128("0.999223894879"));
+    assertDecimal128ApproxEqual(Decimal128("4.18879020479").tanh(), Decimal128("0.999540174353"));
+    assertDecimal128ApproxEqual(Decimal128("4.71238898038").tanh(), Decimal128("0.999838613989"));
+    assertDecimal128ApproxEqual(Decimal128("5.23598775598").tanh(), Decimal128("0.999943363486"));
+    assertDecimal128ApproxEqual(Decimal128("5.49778714378").tanh(), Decimal128("0.999966449"));
+    assertDecimal128ApproxEqual(Decimal128("5.75958653158").tanh(), Decimal128("0.99998012476"));
+    assertDecimal128ApproxEqual(Decimal128("6.28318530718").tanh(), Decimal128("0.99999302534"));
+}
 }  // namespace mongo

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -52,13 +51,14 @@
 #include "mongo/db/commands/server_status_metric.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/lock_state.h"
+#include "mongo/db/concurrency/replication_state_transition_lock_guard.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/logical_session_id.h"
 #include "mongo/db/multi_key_path_tracker.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/query/query_knobs.h"
+#include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/repl/applier_helpers.h"
 #include "mongo/db/repl/apply_ops.h"
 #include "mongo/db/repl/bgsync.h"
@@ -68,13 +68,9 @@
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/repl_set_config.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/repl/replication_state_transition_lock_guard.h"
-#include "mongo/db/repl/session_update_tracker.h"
-#include "mongo/db/service_context.h"
 #include "mongo/db/session.h"
 #include "mongo/db/session_txn_record_gen.h"
 #include "mongo/db/stats/timer_stats.h"
-#include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/transaction_participant.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/util/exit.h"
@@ -94,6 +90,11 @@ MONGO_FAIL_POINT_DEFINE(hangAfterRecordingOpApplicationStartTime);
 // The oplog entries applied
 Counter64 opsAppliedStats;
 ServerStatusMetricField<Counter64> displayOpsApplied("repl.apply.ops", &opsAppliedStats);
+
+// Tracks the oplog application batch size.
+Counter64 oplogApplicationBatchSize;
+ServerStatusMetricField<Counter64> displayOplogApplicationBatchSize("repl.apply.batchSize",
+                                                                    &oplogApplicationBatchSize);
 
 // Number of times we tried to go live as a secondary.
 Counter64 attemptsToBecomeSecondary;
@@ -264,12 +265,17 @@ Status finishAndLogApply(ClockSource* clockSource,
     return finalStatus;
 }
 
+LockMode fixLockModeForSystemDotViewsChanges(const NamespaceString& nss, LockMode mode) {
+    return nss.isSystemDotViews() ? MODE_X : mode;
+}
+
 }  // namespace
 
 // static
 Status SyncTail::syncApply(OperationContext* opCtx,
                            const BSONObj& op,
-                           OplogApplication::Mode oplogApplicationMode) {
+                           OplogApplication::Mode oplogApplicationMode,
+                           boost::optional<Timestamp> stableTimestampForRecovery) {
     // Count each log op application as a separate operation, for reporting purposes
     CurOp individualOp(opCtx);
 
@@ -317,6 +323,7 @@ Status SyncTail::syncApply(OperationContext* opCtx,
 
     if (opType == OpTypeEnum::kNoop) {
         if (nss.db() == "") {
+            incrementOpsAppliedStats();
             return Status::OK();
         }
         Lock::DBLock dbLock(opCtx, nss.db(), MODE_X);
@@ -326,7 +333,8 @@ Status SyncTail::syncApply(OperationContext* opCtx,
         return finishApply(writeConflictRetry(opCtx, "syncApply_CRUD", nss.ns(), [&] {
             // Need to throw instead of returning a status for it to be properly ignored.
             try {
-                AutoGetCollection autoColl(opCtx, getNsOrUUID(nss, op), MODE_IX);
+                AutoGetCollection autoColl(
+                    opCtx, getNsOrUUID(nss, op), fixLockModeForSystemDotViewsChanges(nss, MODE_IX));
                 auto db = autoColl.getDb();
                 uassert(ErrorCodes::NamespaceNotFound,
                         str::stream() << "missing database (" << nss.db() << ")",
@@ -368,8 +376,9 @@ Status SyncTail::syncApply(OperationContext* opCtx,
                 globalWriteLock.emplace(opCtx);
             }
 
-            // special case apply for commands to avoid implicit database creation
-            Status status = applyCommand_inlock(opCtx, op, entry, oplogApplicationMode);
+            // A special case apply for commands to avoid implicit database creation.
+            Status status = applyCommand_inlock(
+                opCtx, op, entry, oplogApplicationMode, stableTimestampForRecovery);
             incrementOpsAppliedStats();
             return status;
         }));
@@ -425,7 +434,8 @@ void applyOps(std::vector<MultiApplier::OperationPtrs>& writerVectors,
                 &workerMultikeyPathInfo = workerMultikeyPathInfo->at(i)
             ] {
                 auto opCtx = cc().makeOperationContext();
-                status = func(opCtx.get(), &writer, st, &workerMultikeyPathInfo);
+                status = opCtx->runWithoutInterruption(
+                    [&] { return func(opCtx.get(), &writer, st, &workerMultikeyPathInfo); });
             }));
         }
     }
@@ -503,7 +513,7 @@ public:
     };
 
     CollectionProperties getCollectionProperties(OperationContext* opCtx,
-                                                 const StringMapTraits::HashedKey& ns) {
+                                                 const StringMapHashedKey& ns) {
         auto it = _cache.find(ns);
         if (it != _cache.end()) {
             return it->second;
@@ -519,7 +529,8 @@ private:
         CollectionProperties collProperties;
 
         Lock::DBLock dbLock(opCtx, nsToDatabaseSubstring(ns), MODE_IS);
-        auto db = DatabaseHolder::getDatabaseHolder().get(opCtx, ns);
+        auto databaseHolder = DatabaseHolder::get(opCtx);
+        auto db = databaseHolder->getDb(opCtx, ns);
         if (!db) {
             return collProperties;
         }
@@ -536,103 +547,6 @@ private:
 
     StringMap<CollectionProperties> _cache;
 };
-
-/**
- * ops - This only modifies the isForCappedCollection field on each op. It does not alter the ops
- *      vector in any other way.
- * writerVectors - Set of operations for each worker thread to apply.
- * derivedOps - If provided, this function inserts a decomposition of applyOps operations
- *      and instructions for updating the transactions table.
- * sessionUpdateTracker - if provided, keeps track of session info from ops.
- */
-void fillWriterVectors(OperationContext* opCtx,
-                       MultiApplier::Operations* ops,
-                       std::vector<MultiApplier::OperationPtrs>* writerVectors,
-                       std::vector<MultiApplier::Operations>* derivedOps,
-                       SessionUpdateTracker* sessionUpdateTracker) {
-    const auto serviceContext = opCtx->getServiceContext();
-    const auto storageEngine = serviceContext->getStorageEngine();
-
-    const bool supportsDocLocking = storageEngine->supportsDocLocking();
-    const uint32_t numWriters = writerVectors->size();
-
-    CachedCollectionProperties collPropertiesCache;
-
-    for (auto&& op : *ops) {
-        StringMapTraits::HashedKey hashedNs(op.getNss().ns());
-        uint32_t hash = hashedNs.hash();
-
-        // We need to track all types of ops, including type 'n' (these are generated from chunk
-        // migrations).
-        if (sessionUpdateTracker) {
-            if (auto newOplogWrites = sessionUpdateTracker->updateOrFlush(op)) {
-                derivedOps->emplace_back(std::move(*newOplogWrites));
-                fillWriterVectors(opCtx, &derivedOps->back(), writerVectors, derivedOps, nullptr);
-            }
-        }
-
-        if (op.isCrudOpType()) {
-            auto collProperties = collPropertiesCache.getCollectionProperties(opCtx, hashedNs);
-
-            // For doc locking engines, include the _id of the document in the hash so we get
-            // parallelism even if all writes are to a single collection.
-            //
-            // For capped collections, this is illegal, since capped collections must preserve
-            // insertion order.
-            if (supportsDocLocking && !collProperties.isCapped) {
-                BSONElement id = op.getIdElement();
-                BSONElementComparator elementHasher(BSONElementComparator::FieldNamesMode::kIgnore,
-                                                    collProperties.collator);
-                const size_t idHash = elementHasher.hash(id);
-                MurmurHash3_x86_32(&idHash, sizeof(idHash), hash, &hash);
-            }
-
-            if (op.getOpType() == OpTypeEnum::kInsert && collProperties.isCapped) {
-                // Mark capped collection ops before storing them to ensure we do not attempt to
-                // bulk insert them.
-                op.isForCappedCollection = true;
-            }
-        }
-
-        // Extract applyOps operations and fill writers with extracted operations using this
-        // function.
-        if (op.getCommandType() == OplogEntry::CommandType::kApplyOps && !op.shouldPrepare()) {
-            try {
-                derivedOps->emplace_back(ApplyOps::extractOperations(op));
-
-                // Nested entries cannot have different session updates.
-                fillWriterVectors(opCtx, &derivedOps->back(), writerVectors, derivedOps, nullptr);
-            } catch (...) {
-                fassertFailedWithStatusNoTrace(
-                    50711,
-                    exceptionToStatus().withContext(str::stream()
-                                                    << "Unable to extract operations from applyOps "
-                                                    << redact(op.toBSON())));
-            }
-            continue;
-        }
-
-        auto& writer = (*writerVectors)[hash % numWriters];
-        if (writer.empty()) {
-            writer.reserve(8);  // Skip a few growth rounds
-        }
-        writer.push_back(&op);
-    }
-}
-
-void fillWriterVectors(OperationContext* opCtx,
-                       MultiApplier::Operations* ops,
-                       std::vector<MultiApplier::OperationPtrs>* writerVectors,
-                       std::vector<MultiApplier::Operations>* derivedOps) {
-    SessionUpdateTracker sessionUpdateTracker;
-    fillWriterVectors(opCtx, ops, writerVectors, derivedOps, &sessionUpdateTracker);
-
-    auto newOplogWrites = sessionUpdateTracker.flushAll();
-    if (!newOplogWrites.empty()) {
-        derivedOps->emplace_back(std::move(newOplogWrites));
-        fillWriterVectors(opCtx, &derivedOps->back(), writerVectors, derivedOps, nullptr);
-    }
-}
 
 void tryToGoLiveAsASecondary(OperationContext* opCtx,
                              ReplicationCoordinator* replCoord,
@@ -752,6 +666,15 @@ private:
             // tryPopAndWaitForMore adds to ops and returns true when we need to end a batch early.
             {
                 auto opCtx = cc().makeOperationContext();
+
+                // This use of UninterruptibleLockGuard is intentional. It is undesirable to use an
+                // UninterruptibleLockGuard in client operations because stepdown requires the
+                // ability to interrupt client operations. However, it is acceptable to use an
+                // UninterruptibleLockGuard in batch application because the only cause of
+                // interruption would be shutdown, and the ReplBatcher thread has its own shutdown
+                // handling.
+                UninterruptibleLockGuard noInterrupt(opCtx->lockState());
+
                 while (!_syncTail->tryPopAndWaitForMore(
                     opCtx.get(), _oplogBuffer, &ops, batchLimits)) {
                 }
@@ -886,16 +809,13 @@ void SyncTail::_oplogApplication(OplogBuffer* oplogBuffer,
             minValid = lastOpTimeInBatch;
         }
 
-        // Update various things that care about our last applied optime. Tests rely on 2 happening
-        // before 3 even though it isn't strictly necessary. The order of 1 doesn't matter.
+        // Update various things that care about our last applied optime. Tests rely on 1 happening
+        // before 2 even though it isn't strictly necessary.
 
-        // 1. Update the global timestamp.
-        setNewTimestamp(opCtx.getServiceContext(), lastOpTimeInBatch.getTimestamp());
-
-        // 2. Persist our "applied through" optime to disk.
+        // 1. Persist our "applied through" optime to disk.
         _consistencyMarkers->setAppliedThrough(&opCtx, lastOpTimeInBatch);
 
-        // 3. Ensure that the last applied op time hasn't changed since the start of this batch.
+        // 2. Ensure that the last applied op time hasn't changed since the start of this batch.
         const auto lastAppliedOpTimeAtEndOfBatch = replCoord->getMyLastAppliedOpTime();
         invariant(lastAppliedOpTimeAtStartOfBatch == lastAppliedOpTimeAtEndOfBatch,
                   str::stream() << "the last known applied OpTime has changed from "
@@ -904,13 +824,14 @@ void SyncTail::_oplogApplication(OplogBuffer* oplogBuffer,
                                 << lastAppliedOpTimeAtEndOfBatch.toString()
                                 << " in the middle of batch application");
 
-        // 4. Update oplog visibility by notifying the storage engine of the new oplog entries.
+        // 3. Update oplog visibility by notifying the storage engine of the new oplog entries.
         const bool orderedCommit = true;
         _storageInterface->oplogDiskLocRegister(
             &opCtx, lastOpTimeInBatch.getTimestamp(), orderedCommit);
 
-        // 5. Finalize this batch. We are at a consistent optime if our current optime is >= the
-        // current 'minValid' optime.
+        // 4. Finalize this batch. We are at a consistent optime if our current optime is >= the
+        // current 'minValid' optime. Note that recording the lastOpTime in the finalizer includes
+        // advancing the global timestamp to at least its timestamp.
         auto consistency = (lastOpTimeInBatch >= minValid)
             ? ReplicationCoordinator::DataConsistency::Consistent
             : ReplicationCoordinator::DataConsistency::Inconsistent;
@@ -989,12 +910,16 @@ bool SyncTail::tryPopAndWaitForMore(OperationContext* opCtx,
     // Commands must be processed one at a time. The only exception to this is applyOps because
     // applyOps oplog entries are effectively containers for CRUD operations. Therefore, it is safe
     // to batch applyOps commands with CRUD operations when reading from the oplog buffer.
+    //
     // Oplog entries on 'system.views' should also be processed one at a time. View catalog
     // immediately reflects changes for each oplog entry so we can see inconsistent view catalog if
     // multiple oplog entries on 'system.views' are being applied out of the original order.
+    //
+    // Process updates to 'admin.system.version' individually as well so the secondary's FCV when
+    // processing each operation matches the primary's when committing that operation.
     if ((entry.isCommand() &&
          (entry.getCommandType() != OplogEntry::CommandType::kApplyOps || entry.shouldPrepare())) ||
-        entry.getNss().isSystemDotViews()) {
+        entry.getNss().isSystemDotViews() || entry.getNss().isServerConfigurationCollection()) {
         if (ops->getCount() == 1) {
             // apply commands one-at-a-time
             _consume(opCtx, oplogBuffer);
@@ -1231,7 +1156,9 @@ Status multiSyncApply(OperationContext* opCtx,
 
             // If we didn't create a group, try to apply the op individually.
             try {
-                const Status status = SyncTail::syncApply(opCtx, entry.raw, oplogApplicationMode);
+                auto stableTimestampForRecovery = st->getOptions().stableTimestampForRecovery;
+                const Status status = SyncTail::syncApply(
+                    opCtx, entry.raw, oplogApplicationMode, stableTimestampForRecovery);
 
                 if (!status.isOK()) {
                     // In initial sync, update operations can cause documents to be missed during
@@ -1274,6 +1201,113 @@ Status multiSyncApply(OperationContext* opCtx,
     return Status::OK();
 }
 
+
+/**
+ * ops - This only modifies the isForCappedCollection field on each op. It does not alter the ops
+ *      vector in any other way.
+ * writerVectors - Set of operations for each worker thread to apply.
+ * derivedOps - If provided, this function inserts a decomposition of applyOps operations
+ *      and instructions for updating the transactions table.
+ * sessionUpdateTracker - if provided, keeps track of session info from ops.
+ */
+void SyncTail::_fillWriterVectors(OperationContext* opCtx,
+                                  MultiApplier::Operations* ops,
+                                  std::vector<MultiApplier::OperationPtrs>* writerVectors,
+                                  std::vector<MultiApplier::Operations>* derivedOps,
+                                  SessionUpdateTracker* sessionUpdateTracker) {
+    const auto serviceContext = opCtx->getServiceContext();
+    const auto storageEngine = serviceContext->getStorageEngine();
+
+    const bool supportsDocLocking = storageEngine->supportsDocLocking();
+    const uint32_t numWriters = writerVectors->size();
+
+    CachedCollectionProperties collPropertiesCache;
+
+    for (auto&& op : *ops) {
+        // If the operation's optime is before or the same as the beginApplyingOpTime we don't want
+        // to apply it, so don't include it in writerVectors.
+        if (op.getOpTime() <= _options.beginApplyingOpTime) {
+            continue;
+        }
+
+        auto hashedNs = StringMapHasher().hashed_key(op.getNss().ns());
+        // Reduce the hash from 64bit down to 32bit, just to allow combinations with murmur3 later
+        // on. Bit depth not important, we end up just doing integer modulo with this in the end.
+        // The hash function should provide entropy in the lower bits as it's used in hash tables.
+        uint32_t hash = static_cast<uint32_t>(hashedNs.hash());
+
+        // We need to track all types of ops, including type 'n' (these are generated from chunk
+        // migrations).
+        if (sessionUpdateTracker) {
+            if (auto newOplogWrites = sessionUpdateTracker->updateOrFlush(op)) {
+                derivedOps->emplace_back(std::move(*newOplogWrites));
+                _fillWriterVectors(opCtx, &derivedOps->back(), writerVectors, derivedOps, nullptr);
+            }
+        }
+
+        if (op.isCrudOpType()) {
+            auto collProperties = collPropertiesCache.getCollectionProperties(opCtx, hashedNs);
+
+            // For doc locking engines, include the _id of the document in the hash so we get
+            // parallelism even if all writes are to a single collection.
+            //
+            // For capped collections, this is illegal, since capped collections must preserve
+            // insertion order.
+            if (supportsDocLocking && !collProperties.isCapped) {
+                BSONElement id = op.getIdElement();
+                BSONElementComparator elementHasher(BSONElementComparator::FieldNamesMode::kIgnore,
+                                                    collProperties.collator);
+                const size_t idHash = elementHasher.hash(id);
+                MurmurHash3_x86_32(&idHash, sizeof(idHash), hash, &hash);
+            }
+
+            if (op.getOpType() == OpTypeEnum::kInsert && collProperties.isCapped) {
+                // Mark capped collection ops before storing them to ensure we do not attempt to
+                // bulk insert them.
+                op.isForCappedCollection = true;
+            }
+        }
+
+        // Extract applyOps operations and fill writers with extracted operations using this
+        // function.
+        if (op.getCommandType() == OplogEntry::CommandType::kApplyOps && !op.shouldPrepare()) {
+            try {
+                derivedOps->emplace_back(ApplyOps::extractOperations(op));
+
+                // Nested entries cannot have different session updates.
+                _fillWriterVectors(opCtx, &derivedOps->back(), writerVectors, derivedOps, nullptr);
+            } catch (...) {
+                fassertFailedWithStatusNoTrace(
+                    50711,
+                    exceptionToStatus().withContext(str::stream()
+                                                    << "Unable to extract operations from applyOps "
+                                                    << redact(op.toBSON())));
+            }
+            continue;
+        }
+
+        auto& writer = (*writerVectors)[hash % numWriters];
+        if (writer.empty()) {
+            writer.reserve(8);  // Skip a few growth rounds
+        }
+        writer.push_back(&op);
+    }
+}
+
+void SyncTail::_fillWriterVectors(OperationContext* opCtx,
+                                  MultiApplier::Operations* ops,
+                                  std::vector<MultiApplier::OperationPtrs>* writerVectors,
+                                  std::vector<MultiApplier::Operations>* derivedOps) {
+    SessionUpdateTracker sessionUpdateTracker;
+    _fillWriterVectors(opCtx, ops, writerVectors, derivedOps, &sessionUpdateTracker);
+
+    auto newOplogWrites = sessionUpdateTracker.flushAll();
+    if (!newOplogWrites.empty()) {
+        derivedOps->emplace_back(std::move(newOplogWrites));
+        _fillWriterVectors(opCtx, &derivedOps->back(), writerVectors, derivedOps, nullptr);
+    }
+}
+
 StatusWith<OpTime> SyncTail::multiApply(OperationContext* opCtx, MultiApplier::Operations ops) {
     invariant(!ops.empty());
 
@@ -1289,40 +1323,17 @@ StatusWith<OpTime> SyncTail::multiApply(OperationContext* opCtx, MultiApplier::O
                 "attempting to replicate ops while primary"};
     }
 
+    // Increment the batch size stat.
+    oplogApplicationBatchSize.increment(ops.size());
+
     std::vector<WorkerMultikeyPathInfo> multikeyVector(_writerPool->getStats().numThreads);
     {
         // Each node records cumulative batch application stats for itself using this timer.
         TimerHolder timer(&applyBatchStats);
 
-        const bool pinOldestTimestamp = !serverGlobalParams.enableMajorityReadConcern;
-        std::unique_ptr<RecoveryUnit> pinningTransaction;
-        if (pinOldestTimestamp) {
-            // If `enableMajorityReadConcern` is false, storage aggressively trims
-            // history. Documents may not be inserted before the cutoff point. This piece will pin
-            // the "oldest timestamp" until after the batch is fully applied.
-            //
-            // When `enableMajorityReadConcern` is false, storage sets the "oldest timestamp" to
-            // the "get all committed" timestamp. Opening a transaction and setting its timestamp
-            // to first oplog entry's timestamp will prevent the "get all committed" timestamp
-            // from advancing.
-            //
-            // This transaction will be aborted after all writes from the batch of operations are
-            // complete. Aborting the transaction allows the "get all committed" point to be
-            // move forward.
-            pinningTransaction = std::unique_ptr<RecoveryUnit>(
-                opCtx->getServiceContext()->getStorageEngine()->newRecoveryUnit());
-            pinningTransaction->beginUnitOfWork(opCtx);
-            fassert(40677, pinningTransaction->setTimestamp(ops.front().getTimestamp()));
-        }
-
         // We must wait for the all work we've dispatched to complete before leaving this block
         // because the spawned threads refer to objects on the stack
-        ON_BLOCK_EXIT([&] {
-            _writerPool->waitForIdle();
-            if (pinOldestTimestamp) {
-                pinningTransaction->abortUnitOfWork();
-            }
-        });
+        ON_BLOCK_EXIT([&] { _writerPool->waitForIdle(); });
 
         // Write batch of ops into oplog.
         if (!_options.skipWritesToOplog) {
@@ -1340,7 +1351,7 @@ StatusWith<OpTime> SyncTail::multiApply(OperationContext* opCtx, MultiApplier::O
         std::vector<MultiApplier::Operations> derivedOps;
 
         std::vector<MultiApplier::OperationPtrs> writerVectors(_writerPool->getStats().numThreads);
-        fillWriterVectors(opCtx, &ops, &writerVectors, &derivedOps);
+        _fillWriterVectors(opCtx, &ops, &writerVectors, &derivedOps);
 
         // Wait for writes to finish before applying ops.
         _writerPool->waitForIdle();

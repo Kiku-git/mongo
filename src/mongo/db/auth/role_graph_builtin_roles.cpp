@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -209,6 +208,7 @@ MONGO_INITIALIZER(AuthorizationBuiltinRoles)(InitializerContext* context) {
         << ActionType::applicationMessage  // clusterManager gets this also
         << ActionType::connPoolSync
         << ActionType::cpuProfiler
+        << ActionType::dropConnections
         << ActionType::logRotate
         << ActionType::setParameter
         << ActionType::shutdown
@@ -221,7 +221,8 @@ MONGO_INITIALIZER(AuthorizationBuiltinRoles)(InitializerContext* context) {
         << ActionType::killAnySession
         << ActionType::killop
         << ActionType::replSetResizeOplog
-        << ActionType::resync;  // clusterManager gets this also
+        << ActionType::resync  // clusterManager gets this also
+        << ActionType::trafficRecord;
 
     // hostManager role actions that target the database resource
     hostManagerRoleDatabaseActions
@@ -328,6 +329,10 @@ void addReadWriteAnyDbPrivileges(PrivilegeVector* privileges) {
 void addUserAdminAnyDbPrivileges(PrivilegeVector* privileges) {
     Privilege::addPrivilegeToPrivilegeVector(
         privileges, Privilege(ResourcePattern::forAnyNormalResource(), userAdminRoleActions));
+    Privilege::addPrivilegeToPrivilegeVector(
+        privileges, Privilege(ResourcePattern::forDatabaseName("local"), userAdminRoleActions));
+    Privilege::addPrivilegeToPrivilegeVector(
+        privileges, Privilege(ResourcePattern::forDatabaseName("config"), userAdminRoleActions));
     Privilege::addPrivilegeToPrivilegeVector(
         privileges, Privilege(ResourcePattern::forClusterResource(), ActionType::listDatabases));
     Privilege::addPrivilegeToPrivilegeVector(
@@ -524,6 +529,7 @@ void addQueryableBackupPrivileges(PrivilegeVector* privileges) {
 void addBackupPrivileges(PrivilegeVector* privileges) {
     ActionSet clusterActions;
     clusterActions << ActionType::appendOplogNote;  // For BRS
+    clusterActions << ActionType::serverStatus;     // For push based initial sync
     Privilege::addPrivilegeToPrivilegeVector(
         privileges, Privilege(ResourcePattern::forClusterResource(), clusterActions));
 

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -39,12 +38,16 @@
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/repl/apply_ops.h"
 #include "mongo/db/repl/oplog_applier_impl.h"
 #include "mongo/db/repl/oplog_buffer.h"
 #include "mongo/db/repl/replication_consistency_markers_impl.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/server_recovery.h"
 #include "mongo/db/session.h"
+#include "mongo/db/transaction_history_iterator.h"
+#include "mongo/db/transaction_participant.h"
 #include "mongo/util/log.h"
 #include "mongo/util/timer.h"
 
@@ -267,9 +270,50 @@ void ReplicationRecoveryImpl::recoverFromOplog(OperationContext* opCtx,
     } else {
         _recoverFromUnstableCheckpoint(opCtx, appliedThrough, topOfOplog);
     }
+
+    _reconstructPreparedTransactions(opCtx);
 } catch (...) {
     severe() << "Caught exception during replication recovery: " << exceptionToStatus();
     std::terminate();
+}
+
+void ReplicationRecoveryImpl::_reconstructPreparedTransactions(OperationContext* opCtx) {
+    DBDirectClient client(opCtx);
+    const auto cursor = client.query(NamespaceString::kSessionTransactionsTableNamespace,
+                                     {BSON("state"
+                                           << "prepared")});
+
+    // Iterate over each entry in the transactions table that has a prepared transaction.
+    while (cursor->more()) {
+        const auto txnRecordObj = cursor->next();
+        const auto txnRecord = SessionTxnRecord::parse(
+            IDLParserErrorContext("recovering prepared transaction"), txnRecordObj);
+
+        invariant(txnRecord.getState() == DurableTxnStateEnum::kPrepared);
+
+        // Get the prepareTransaction oplog entry corresponding to this transactions table entry.
+        invariant(!opCtx->recoveryUnit()->getPointInTimeReadTimestamp());
+        const auto prepareOpTime = txnRecord.getLastWriteOpTime();
+        invariant(!prepareOpTime.isNull());
+        TransactionHistoryIterator iter(prepareOpTime);
+        invariant(iter.hasNext());
+        const auto prepareOplogEntry = iter.next(opCtx);
+
+        {
+            // Make a new opCtx so that we can set the lsid when applying the prepare transaction
+            // oplog entry.
+            auto newClient =
+                opCtx->getServiceContext()->makeClient("reconstruct-prepared-transactions");
+            AlternativeClientRegion acr(newClient);
+            const auto newOpCtx = cc().makeOperationContext();
+
+            // Snapshot transaction can never conflict with the PBWM lock.
+            newOpCtx->lockState()->setShouldConflictWithSecondaryBatchApplication(false);
+
+            // Checks out the session, applies the operations and prepares the transactions.
+            uassertStatusOK(applyRecoveredPrepareTransaction(newOpCtx.get(), prepareOplogEntry));
+        }
+    }
 }
 
 void ReplicationRecoveryImpl::_recoverFromStableTimestamp(OperationContext* opCtx,
@@ -372,6 +416,15 @@ void ReplicationRecoveryImpl::_applyToEndOfOplog(OperationContext* opCtx,
     OplogApplier::Options options;
     options.allowNamespaceNotFoundErrorsOnCrudOps = true;
     options.skipWritesToOplog = true;
+    // During replication recovery, the stableTimestampForRecovery refers to the stable timestamp
+    // from which we replay the oplog.
+    // For startup recovery, this will be the recovery timestamp, which is the stable timestamp that
+    // the storage engine recovered to on startup. For rollback recovery, this will be the last
+    // stable timestamp, returned when we call recoverToStableTimestamp.
+    // We keep track of this for prepared transactions so that when we apply a commitTransaction
+    // oplog entry, we can check if it occurs before or after the stable timestamp and decide
+    // whether the operations would have already been reflected in the data.
+    options.stableTimestampForRecovery = oplogApplicationStartPoint;
     OplogApplierImpl oplogApplier(nullptr,
                                   &oplogBuffer,
                                   &stats,

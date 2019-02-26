@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -42,11 +41,18 @@ namespace mongo {
 
 class BSONObj;
 class Collection;
+class MetadataManager;
 class OperationContext;
+
+// The maximum number of documents to delete in a single batch during range deletion.
+// secondaryThrottle and rangeDeleterBatchDelayMS apply between each batch.
+// Must be positive or 0 (the default), which means to use the value of
+// internalQueryExecYieldIterations (or 1 if that's negative or zero).
+extern AtomicWord<int> rangeDeleterBatchSize;
 
 // After completing a batch of document deletions, the time in millis to wait before commencing the
 // next batch of deletions.
-extern AtomicInt32 rangeDeleterBatchDelayMS;
+extern AtomicWord<int> rangeDeleterBatchDelayMS;
 
 class CollectionRangeDeleter {
     MONGO_DISALLOW_COPYING(CollectionRangeDeleter);
@@ -166,16 +172,30 @@ public:
      * If it should be scheduled to run again because there might be more documents to delete,
      * returns the time to begin, or boost::none otherwise.
      *
+     * Negative (or zero) value for 'maxToDelete' indicates some canonical default should be used.
+     *
      * Argument 'forTestOnly' is used in unit tests that exercise the CollectionRangeDeleter class,
      * so that they do not need to set up CollectionShardingState and MetadataManager objects.
      */
     static boost::optional<Date_t> cleanUpNextRange(OperationContext*,
                                                     NamespaceString const& nss,
                                                     OID const& epoch,
-                                                    int maxToDelete,
+                                                    int maxToDelete = 0,
                                                     CollectionRangeDeleter* forTestOnly = nullptr);
 
 private:
+    /**
+     * Verifies that the metadata for the collection to be cleaned up is still valid. Makes sure
+     * the collection has not been dropped (or dropped then recreated).
+     */
+    static bool _checkCollectionMetadataStillValid(
+        OperationContext* opCtx,
+        const NamespaceString& nss,
+        OID const& epoch,
+        CollectionRangeDeleter* forTestOnly,
+        Collection* collection,
+        std::shared_ptr<MetadataManager> metadataManager);
+
     /**
      * Performs the deletion of up to maxToDelete entries within the range in progress. Must be
      * called under the collection lock.

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -39,6 +38,9 @@
 #include <algorithm>
 
 #include "mongo/base/status.h"
+#include "mongo/db/concurrency/replication_state_transition_lock_guard.h"
+#include "mongo/db/index_builds_coordinator.h"
+#include "mongo/db/kill_sessions_local.h"
 #include "mongo/db/logical_clock.h"
 #include "mongo/db/logical_time_validator.h"
 #include "mongo/db/operation_context.h"
@@ -48,7 +50,6 @@
 #include "mongo/db/repl/repl_set_heartbeat_response.h"
 #include "mongo/db/repl/replication_coordinator_impl.h"
 #include "mongo/db/repl/replication_process.h"
-#include "mongo/db/repl/replication_state_transition_lock_guard.h"
 #include "mongo/db/repl/topology_coordinator.h"
 #include "mongo/db/repl/vote_requester.h"
 #include "mongo/db/service_context.h"
@@ -204,7 +205,7 @@ void ReplicationCoordinatorImpl::_handleHeartbeatResponse(
             _cancelAndRescheduleElectionTimeout_inlock();
         }
     } else {
-        LOG_FOR_HEARTBEATS(0) << "Error in heartbeat (requestId: " << cbData.request.id << ") to "
+        LOG_FOR_HEARTBEATS(2) << "Error in heartbeat (requestId: " << cbData.request.id << ") to "
                               << target << ", response status: " << responseStatus;
 
         hbStatusResponse = StatusWith<ReplSetHeartbeatResponse>(responseStatus);
@@ -381,11 +382,23 @@ void ReplicationCoordinatorImpl::_stepDownFinish(
     }
 
     auto opCtx = cc().makeOperationContext();
-    ReplicationStateTransitionLockGuard::Args transitionArgs;
-    // Kill all user operations to help us get the global lock faster, as well as to ensure that
-    // operations that are no longer safe to run (like writes) get killed.
-    transitionArgs.killUserOperations = true;
-    ReplicationStateTransitionLockGuard transitionGuard(opCtx.get(), transitionArgs);
+
+    ReplicationStateTransitionLockGuard rstlLock(
+        opCtx.get(), ReplicationStateTransitionLockGuard::EnqueueOnly());
+
+    // kill all write operations which are no longer safe to run on step down. Also, operations that
+    // have taken global lock in S mode will be killed to avoid 3-way deadlock between read,
+    // prepared transaction and step down thread.
+    KillOpContainer koc(this, opCtx.get());
+    koc.startKillOpThread();
+
+    {
+        auto rstlOnErrorGuard = makeGuard([&koc] { koc.stopAndWaitForKillOpThread(); });
+        rstlLock.waitForLockUntil(Date_t::max());
+    }
+
+    // Yield locks for prepared transactions.
+    yieldLocksForPreparedTransactions(opCtx.get());
 
     stdx::unique_lock<stdx::mutex> lk(_mutex);
 
@@ -401,6 +414,7 @@ void ReplicationCoordinatorImpl::_stepDownFinish(
     }
     lk.unlock();
     _performPostMemberStateUpdateAction(action);
+    _updateAndLogStatsOnStepDown(&koc);
     _replExecutor->signalEvent(finishedEvent);
 }
 
@@ -615,6 +629,9 @@ void ReplicationCoordinatorImpl::_heartbeatReconfigFinish(
         _setCurrentRSConfig(lk, opCtx.get(), newConfig, myIndexValue);
     lk.unlock();
     _performPostMemberStateUpdateAction(action);
+
+    // Inform the index builds coordinator of the replica set reconfig.
+    IndexBuildsCoordinator::get(opCtx.get())->onReplicaSetReconfig();
 }
 
 void ReplicationCoordinatorImpl::_trackHeartbeatHandle_inlock(

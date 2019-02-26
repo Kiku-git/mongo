@@ -10,6 +10,15 @@ TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
 (function() {
     'use strict';
 
+    // Set the refresh period to 10 min to rule out races
+    _setShellFailPoint({
+        configureFailPoint: "modifyReplicaSetMonitorDefaultRefreshPeriod",
+        mode: "alwaysOn",
+        data: {
+            period: 10 * 60,
+        },
+    });
+
     var dbName = "test";
     var collName = jsTest.name();
 
@@ -28,9 +37,7 @@ TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
         assert.eq(0, cursor.objsLeftInBatch());
         var primary = rst.getPrimary();
         var secondary = rst.getSecondary();
-        assert.throws(function() {
-            primary.getDB("admin").runCommand({replSetStepDown: 60, force: true});
-        });
+        assert.commandWorked(primary.getDB("admin").runCommand({replSetStepDown: 60, force: true}));
         rst.waitForState(primary, ReplSetTest.State.SECONDARY);
         if (waitForPrimary) {
             rst.waitForState(secondary, ReplSetTest.State.PRIMARY);

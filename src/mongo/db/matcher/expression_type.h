@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -78,12 +77,12 @@ public:
         debug << "\n";
     }
 
-    void serialize(BSONObjBuilder* out) const final {
-        BSONObjBuilder subBuilder(out->subobjStart(path()));
+    BSONObj getSerializedRightHandSide() const final {
+        BSONObjBuilder subBuilder;
         BSONArrayBuilder arrBuilder(subBuilder.subarrayStart(name()));
         _typeSet.toBSONArray(&arrBuilder);
         arrBuilder.doneFast();
-        subBuilder.doneFast();
+        return subBuilder.obj();
     }
 
     bool equivalent(const MatchExpression* other) const final {
@@ -155,4 +154,73 @@ public:
     }
 };
 
+class InternalSchemaBinDataSubTypeExpression final : public LeafMatchExpression {
+public:
+    static constexpr StringData kName = "$_internalSchemaBinDataSubType"_sd;
+
+    InternalSchemaBinDataSubTypeExpression(StringData path, BinDataType binDataSubType)
+        : LeafMatchExpression(MatchExpression::INTERNAL_SCHEMA_BIN_DATA_SUBTYPE,
+                              path,
+                              ElementPath::LeafArrayBehavior::kNoTraversal,
+                              ElementPath::NonLeafArrayBehavior::kTraverse),
+          _binDataSubType(binDataSubType) {}
+
+    virtual ~InternalSchemaBinDataSubTypeExpression() = default;
+
+    StringData name() const {
+        return kName;
+    }
+
+    bool matchesSingleElement(const BSONElement& elem,
+                              MatchDetails* details = nullptr) const final {
+        return elem.type() == BSONType::BinData && elem.binDataType() == _binDataSubType;
+    }
+
+    std::unique_ptr<MatchExpression> shallowClone() const final {
+        auto expr =
+            stdx::make_unique<InternalSchemaBinDataSubTypeExpression>(path(), _binDataSubType);
+        if (getTag()) {
+            expr->setTag(getTag()->clone());
+        }
+        return std::move(expr);
+    }
+
+    void debugString(StringBuilder& debug, int level) const final {
+        _debugAddSpace(debug, level);
+        debug << path() << " " << name() << ": " << typeName(_binDataSubType);
+
+        MatchExpression::TagData* td = getTag();
+        if (td) {
+            debug << " ";
+            td->debugString(&debug);
+        }
+        debug << "\n";
+    }
+
+    BSONObj getSerializedRightHandSide() const final {
+        BSONObjBuilder bob;
+        bob.append(name(), _binDataSubType);
+        return bob.obj();
+    }
+
+    bool equivalent(const MatchExpression* other) const final {
+        if (matchType() != other->matchType())
+            return false;
+
+        auto realOther = static_cast<const InternalSchemaBinDataSubTypeExpression*>(other);
+
+        if (path() != realOther->path()) {
+            return false;
+        }
+
+        return _binDataSubType == realOther->_binDataSubType;
+    }
+
+private:
+    ExpressionOptimizerFunc getOptimizer() const final {
+        return [](std::unique_ptr<MatchExpression> expression) { return expression; };
+    }
+
+    BinDataType _binDataSubType;
+};
 }  // namespace mongo

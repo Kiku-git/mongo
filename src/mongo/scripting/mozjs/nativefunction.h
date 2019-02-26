@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -51,7 +50,7 @@ namespace mozjs {
  */
 struct NativeFunctionInfo : public BaseInfo {
     static void call(JSContext* cx, JS::CallArgs args);
-    static void finalize(JSFreeOp* fop, JSObject* obj);
+    static void finalize(js::FreeOp* fop, JSObject* obj);
 
     static const char* const inheritFrom;
     static const char* const className;

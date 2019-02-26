@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -53,15 +52,24 @@ public:
     std::unique_ptr<CommandInvocation> parse(OperationContext* opCtx,
                                              const OpMsgRequest& opMsgRequest) override {
         // TODO: Parsing to a Pipeline and/or AggregationRequest here.
-        return std::make_unique<Invocation>(this, opMsgRequest);
+
+        auto privileges =
+            uassertStatusOK(AuthorizationSession::get(opCtx->getClient())
+                                ->getPrivilegesForAggregate(
+                                    AggregationRequest::parseNs(
+                                        opMsgRequest.getDatabase().toString(), opMsgRequest.body),
+                                    opMsgRequest.body,
+                                    false));
+        return std::make_unique<Invocation>(this, opMsgRequest, std::move(privileges));
     }
 
     class Invocation final : public CommandInvocation {
     public:
-        Invocation(Command* cmd, const OpMsgRequest& request)
+        Invocation(Command* cmd, const OpMsgRequest& request, PrivilegeVector privileges)
             : CommandInvocation(cmd),
               _request(request),
-              _dbName(request.getDatabase().toString()) {}
+              _dbName(request.getDatabase().toString()),
+              _privileges(std::move(privileges)) {}
 
     private:
         bool supportsWriteConcern() const override {
@@ -72,27 +80,31 @@ public:
             // Aggregations that are run directly against a collection allow any read concern.
             // Otherwise, if the aggregate is collectionless then the read concern must be 'local'
             // (e.g. $currentOp). The exception to this is a $changeStream on a whole database,
-            // which is
-            // considered collectionless but must be read concern 'majority'. Further read concern
-            // validation is done one the pipeline is parsed.
+            // which is considered collectionless but must be read concern 'majority'. Further read
+            // concern validation is done one the pipeline is parsed.
             return level == repl::ReadConcernLevel::kLocalReadConcern ||
                 level == repl::ReadConcernLevel::kMajorityReadConcern ||
                 !AggregationRequest::parseNs(_dbName, _request.body).isCollectionlessAggregateNS();
         }
 
         bool allowsSpeculativeMajorityReads() const override {
-            // TODO (SERVER-37560): Support this for change stream queries.
-            return false;
+            // Currently only change stream aggregation queries are allowed to use speculative
+            // majority. The aggregation command itself will check this internally and fail if
+            // necessary.
+            return true;
         }
 
         void run(OperationContext* opCtx, rpc::ReplyBuilderInterface* reply) override {
+            CommandHelpers::handleMarkKillOnClientDisconnect(
+                opCtx, !Pipeline::aggSupportsWriteConcern(_request.body));
+
             const auto aggregationRequest = uassertStatusOK(
                 AggregationRequest::parseFromBSON(_dbName, _request.body, boost::none));
-
             uassertStatusOK(runAggregate(opCtx,
                                          aggregationRequest.getNamespaceString(),
                                          aggregationRequest,
                                          _request.body,
+                                         _privileges,
                                          reply));
         }
 
@@ -110,17 +122,20 @@ public:
                                          aggregationRequest.getNamespaceString(),
                                          aggregationRequest,
                                          _request.body,
+                                         _privileges,
                                          result));
         }
 
         void doCheckAuthorization(OperationContext* opCtx) const override {
-            const auto nss = ns();
-            uassertStatusOK(AuthorizationSession::get(opCtx->getClient())
-                                ->checkAuthForAggregate(nss, _request.body, false));
+            uassert(ErrorCodes::Unauthorized,
+                    "unauthorized",
+                    AuthorizationSession::get(opCtx->getClient())
+                        ->isAuthorizedForPrivileges(_privileges));
         }
 
         const OpMsgRequest& _request;
         const std::string _dbName;
+        const PrivilegeVector _privileges;
     };
 
     std::string help() const override {

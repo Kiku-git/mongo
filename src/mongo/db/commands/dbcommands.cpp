@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -448,7 +447,7 @@ public:
                 keyPattern = Helpers::inferKeyPattern(min);
             }
 
-            IndexDescriptor* idx =
+            const IndexDescriptor* idx =
                 collection->getIndexCatalog()->findShardKeyPrefixedIndex(opCtx,
                                                                          keyPattern,
                                                                          true);  // requireSingleKey
@@ -496,7 +495,7 @@ public:
             }
         }
 
-        if (PlanExecutor::FAILURE == state || PlanExecutor::DEAD == state) {
+        if (PlanExecutor::FAILURE == state) {
             warning() << "Internal error while reading " << ns;
             uassertStatusOK(WorkingSetCommon::getMemberObjectStatus(obj).withContext(
                 "Executor error while reading during dataSize command"));
@@ -651,10 +650,7 @@ public:
             CurOp::get(opCtx)->setNS_inlock(dbname);
         }
 
-        // We lock the entire database in S-mode in order to ensure that the contents will not
-        // change for the stats snapshot. This might be unnecessary and if it becomes a
-        // performance issue, we can take IS lock and then lock collection-by-collection.
-        AutoGetDb autoDb(opCtx, ns, MODE_S);
+        AutoGetDb autoDb(opCtx, ns, MODE_IS);
 
         result.append("db", ns);
 

@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2018 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -289,6 +289,10 @@ __logmgr_config(
 		WT_STAT_CONN_SET(session, log_max_filesize, conn->log_file_max);
 	}
 
+	WT_RET(__wt_config_gets(session, cfg, "log.os_cache_dirty_pct", &cval));
+	if (cval.val != 0)
+		conn->log_dirty_max = (conn->log_file_max * cval.val) / 100;
+
 	/*
 	 * If pre-allocation is configured, set the initial number to a few.
 	 * We'll adapt as load dictates.
@@ -447,7 +451,18 @@ __log_prealloc_once(WT_SESSION_IMPL *session)
 		__wt_verbose(session, WT_VERB_LOG,
 		    "Missed %" PRIu32 ". Now pre-allocating up to %" PRIu32,
 		    log->prep_missed, conn->log_prealloc);
+	} else if (reccount > conn->log_prealloc / 2 &&
+	    conn->log_prealloc > 2) {
+		/*
+		 * If we used less than half, then start adjusting down.
+		 */
+		--conn->log_prealloc;
+		__wt_verbose(session, WT_VERB_LOG,
+		    "Adjust down. Did not use %" PRIu32
+		    ". Now pre-allocating %" PRIu32,
+		    reccount, conn->log_prealloc);
 	}
+
 	WT_STAT_CONN_SET(session, log_prealloc_max, conn->log_prealloc);
 	/*
 	 * Allocate up to the maximum number that we just computed and detected.
@@ -907,7 +922,7 @@ __log_server(void *arg)
 	WT_DECL_RET;
 	WT_LOG *log;
 	WT_SESSION_IMPL *session;
-	uint64_t retry, time_start, time_stop, timediff;
+	uint64_t time_start, time_stop, timediff;
 	bool did_work, signalled;
 
 	session = arg;
@@ -920,6 +935,7 @@ __log_server(void *arg)
 	 * pre-allocation.  Start it so that we run on the first time through.
 	 */
 	timediff = WT_THOUSAND;
+	time_start = __wt_clock(session);
 
 	/*
 	 * The log server thread does a variety of work.  It forces out any
@@ -933,7 +949,6 @@ __log_server(void *arg)
 	 * takes to sync out an earlier file.
 	 */
 	did_work = true;
-	retry = 0;
 	while (F_ISSET(conn, WT_CONN_SERVER_LOG)) {
 		/*
 		 * Slots depend on future activity.  Force out buffered
@@ -978,33 +993,16 @@ __log_server(void *arg)
 					ret = __log_archive_once(session, 0);
 					__wt_writeunlock(
 					    session, &log->log_archive_lock);
-					/*
-					 * It is possible that an external
-					 * process on some systems may prevent
-					 * removal. If we get a permission
-					 * error, retry a few times.
-					 */
-					if (ret == EACCES &&
-					    retry < WT_RETRY_MAX) {
-						retry++;
-						WT_NOT_READ(ret, 0);
-					} else {
-						/*
-						 * Return the error if there is
-						 * one or reset on success.
-						 */
-						WT_ERR(ret);
-						retry = 0;
-					}
+					WT_ERR(ret);
 				} else
 					__wt_verbose(session, WT_VERB_LOG, "%s",
 					    "log_archive: Blocked due to open "
 					    "log cursor holding archive lock");
 			}
+			time_start = __wt_clock(session);
 		}
 
 		/* Wait until the next event. */
-		time_start = __wt_clock(session);
 		__wt_cond_auto_wait_signal(
 		    session, conn->log_cond, did_work, NULL, &signalled);
 		time_stop = __wt_clock(session);

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -51,7 +50,7 @@ struct TextStageParams {
     TextStageParams(const FTSSpec& s) : spec(s) {}
 
     // Text index descriptor.  IndexCatalog owns this.
-    IndexDescriptor* index;
+    const IndexDescriptor* index;
 
     // Index spec.
     FTSSpec spec;

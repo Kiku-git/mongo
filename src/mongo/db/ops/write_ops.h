@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -61,6 +60,9 @@ namespace write_ops {
 // fully ensure that goal, but it reduces the probability of it happening. This limit should not be
 // used if the protocol changes to avoid the 16MB limit on reply size.
 constexpr size_t kMaxWriteBatchSize = 100'000;
+
+// Limit the size that we write without yielding to 16MB / 64 (max expected number of indexes)
+constexpr size_t insertVectorMaxBytes = 256 * 1024;
 
 /**
  * Retrieves the statement id for the write at the specified position in the write batch entries

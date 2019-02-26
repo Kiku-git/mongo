@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -101,6 +100,9 @@ const char kAwaitDataField[] = "awaitData";
 const char kPartialResultsField[] = "allowPartialResults";
 const char kTermField[] = "term";
 const char kOptionsField[] = "options";
+const char kReadOnceField[] = "readOnce";
+const char kAllowSpeculativeMajorityReadField[] = "allowSpeculativeMajorityRead";
+const char kInternalReadAtClusterTimeField[] = "$_internalReadAtClusterTime";
 
 // Field names for sorting options.
 const char kNaturalSortField[] = "$natural";
@@ -366,6 +368,25 @@ StatusWith<unique_ptr<QueryRequest>> QueryRequest::parseFromFindCommand(unique_p
                 return status;
             }
             qr->_replicationTerm = el._numberLong();
+        } else if (fieldName == kReadOnceField) {
+            Status status = checkFieldType(el, Bool);
+            if (!status.isOK()) {
+                return status;
+            }
+
+            qr->_readOnce = el.boolean();
+        } else if (fieldName == kAllowSpeculativeMajorityReadField) {
+            Status status = checkFieldType(el, Bool);
+            if (!status.isOK()) {
+                return status;
+            }
+            qr->_allowSpeculativeMajorityRead = el.boolean();
+        } else if (fieldName == kInternalReadAtClusterTimeField) {
+            Status status = checkFieldType(el, BSONType::bsonTimestamp);
+            if (!status.isOK()) {
+                return status;
+            }
+            qr->_internalReadAtClusterTime = el.timestamp();
         } else if (!isGenericArgument(fieldName)) {
             return Status(ErrorCodes::FailedToParse,
                           str::stream() << "Failed to parse: " << cmdObj.toString() << ". "
@@ -525,6 +546,18 @@ void QueryRequest::asFindCommandInternal(BSONObjBuilder* cmdBuilder) const {
 
     if (_replicationTerm) {
         cmdBuilder->append(kTermField, *_replicationTerm);
+    }
+
+    if (_readOnce) {
+        cmdBuilder->append(kReadOnceField, true);
+    }
+
+    if (_allowSpeculativeMajorityRead) {
+        cmdBuilder->append(kAllowSpeculativeMajorityReadField, true);
+    }
+
+    if (_internalReadAtClusterTime) {
+        cmdBuilder->append(kInternalReadAtClusterTimeField, *_internalReadAtClusterTime);
     }
 }
 
@@ -1008,6 +1041,22 @@ StatusWith<BSONObj> QueryRequest::asAggregationCommand() const {
     if (!_wantMore && _limit.value_or(0) != 1LL) {
         return {ErrorCodes::InvalidPipelineOperator,
                 str::stream() << "Option " << kSingleBatchField
+                              << " not supported in aggregation."};
+    }
+    if (_readOnce) {
+        return {ErrorCodes::InvalidPipelineOperator,
+                str::stream() << "Option " << kReadOnceField << " not supported in aggregation."};
+    }
+
+    if (_allowSpeculativeMajorityRead) {
+        return {ErrorCodes::InvalidPipelineOperator,
+                str::stream() << "Option " << kAllowSpeculativeMajorityReadField
+                              << " not supported in aggregation."};
+    }
+
+    if (_internalReadAtClusterTime) {
+        return {ErrorCodes::InvalidPipelineOperator,
+                str::stream() << "Option " << kInternalReadAtClusterTimeField
                               << " not supported in aggregation."};
     }
 

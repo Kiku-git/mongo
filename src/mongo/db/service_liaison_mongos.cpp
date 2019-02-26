@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -66,7 +65,7 @@ LogicalSessionIdSet ServiceLiaisonMongos::getActiveOpSessions() const {
     return activeSessions;
 }
 
-LogicalSessionIdSet ServiceLiaisonMongos::getOpenCursorSessions() const {
+LogicalSessionIdSet ServiceLiaisonMongos::getOpenCursorSessions(OperationContext* opCtx) const {
     LogicalSessionIdSet openCursorSessions;
 
     invariant(hasGlobalServiceContext());

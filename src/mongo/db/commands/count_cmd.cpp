@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -37,6 +36,7 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/run_aggregate.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/curop_failpoint_helpers.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/exec/count.h"
 #include "mongo/db/query/explain.h"
@@ -53,6 +53,9 @@ namespace {
 using std::unique_ptr;
 using std::string;
 using std::stringstream;
+
+// Failpoint which causes to hang "count" cmd after acquiring the DB lock.
+MONGO_FAIL_POINT_DEFINE(hangBeforeCollectionCount);
 
 /**
  * Implements the MongoD side of the count command.
@@ -113,11 +116,11 @@ public:
                    rpc::ReplyBuilderInterface* result) const override {
         std::string dbname = opMsgRequest.getDatabase().toString();
         const BSONObj& cmdObj = opMsgRequest.body;
-        // Acquire locks and resolve possible UUID. The RAII object is optional, because in the case
+        // Acquire locks. The RAII object is optional, because in the case
         // of a view, the locks need to be released.
         boost::optional<AutoGetCollectionForReadCommand> ctx;
         ctx.emplace(opCtx,
-                    CommandHelpers::parseNsOrUUID(dbname, cmdObj),
+                    CommandHelpers::parseNsCollectionRequired(dbname, cmdObj),
                     AutoGetCollection::ViewMode::kViewsPermitted);
         const auto nss = ctx->getNss();
 
@@ -142,10 +145,13 @@ public:
                 return viewAggRequest.getStatus();
             }
 
+            // An empty PrivilegeVector is acceptable because these privileges are only checked on
+            // getMore and explain will not open a cursor.
             return runAggregate(opCtx,
                                 viewAggRequest.getValue().getNamespaceString(),
                                 viewAggRequest.getValue(),
                                 viewAggregation.getValue(),
+                                PrivilegeVector(),
                                 result);
         }
 
@@ -173,6 +179,7 @@ public:
              const string& dbname,
              const BSONObj& cmdObj,
              BSONObjBuilder& result) override {
+        CommandHelpers::handleMarkKillOnClientDisconnect(opCtx);
         // Acquire locks and resolve possible UUID. The RAII object is optional, because in the case
         // of a view, the locks need to be released.
         boost::optional<AutoGetCollectionForReadCommand> ctx;
@@ -180,6 +187,9 @@ public:
                     CommandHelpers::parseNsOrUUID(dbname, cmdObj),
                     AutoGetCollection::ViewMode::kViewsPermitted);
         const auto nss = ctx->getNss();
+
+        CurOpFailpointHelpers::waitWhileFailPointEnabled(
+            &hangBeforeCollectionCount, opCtx, "hangBeforeCollectionCount", []() {}, false, nss);
 
         const bool isExplain = false;
         auto request = CountRequest::parseFromBSON(nss, cmdObj, isExplain);

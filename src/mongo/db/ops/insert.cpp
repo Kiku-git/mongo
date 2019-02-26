@@ -1,6 +1,3 @@
-// insert.cpp
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -245,6 +242,8 @@ Status userAllowedCreateNS(StringData db, StringData coll) {
         }
         if (db == "config") {
             if (coll == "system.sessions")
+                return Status::OK();
+            if (coll == "system.indexBuilds")
                 return Status::OK();
         }
         if (db == "local") {

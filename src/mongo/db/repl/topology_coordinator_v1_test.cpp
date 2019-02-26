@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -33,6 +32,7 @@
 #include <iostream>
 
 #include "mongo/bson/json.h"
+#include "mongo/db/catalog/commit_quorum_options.h"
 #include "mongo/db/repl/heartbeat_response_action.h"
 #include "mongo/db/repl/repl_set_heartbeat_args_v1.h"
 #include "mongo/db/repl/repl_set_heartbeat_response.h"
@@ -5003,6 +5003,250 @@ TEST_F(TopoCoordTest, TwoNodesEligibleForElectionHandoffEqualPriorityResolveByMe
 
     // Candidates tied in opTime and priority. Choose node with lowest member index.
     ASSERT_EQUALS(1, getTopoCoord().chooseElectionHandoffCandidate());
+}
+
+TEST_F(TopoCoordTest, ArbiterNotIncludedInW3WriteInPSSAReplSet) {
+    // In a PSSA set, a w:3 write should only be acknowledged if both secondaries can satisfy it.
+    updateConfig(BSON("_id"
+                      << "rs0"
+                      << "version"
+                      << 2
+                      << "members"
+                      << BSON_ARRAY(BSON("_id" << 0 << "host"
+                                               << "host0:27017")
+                                    << BSON("_id" << 1 << "host"
+                                                  << "host1:27017")
+                                    << BSON("_id" << 2 << "host"
+                                                  << "host2:27017"
+                                                  << "priority"
+                                                  << 0
+                                                  << "votes"
+                                                  << 0)
+                                    << BSON("_id" << 3 << "host"
+                                                  << "host3:27017"
+                                                  << "arbiterOnly"
+                                                  << true))),
+                 0);
+
+    const auto term = getTopoCoord().getTerm();
+    makeSelfPrimary();
+
+    auto caughtUpOpTime = OpTime(Timestamp(100, 0), term);
+    auto laggedOpTime = OpTime(Timestamp(50, 0), term);
+
+    setMyOpTime(caughtUpOpTime);
+
+    // One secondary is caught up.
+    heartbeatFromMember(HostAndPort("host1"), "rs0", MemberState::RS_SECONDARY, caughtUpOpTime);
+
+    // The other is not.
+    heartbeatFromMember(HostAndPort("host2"), "rs0", MemberState::RS_SECONDARY, laggedOpTime);
+
+    // The arbiter is caught up, but should not count towards the w:3.
+    heartbeatFromMember(HostAndPort("host3"), "rs0", MemberState::RS_ARBITER, caughtUpOpTime);
+
+    ASSERT_FALSE(getTopoCoord().haveNumNodesReachedOpTime(
+        caughtUpOpTime, 3 /* numNodes */, false /* durablyWritten */));
+}
+
+TEST_F(TopoCoordTest, ArbitersNotIncludedInW2WriteInPSSAAReplSet) {
+    // In a PSSAA set, a w:2 write should only be acknowledged if at least one of the secondaries
+    // can satisfy it.
+    updateConfig(BSON("_id"
+                      << "rs0"
+                      << "version"
+                      << 2
+                      << "members"
+                      << BSON_ARRAY(BSON("_id" << 0 << "host"
+                                               << "host0:27017")
+                                    << BSON("_id" << 1 << "host"
+                                                  << "host1:27017"
+                                                  << "priority"
+                                                  << 0
+                                                  << "votes"
+                                                  << 0)
+                                    << BSON("_id" << 2 << "host"
+                                                  << "host2:27017"
+                                                  << "priority"
+                                                  << 0
+                                                  << "votes"
+                                                  << 0)
+                                    << BSON("_id" << 3 << "host"
+                                                  << "host3:27017"
+                                                  << "arbiterOnly"
+                                                  << true)
+                                    << BSON("_id" << 4 << "host"
+                                                  << "host4:27017"
+                                                  << "arbiterOnly"
+                                                  << true))),
+                 0);
+
+    const auto term = getTopoCoord().getTerm();
+    makeSelfPrimary();
+
+    auto caughtUpOpTime = OpTime(Timestamp(100, 0), term);
+    auto laggedOpTime = OpTime(Timestamp(50, 0), term);
+
+    setMyOpTime(caughtUpOpTime);
+
+    // Neither secondary is caught up.
+    heartbeatFromMember(HostAndPort("host1"), "rs0", MemberState::RS_SECONDARY, laggedOpTime);
+    heartbeatFromMember(HostAndPort("host2"), "rs0", MemberState::RS_SECONDARY, laggedOpTime);
+
+    // Both arbiters arae caught up, but neither should count towards the w:2.
+    heartbeatFromMember(HostAndPort("host3"), "rs0", MemberState::RS_ARBITER, caughtUpOpTime);
+    heartbeatFromMember(HostAndPort("host4"), "rs0", MemberState::RS_ARBITER, caughtUpOpTime);
+
+    ASSERT_FALSE(getTopoCoord().haveNumNodesReachedOpTime(
+        caughtUpOpTime, 2 /* numNodes */, false /* durablyWritten */));
+}
+
+TEST_F(TopoCoordTest, CheckIfCommitQuorumCanBeSatisfied) {
+    ReplSetConfig configA;
+    ASSERT_OK(configA.initialize(BSON("_id"
+                                      << "rs0"
+                                      << "version"
+                                      << 1
+                                      << "protocolVersion"
+                                      << 1
+                                      << "members"
+                                      << BSON_ARRAY(BSON("_id" << 0 << "host"
+                                                               << "node0"
+                                                               << "tags"
+                                                               << BSON("dc"
+                                                                       << "NA"
+                                                                       << "rack"
+                                                                       << "rackNA1"))
+                                                    << BSON("_id" << 1 << "host"
+                                                                  << "node1"
+                                                                  << "tags"
+                                                                  << BSON("dc"
+                                                                          << "NA"
+                                                                          << "rack"
+                                                                          << "rackNA2"))
+                                                    << BSON("_id" << 2 << "host"
+                                                                  << "node2"
+                                                                  << "tags"
+                                                                  << BSON("dc"
+                                                                          << "NA"
+                                                                          << "rack"
+                                                                          << "rackNA3"))
+                                                    << BSON("_id" << 3 << "host"
+                                                                  << "node3"
+                                                                  << "tags"
+                                                                  << BSON("dc"
+                                                                          << "EU"
+                                                                          << "rack"
+                                                                          << "rackEU1"))
+                                                    << BSON("_id" << 4 << "host"
+                                                                  << "node4"
+                                                                  << "tags"
+                                                                  << BSON("dc"
+                                                                          << "EU"
+                                                                          << "rack"
+                                                                          << "rackEU2"))
+                                                    << BSON("_id" << 5 << "host"
+                                                                  << "node5"
+                                                                  << "arbiterOnly"
+                                                                  << true))
+                                      << "settings"
+                                      << BSON("getLastErrorModes"
+                                              << BSON("valid" << BSON("dc" << 2 << "rack" << 3)
+                                                              << "invalidNotEnoughValues"
+                                                              << BSON("dc" << 3)
+                                                              << "invalidNotEnoughNodes"
+                                                              << BSON("rack" << 6))))));
+    getTopoCoord().updateConfig(configA, -1, Date_t());
+
+    std::vector<MemberConfig> memberConfig;
+    for (auto it = configA.membersBegin(); it != configA.membersEnd(); it++) {
+        memberConfig.push_back(*it);
+    }
+
+    // Consider all the replica set members.
+    {
+        CommitQuorumOptions validNumberWC;
+        validNumberWC.numNodes = 5;
+        ASSERT_TRUE(getTopoCoord().checkIfCommitQuorumCanBeSatisfied(validNumberWC, memberConfig));
+
+        CommitQuorumOptions invalidNumberWC;
+        invalidNumberWC.numNodes = 6;
+        ASSERT_FALSE(
+            getTopoCoord().checkIfCommitQuorumCanBeSatisfied(invalidNumberWC, memberConfig));
+
+        CommitQuorumOptions majorityWC;
+        majorityWC.mode = "majority";
+        ASSERT_TRUE(getTopoCoord().checkIfCommitQuorumCanBeSatisfied(majorityWC, memberConfig));
+
+        CommitQuorumOptions validModeWC;
+        validModeWC.mode = "valid";
+        ASSERT_TRUE(getTopoCoord().checkIfCommitQuorumCanBeSatisfied(validModeWC, memberConfig));
+
+        CommitQuorumOptions invalidModeWC;
+        invalidModeWC.mode = "invalidNotEnoughNodes";
+        ASSERT_FALSE(getTopoCoord().checkIfCommitQuorumCanBeSatisfied(invalidModeWC, memberConfig));
+
+        CommitQuorumOptions fakeModeWC;
+        fakeModeWC.mode = "fake";
+        ASSERT_FALSE(getTopoCoord().checkIfCommitQuorumCanBeSatisfied(fakeModeWC, memberConfig));
+    }
+
+    // Use a list of commit ready members that is not a majority.
+    {
+        std::vector<MemberConfig> commitReadyMembersNoMajority;
+        commitReadyMembersNoMajority.push_back(*configA.findMemberByID(0));
+        commitReadyMembersNoMajority.push_back(*configA.findMemberByID(1));
+        commitReadyMembersNoMajority.push_back(*configA.findMemberByID(2));
+
+        CommitQuorumOptions validNumberWC;
+        validNumberWC.numNodes = 3;
+        ASSERT_TRUE(getTopoCoord().checkIfCommitQuorumCanBeSatisfied(validNumberWC,
+                                                                     commitReadyMembersNoMajority));
+
+        CommitQuorumOptions invalidNumberWC;
+        invalidNumberWC.numNodes = 4;
+        ASSERT_FALSE(getTopoCoord().checkIfCommitQuorumCanBeSatisfied(
+            invalidNumberWC, commitReadyMembersNoMajority));
+
+        CommitQuorumOptions majorityWC;
+        majorityWC.mode = "majority";
+        ASSERT_FALSE(getTopoCoord().checkIfCommitQuorumCanBeSatisfied(
+            majorityWC, commitReadyMembersNoMajority));
+
+        CommitQuorumOptions invalidModeWC;
+        invalidModeWC.mode = "valid";
+        ASSERT_FALSE(getTopoCoord().checkIfCommitQuorumCanBeSatisfied(
+            invalidModeWC, commitReadyMembersNoMajority));
+    }
+
+    // Use a list of commit ready members that is a majority.
+    {
+        std::vector<MemberConfig> commitReadyMembersMajority;
+        commitReadyMembersMajority.push_back(*configA.findMemberByID(0));
+        commitReadyMembersMajority.push_back(*configA.findMemberByID(1));
+        commitReadyMembersMajority.push_back(*configA.findMemberByID(2));
+        commitReadyMembersMajority.push_back(*configA.findMemberByID(3));
+
+        CommitQuorumOptions validNumberWC;
+        validNumberWC.numNodes = 4;
+        ASSERT_TRUE(getTopoCoord().checkIfCommitQuorumCanBeSatisfied(validNumberWC,
+                                                                     commitReadyMembersMajority));
+
+        CommitQuorumOptions invalidNumberWC;
+        invalidNumberWC.numNodes = 5;
+        ASSERT_FALSE(getTopoCoord().checkIfCommitQuorumCanBeSatisfied(invalidNumberWC,
+                                                                      commitReadyMembersMajority));
+
+        CommitQuorumOptions majorityWC;
+        majorityWC.mode = "majority";
+        ASSERT_TRUE(getTopoCoord().checkIfCommitQuorumCanBeSatisfied(majorityWC,
+                                                                     commitReadyMembersMajority));
+
+        CommitQuorumOptions invalidModeWC;
+        invalidModeWC.mode = "valid";
+        ASSERT_TRUE(getTopoCoord().checkIfCommitQuorumCanBeSatisfied(invalidModeWC,
+                                                                     commitReadyMembersMajority));
+    }
 }
 
 TEST_F(HeartbeatResponseTestV1,

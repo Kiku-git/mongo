@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -54,6 +53,11 @@ public:
 
     Value serialize(boost::optional<ExplainOptions::Verbosity> explain) const;
     StageConstraints constraints(Pipeline::SplitState pipeState) const final;
+
+    boost::optional<MergingLogic> mergingLogic() final {
+        return boost::none;
+    }
+
     DocumentSource::GetNextResult getNext();
     const char* getSourceName() const {
         return DocumentSourceChangeStream::kStageName.rawData();

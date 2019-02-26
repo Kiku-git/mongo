@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -53,12 +52,10 @@ public:
     ~WiredTigerOplogManager() {}
 
     // This method will initialize the oplog read timestamp and start the background thread that
-    // refreshes the value. If `updateOldestTimestamp` is true, the background thread will also take
-    // responsibility for updating the oldest timestamp.
+    // refreshes the value.
     void start(OperationContext* opCtx,
                const std::string& uri,
-               WiredTigerRecordStore* oplogRecordStore,
-               bool updateOldestTimestamp);
+               WiredTigerRecordStore* oplogRecordStore);
 
     void halt();
 
@@ -87,8 +84,7 @@ public:
 
 private:
     void _oplogJournalThreadLoop(WiredTigerSessionCache* sessionCache,
-                                 WiredTigerRecordStore* oplogRecordStore,
-                                 const bool updateOldestTimestamp) noexcept;
+                                 WiredTigerRecordStore* oplogRecordStore);
 
     void _setOplogReadTimestamp(WithLock, uint64_t newTimestamp);
 
@@ -107,6 +103,6 @@ private:
     // journal flushing should not be delayed.
     std::int64_t _opsWaitingForVisibility = 0;  // Guarded by oplogVisibilityStateMutex.
 
-    AtomicUInt64 _oplogReadTimestamp;
+    AtomicWord<unsigned long long> _oplogReadTimestamp;
 };
 }  // namespace mongo

@@ -32,6 +32,7 @@ selector:
   # namespaces collide across mongos processes'
   - jstests/concurrency/fsm_workloads/map_reduce_drop.js
   - jstests/concurrency/fsm_workloads/map_reduce_inline.js
+  - jstests/concurrency/fsm_workloads/map_reduce_interrupt.js
   - jstests/concurrency/fsm_workloads/map_reduce_merge.js
   - jstests/concurrency/fsm_workloads/map_reduce_merge_nonatomic.js
   - jstests/concurrency/fsm_workloads/map_reduce_reduce.js
@@ -96,10 +97,6 @@ selector:
   - jstests/concurrency/fsm_workloads/rename_collection_dbname_droptarget.js
   - jstests/concurrency/fsm_workloads/rename_collection_droptarget.js
 
-  # our update queries lack shard keys
-  - jstests/concurrency/fsm_workloads/update_upsert_multi.js
-  - jstests/concurrency/fsm_workloads/update_upsert_multi_noindex.js
-
   # cannot use upsert command with $where with sharded collections
   - jstests/concurrency/fsm_workloads/upsert_where.js
 
@@ -111,6 +108,7 @@ selector:
   - jstests/concurrency/fsm_workloads/database_versioning.js
 
   exclude_with_any_tags:
+  # This suite uses secondary read preference, which isn't currently compatible with transactions.
   - uses_transactions
   - assumes_balancer_off
   - requires_replication
@@ -132,6 +130,8 @@ executor:
         TestData:
           runningWithCausalConsistency: true
           usingReplicaSetShards: true
+      eval: >-
+        load('jstests/libs/override_methods/causally_consistent_index_builds.js');
   hooks:
   - class: CheckReplDBHash
   - class: ValidateCollections

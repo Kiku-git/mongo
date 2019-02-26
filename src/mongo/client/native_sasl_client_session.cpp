@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -60,7 +59,7 @@ auto* scramsha256ClientCache = new SCRAMClientCache<SHA256Block>;
 }  // namespace
 
 NativeSaslClientSession::NativeSaslClientSession()
-    : SaslClientSession(), _step(0), _done(false), _saslConversation(nullptr) {}
+    : SaslClientSession(), _step(0), _success(false), _saslConversation(nullptr) {}
 
 NativeSaslClientSession::~NativeSaslClientSession() {}
 
@@ -96,7 +95,7 @@ Status NativeSaslClientSession::step(StringData inputData, std::string* outputDa
 
     StatusWith<bool> status = _saslConversation->step(inputData, outputData);
     if (status.isOK()) {
-        _done = status.getValue();
+        _success = status.getValue();
     }
     return status.getStatus();
 }

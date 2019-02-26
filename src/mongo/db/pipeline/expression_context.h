@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -205,6 +204,7 @@ public:
 
     bool fromMongos = false;
     bool needsMerge = false;
+    bool mergeByPBRT = false;
     bool inMongos = false;
     bool allowDiskUse = false;
     bool bypassDocumentValidation = false;
@@ -235,6 +235,9 @@ public:
     VariablesParseState variablesParseState;
 
     TailableModeEnum tailableMode = TailableModeEnum::kNormal;
+
+    // For a changeStream aggregation, this is the starting postBatchResumeToken. Empty otherwise.
+    BSONObj initialPostBatchResumeToken;
 
     // Tracks the depth of nested aggregation sub-pipelines. Used to enforce depth limits.
     size_t subPipelineDepth = 0;

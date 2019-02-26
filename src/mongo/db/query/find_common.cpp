@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -44,6 +43,8 @@ MONGO_FAIL_POINT_DEFINE(waitInFindBeforeMakingBatch);
 MONGO_FAIL_POINT_DEFINE(disableAwaitDataForGetMoreCmd);
 
 MONGO_FAIL_POINT_DEFINE(waitAfterPinningCursorBeforeGetMoreBatch);
+
+MONGO_FAIL_POINT_DEFINE(waitWithPinnedCursorDuringGetMoreBatch);
 
 MONGO_FAIL_POINT_DEFINE(waitBeforeUnpinningOrDeletingCursorAfterGetMoreBatch);
 

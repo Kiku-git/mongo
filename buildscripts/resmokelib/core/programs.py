@@ -107,7 +107,9 @@ def mongod_program(  # pylint: disable=too-many-branches
         "wiredTigerIndexConfigString": config.WT_INDEX_CONFIG,
     }
 
-    if config.STORAGE_ENGINE == "rocksdb":
+    if config.STORAGE_ENGINE == "inMemory":
+        shortcut_opts["inMemorySizeGB"] = config.STORAGE_ENGINE_CACHE_SIZE
+    elif config.STORAGE_ENGINE == "rocksdb":
         shortcut_opts["rocksdbCacheSizeGB"] = config.STORAGE_ENGINE_CACHE_SIZE
     elif config.STORAGE_ENGINE == "wiredTiger" or config.STORAGE_ENGINE is None:
         shortcut_opts["wiredTigerCacheSizeGB"] = config.STORAGE_ENGINE_CACHE_SIZE
@@ -272,6 +274,10 @@ def mongo_shell_program(  # pylint: disable=too-many-branches,too-many-locals,to
     # Load a callback to check UUID consistency before shutting down a ShardingTest.
     eval_sb.append(
         "load('jstests/libs/override_methods/check_uuids_consistent_across_cluster.js');")
+
+    # Load this file to retry operations that fail due to in-progress background operations.
+    eval_sb.append(
+        "load('jstests/libs/override_methods/implicitly_retry_on_background_op_in_progress.js');")
 
     eval_str = "; ".join(eval_sb)
     args.append("--eval")

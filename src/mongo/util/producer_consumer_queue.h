@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -34,8 +33,6 @@
 #include <deque>
 #include <list>
 #include <numeric>
-#include <queue>
-#include <stack>
 
 #include "mongo/db/operation_context.h"
 #include "mongo/stdx/condition_variable.h"
@@ -541,44 +538,50 @@ public:
     // Waits for at least one item in the queue, then pops items out of the queue until it would
     // block
     //
-    // OutputIterator must not throw on move assignment to *iter or popped values may be lost
-    // TODO: add sfinae to check to enforce
-    //
-    // Returns the cost value of the items extracted, along with the updated output iterator
-    template <typename OutputIterator>
-    std::pair<size_t, OutputIterator> popMany(
-        OutputIterator iterator, Interruptible* interruptible = Interruptible::notInterruptible()) {
-        return popManyUpTo(_options.maxQueueDepth, iterator, interruptible);
+    // Returns the popped values, along with the cost value of the items extracted
+    std::pair<std::deque<T>, size_t> popMany(
+        Interruptible* interruptible = Interruptible::notInterruptible()) {
+        return _popRunner([&](stdx::unique_lock<stdx::mutex>& lk) {
+            _waitForNonEmpty(lk, interruptible);
+            return std::make_pair(std::exchange(_queue, {}), std::exchange(_current, 0));
+        });
     }
 
     // Waits for at least one item in the queue, then pops items out of the queue until it would
-    // block, or we've exceeded our budget
+    // block, or the items cost would exceeded our budget
     //
-    // OutputIterator must not throw on move assignment to *iter or popped values may be lost
-    // TODO: add sfinae to check to enforce
+    // Returns the popped values, along with the cost value of the items extracted.
     //
-    // Returns the cost value of the items extracted, along with the updated output iterator
-    template <typename OutputIterator>
-    std::pair<size_t, OutputIterator> popManyUpTo(
-        size_t budget,
-        OutputIterator iterator,
-        Interruptible* interruptible = Interruptible::notInterruptible()) {
+    // Note that if the next item in the queue costs more than our budget, this may return without
+    // any items.
+    //
+    std::pair<std::deque<T>, size_t> popManyUpTo(
+        size_t budget, Interruptible* interruptible = Interruptible::notInterruptible()) {
         return _popRunner([&](stdx::unique_lock<stdx::mutex>& lk) {
-            size_t cost = 0;
-
             _waitForNonEmpty(lk, interruptible);
 
-            while (auto out = _tryPop(lk)) {
-                cost += _invokeCostFunc(*out, lk);
-                *iterator = std::move(*out);
-                ++iterator;
-
-                if (cost >= budget) {
-                    break;
-                }
+            if (_current <= budget) {
+                return std::make_pair(std::exchange(_queue, {}), std::exchange(_current, 0));
             }
 
-            return std::make_pair(cost, iterator);
+            decltype(_queue) queue;
+            size_t cost = 0;
+
+            while (_queue.size()) {
+                auto potentialCost = _invokeCostFunc(_queue.front(), lk);
+
+                if (cost + potentialCost > budget) {
+                    break;
+                }
+
+                cost += potentialCost;
+
+                queue.emplace_back(std::move(_queue.front()));
+                _queue.pop_front();
+                _current -= potentialCost;
+            }
+
+            return std::make_pair(std::move(queue), cost);
         });
     }
 
@@ -669,20 +672,14 @@ public:
             return _parent->pop(interruptible);
         }
 
-        template <typename OutputIterator>
-        std::pair<size_t, OutputIterator> popMany(
-            OutputIterator&& iterator,
+        std::pair<std::deque<T>, size_t> popMany(
             Interruptible* interruptible = Interruptible::notInterruptible()) const {
-            return _parent->popMany(std::forward<OutputIterator>(iterator), interruptible);
+            return _parent->popMany(interruptible);
         }
 
-        template <typename OutputIterator>
-        std::pair<size_t, OutputIterator> popManyUpTo(
-            size_t budget,
-            OutputIterator&& iterator,
-            Interruptible* interruptible = Interruptible::notInterruptible()) const {
-            return _parent->popManyUpTo(
-                budget, std::forward<OutputIterator>(iterator), interruptible);
+        std::pair<std::deque<T>, size_t> popManyUpTo(
+            size_t budget, Interruptible* interruptible = Interruptible::notInterruptible()) const {
+            return _parent->popManyUpTo(budget, interruptible);
         }
 
         boost::optional<T> tryPop() const {
@@ -814,7 +811,7 @@ private:
 
         _checkProducerClosed(lk);
 
-        const auto guard = MakeGuard([&] { _notifyIfNecessary(lk); });
+        const auto guard = makeGuard([&] { _notifyIfNecessary(lk); });
 
         return cb(lk);
     }
@@ -825,7 +822,7 @@ private:
 
         _checkConsumerClosed(lk);
 
-        const auto guard = MakeGuard([&] { _notifyIfNecessary(lk); });
+        const auto guard = makeGuard([&] { _notifyIfNecessary(lk); });
 
         return cb(lk);
     }
@@ -833,7 +830,7 @@ private:
     bool _tryPush(WithLock wl, T&& t) {
         size_t cost = _invokeCostFunc(t, wl);
         if (_current + cost <= _options.maxQueueDepth) {
-            _queue.emplace(std::move(t));
+            _queue.emplace_back(std::move(t));
             _current += cost;
             return true;
         }
@@ -845,7 +842,7 @@ private:
         size_t cost = _invokeCostFunc(t, wl);
         invariant(_current + cost <= _options.maxQueueDepth);
 
-        _queue.emplace(std::move(t));
+        _queue.emplace_back(std::move(t));
         _current += cost;
     }
 
@@ -854,7 +851,7 @@ private:
 
         if (!_queue.empty()) {
             out.emplace(std::move(_queue.front()));
-            _queue.pop();
+            _queue.pop_front();
             _current -= _invokeCostFunc(*out, wl);
         }
 
@@ -865,7 +862,7 @@ private:
         invariant(_queue.size());
 
         auto t = std::move(_queue.front());
-        _queue.pop();
+        _queue.pop_front();
 
         _current -= _invokeCostFunc(t, wl);
 
@@ -907,7 +904,7 @@ private:
     // Current size of the queue
     size_t _current = 0;
 
-    std::queue<T> _queue;
+    std::deque<T> _queue;
 
     // State for waiting consumers and producers
     Consumers _consumers;

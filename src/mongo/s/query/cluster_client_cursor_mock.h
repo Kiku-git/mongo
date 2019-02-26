@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -72,7 +71,12 @@ public:
 
     BSONObj getOriginatingCommand() const final;
 
+    const PrivilegeVector& getOriginatingPrivileges() const& final;
+    void getOriginatingPrivileges() && = delete;
+
     std::size_t getNumRemotes() const final;
+
+    BSONObj getPostBatchResumeToken() const final;
 
     long long getNumReturnedSoFar() const final;
 
@@ -117,6 +121,9 @@ private:
 
     // Originating command object.
     BSONObj _originatingCommand;
+
+    // Privileges of originating command
+    PrivilegeVector _originatingPrivileges;
 
     // Number of returned documents.
     long long _numReturnedSoFar = 0;

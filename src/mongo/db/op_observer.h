@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -90,11 +89,34 @@ public:
     };
 
     virtual ~OpObserver() = default;
+
     virtual void onCreateIndex(OperationContext* opCtx,
                                const NamespaceString& nss,
                                CollectionUUID uuid,
                                BSONObj indexDoc,
                                bool fromMigrate) = 0;
+
+    virtual void onStartIndexBuild(OperationContext* opCtx,
+                                   const NamespaceString& nss,
+                                   CollectionUUID collUUID,
+                                   const UUID& indexBuildUUID,
+                                   const std::vector<BSONObj>& indexes,
+                                   bool fromMigrate) = 0;
+
+    virtual void onCommitIndexBuild(OperationContext* opCtx,
+                                    const NamespaceString& nss,
+                                    CollectionUUID collUUID,
+                                    const UUID& indexBuildUUID,
+                                    const std::vector<BSONObj>& indexes,
+                                    bool fromMigrate) = 0;
+
+    virtual void onAbortIndexBuild(OperationContext* opCtx,
+                                   const NamespaceString& nss,
+                                   CollectionUUID collUUID,
+                                   const UUID& indexBuildUUID,
+                                   const std::vector<BSONObj>& indexes,
+                                   bool fromMigrate) = 0;
+
     virtual void onInserts(OperationContext* opCtx,
                            const NamespaceString& nss,
                            OptionalCollectionUUID uuid,
@@ -193,6 +215,7 @@ public:
     virtual repl::OpTime onDropCollection(OperationContext* opCtx,
                                           const NamespaceString& collectionName,
                                           OptionalCollectionUUID uuid,
+                                          std::uint64_t numRecords,
                                           CollectionDropType dropType) = 0;
 
     /**
@@ -223,6 +246,7 @@ public:
                                              const NamespaceString& toCollection,
                                              OptionalCollectionUUID uuid,
                                              OptionalCollectionUUID dropTargetUUID,
+                                             std::uint64_t numRecords,
                                              bool stayTemp) = 0;
     /**
      * This function performs all op observer handling for a 'renameCollection' command except for
@@ -246,6 +270,7 @@ public:
                                     const NamespaceString& toCollection,
                                     OptionalCollectionUUID uuid,
                                     OptionalCollectionUUID dropTargetUUID,
+                                    std::uint64_t numRecords,
                                     bool stayTemp) = 0;
 
     virtual void onApplyOps(OperationContext* opCtx,
@@ -254,25 +279,43 @@ public:
     virtual void onEmptyCapped(OperationContext* opCtx,
                                const NamespaceString& collectionName,
                                OptionalCollectionUUID uuid) = 0;
+
     /**
-     * The onTransactionCommit method is called on the commit of an atomic transaction, before the
-     * RecoveryUnit onCommit() is called.  It must not be called when no transaction is active.
+     * The onUnpreparedTransactionCommit method is called on the commit of an unprepared
+     * transaction, before the RecoveryUnit onCommit() is called.  It must not be called when no
+     * transaction is active.
      *
-     * If the transaction was prepared, then 'commitOplogEntryOpTime' is passed in to be used as the
-     * OpTime of the oplog entry. The 'commitTimestamp' is the timestamp at which the multi-document
-     * transaction was committed. Either these fields should both be 'none' or neither should.
+     * The 'statements' are the list of CRUD operations to be applied in this transaction.
      */
-    virtual void onTransactionCommit(OperationContext* opCtx,
-                                     boost::optional<OplogSlot> commitOplogEntryOpTime,
-                                     boost::optional<Timestamp> commitTimestamp) = 0;
+    virtual void onUnpreparedTransactionCommit(
+        OperationContext* opCtx, const std::vector<repl::ReplOperation>& statements) = 0;
+    /**
+     * The onPreparedTransactionCommit method is called on the commit of a prepared transaction,
+     * after the RecoveryUnit onCommit() is called.  It must not be called when no transaction is
+     * active.
+     *
+     * The 'commitOplogEntryOpTime' is passed in to be used as the OpTime of the oplog entry. The
+     * 'commitTimestamp' is the timestamp at which the multi-document transaction was committed.
+     *
+     * The 'statements' are the list of CRUD operations to be applied in this transaction.
+     */
+    virtual void onPreparedTransactionCommit(
+        OperationContext* opCtx,
+        OplogSlot commitOplogEntryOpTime,
+        Timestamp commitTimestamp,
+        const std::vector<repl::ReplOperation>& statements) noexcept = 0;
 
     /**
      * The onTransactionPrepare method is called when an atomic transaction is prepared. It must be
      * called when a transaction is active.
      *
      * The 'prepareOpTime' is passed in to be used as the OpTime of the oplog entry.
+     *
+     * The 'statements' are the list of CRUD operations to be applied in this transaction.
      */
-    virtual void onTransactionPrepare(OperationContext* opCtx, const OplogSlot& prepareOpTime) = 0;
+    virtual void onTransactionPrepare(OperationContext* opCtx,
+                                      const OplogSlot& prepareOpTime,
+                                      std::vector<repl::ReplOperation>& statements) = 0;
 
     /**
      * The onTransactionAbort method is called when an atomic transaction aborts, before the

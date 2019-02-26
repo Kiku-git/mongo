@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -207,6 +206,15 @@ public:
     void onStaleShardVersion(CachedCollectionRoutingInfo&&);
 
     /**
+     * Throws a StaleConfigException if this catalog cache does not have an entry for the given
+     * namespace, or if the entry for the given namespace does not have the same epoch as
+     * 'targetCollectionVersion'. Does not perform any refresh logic. Ignores everything except the
+     * epoch of 'targetCollectionVersion' when performing the check, but needs the entire target
+     * version to throw a StaleConfigException.
+     */
+    void checkEpochOrThrow(const NamespaceString& nss, ChunkVersion targetCollectionVersion) const;
+
+    /**
      * Non-blocking method, which indiscriminately causes the database entry for the specified
      * database to be refreshed the next time getDatabase is called.
      */
@@ -217,6 +225,12 @@ public:
      * namespace to be refreshed the next time getCollectionRoutingInfo is called.
      */
     void invalidateShardedCollection(const NamespaceString& nss);
+
+    /**
+     * Non-blocking method, which removes the entire specified collection from the cache (resulting
+     * in full refresh on subsequent access)
+     */
+    void purgeCollection(const NamespaceString& nss);
 
     /**
      * Non-blocking method, which removes the entire specified database (including its collections)
@@ -338,28 +352,28 @@ private:
     struct Stats {
         // Counts how many times threads hit stale config exception (which is what triggers metadata
         // refreshes)
-        AtomicInt64 countStaleConfigErrors{0};
+        AtomicWord<long long> countStaleConfigErrors{0};
 
         // Cumulative, always-increasing counter of how much time threads waiting for refresh
         // combined
-        AtomicInt64 totalRefreshWaitTimeMicros{0};
+        AtomicWord<long long> totalRefreshWaitTimeMicros{0};
 
         // Tracks how many incremental refreshes are waiting to complete currently
-        AtomicInt64 numActiveIncrementalRefreshes{0};
+        AtomicWord<long long> numActiveIncrementalRefreshes{0};
 
         // Cumulative, always-increasing counter of how many incremental refreshes have been kicked
         // off
-        AtomicInt64 countIncrementalRefreshesStarted{0};
+        AtomicWord<long long> countIncrementalRefreshesStarted{0};
 
         // Tracks how many full refreshes are waiting to complete currently
-        AtomicInt64 numActiveFullRefreshes{0};
+        AtomicWord<long long> numActiveFullRefreshes{0};
 
         // Cumulative, always-increasing counter of how many full refreshes have been kicked off
-        AtomicInt64 countFullRefreshesStarted{0};
+        AtomicWord<long long> countFullRefreshesStarted{0};
 
         // Cumulative, always-increasing counter of how many full or incremental refreshes failed
         // for whatever reason
-        AtomicInt64 countFailedRefreshes{0};
+        AtomicWord<long long> countFailedRefreshes{0};
 
         /**
          * Reports the accumulated statistics for serverStatus.

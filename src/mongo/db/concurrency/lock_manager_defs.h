@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -37,7 +36,6 @@
 #include "mongo/base/static_assert.h"
 #include "mongo/base/string_data.h"
 #include "mongo/config.h"
-#include "mongo/platform/hash_namespace.h"
 
 namespace mongo {
 
@@ -52,7 +50,7 @@ struct PartitionedLockHead;
  * This matrix answers the question, "Is a lock request with mode 'Requested Mode' compatible with
  * an existing lock held in mode 'Granted Mode'?"
  *
- * | Requested Mode | Granted Mode |         |          |        |          |
+ * | Requested Mode |                      Granted Mode                     |
  * |----------------|:------------:|:-------:|:--------:|:------:|:--------:|
  * |                |  MODE_NONE   | MODE_IS |  MODE_IX | MODE_S |  MODE_X  |
  * | MODE_IS        |      +       |    +    |     +    |    +   |          |
@@ -189,6 +187,7 @@ public:
     enum SingletonHashIds {
         SINGLETON_INVALID = 0,
         SINGLETON_PARALLEL_BATCH_WRITER_MODE,
+        SINGLETON_REPLICATION_STATE_TRANSITION_LOCK,
         SINGLETON_GLOBAL,
     };
 
@@ -219,6 +218,11 @@ public:
     }
 
     std::string toString() const;
+
+    template <typename H>
+    friend H AbslHashValue(H h, const ResourceId& resource) {
+        return H::combine(std::move(h), resource._fullHash);
+    }
 
 private:
     /**
@@ -264,6 +268,13 @@ extern const ResourceId resourceIdAdminDB;
 // lock.
 // TODO: Merge this with resourceIdGlobal
 extern const ResourceId resourceIdParallelBatchWriterMode;
+
+// Hardcoded resource id for the ReplicationStateTransitionLock (RSTL). We use the same resource
+// type as resourceIdGlobal. This will also ensure the waits are reported as global, which is
+// appropriate. This lock is acquired in mode X for any replication state transition and is acquired
+// by all other reads and writes in mode IX. This lock is acquired after the PBWM but before the
+// resourceIdGlobal.
+extern const ResourceId resourceIdReplicationStateTransitionLock;
 
 /**
  * Interface on which granted lock requests will be notified. See the contract for the notify
@@ -452,13 +463,3 @@ struct LockRequest {
 const char* lockRequestStatusName(LockRequest::Status status);
 
 }  // namespace mongo
-
-
-MONGO_HASH_NAMESPACE_START
-template <>
-struct hash<mongo::ResourceId> {
-    size_t operator()(const mongo::ResourceId& resource) const {
-        return resource;
-    }
-};
-MONGO_HASH_NAMESPACE_END

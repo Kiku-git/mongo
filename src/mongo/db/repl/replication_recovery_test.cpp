@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -92,10 +91,21 @@ public:
         _supportsRecoveryTimestamp = supports;
     }
 
+    void setPointInTimeReadTimestamp(Timestamp pointInTimeReadTimestamp) {
+        stdx::lock_guard<stdx::mutex> lock(_mutex);
+        _pointInTimeReadTimestamp = pointInTimeReadTimestamp;
+    }
+
+    Timestamp getPointInTimeReadTimestamp(OperationContext* opCtx) const override {
+        stdx::lock_guard<stdx::mutex> lock(_mutex);
+        return _pointInTimeReadTimestamp;
+    }
+
 private:
     mutable stdx::mutex _mutex;
     Timestamp _initialDataTimestamp = Timestamp::min();
     boost::optional<Timestamp> _recoveryTimestamp = boost::none;
+    Timestamp _pointInTimeReadTimestamp = {};
     bool _supportsRecoverToStableTimestamp = true;
     bool _supportsRecoveryTimestamp = true;
 };
@@ -105,6 +115,7 @@ public:
     repl::OpTime onDropCollection(OperationContext* opCtx,
                                   const NamespaceString& collectionName,
                                   OptionalCollectionUUID uuid,
+                                  std::uint64_t numRecords,
                                   const CollectionDropType dropType) override {
         // If the oplog is not disabled for this namespace, then we need to reserve an op time for
         // the drop.
@@ -124,11 +135,11 @@ protected:
     }
 
     StorageInterface* getStorageInterface() {
-        return _storageInterface.get();
+        return _storageInterface;
     }
 
     StorageInterfaceRecovery* getStorageInterfaceRecovery() {
-        return _storageInterface.get();
+        return _storageInterface;
     }
 
     ReplicationConsistencyMarkers* getConsistencyMarkers() {
@@ -154,11 +165,15 @@ protected:
 private:
     void setUp() override {
         ServiceContextMongoDTest::setUp();
-        _createOpCtx();
-        _storageInterface = stdx::make_unique<StorageInterfaceRecovery>();
-        _consistencyMarkers = stdx::make_unique<ReplicationConsistencyMarkersMock>();
 
         auto service = getServiceContext();
+        StorageInterface::set(service, stdx::make_unique<StorageInterfaceRecovery>());
+        _storageInterface = static_cast<StorageInterfaceRecovery*>(StorageInterface::get(service));
+
+        _createOpCtx();
+        _consistencyMarkers = stdx::make_unique<ReplicationConsistencyMarkersMock>();
+
+
         ReplicationCoordinator::set(
             service, stdx::make_unique<ReplicationCoordinatorMock>(service, getStorageInterface()));
 
@@ -174,15 +189,13 @@ private:
         observerRegistry->addObserver(std::make_unique<ReplicationRecoveryTestObObserver>());
 
         repl::DropPendingCollectionReaper::set(
-            service, stdx::make_unique<repl::DropPendingCollectionReaper>(_storageInterface.get()));
+            service, stdx::make_unique<repl::DropPendingCollectionReaper>(_storageInterface));
     }
 
     void tearDown() override {
-        SessionCatalog::get(_opCtx->getServiceContext())->reset_forTest();
-
         _opCtx.reset(nullptr);
         _consistencyMarkers.reset();
-        _storageInterface.reset();
+
         ServiceContextMongoDTest::tearDown();
     }
 
@@ -191,7 +204,7 @@ private:
     }
 
     ServiceContext::UniqueOperationContext _opCtx;
-    std::unique_ptr<StorageInterfaceRecovery> _storageInterface;
+    StorageInterfaceRecovery* _storageInterface;
     std::unique_ptr<ReplicationConsistencyMarkersMock> _consistencyMarkers;
 };
 
@@ -212,7 +225,7 @@ repl::OplogEntry _makeOplogEntry(repl::OpTime opTime,
                                  OperationSessionInfo sessionInfo = {},
                                  boost::optional<Date_t> wallTime = boost::none) {
     return repl::OplogEntry(opTime,                           // optime
-                            1LL,                              // hash
+                            boost::none,                      // hash
                             opType,                           // opType
                             testNs,                           // namespace
                             boost::none,                      // uuid
@@ -244,7 +257,6 @@ repl::OplogEntry _makeTransactionOplogEntry(repl::OpTime opTime,
     sessionInfo.serialize(&builder);
     builder.append("ts", opTime.getTimestamp());
     builder.append("t", opTime.getTerm());
-    builder.append("h", 1LL);
     builder.append("v", repl::OplogEntry::kOplogVersion);
     builder.append("op", "c");
     builder.append("ns", testNs.toString());
@@ -883,6 +895,7 @@ TEST_F(ReplicationRecoveryTest, PrepareTransactionOplogEntryCorrectlyUpdatesConf
     auto opCtx = getOperationContext();
 
     const auto appliedThrough = OpTime(Timestamp(1, 1), 1);
+    getStorageInterfaceRecovery()->setPointInTimeReadTimestamp(Timestamp(1, 0));
     getStorageInterfaceRecovery()->setSupportsRecoverToStableTimestamp(true);
     getStorageInterfaceRecovery()->setRecoveryTimestamp(appliedThrough.getTimestamp());
     getConsistencyMarkers()->setAppliedThrough(opCtx, appliedThrough);

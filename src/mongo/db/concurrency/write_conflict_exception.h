@@ -1,6 +1,3 @@
-// write_conflict_exception.h
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -61,7 +58,7 @@ public:
      * If true, will call printStackTrace on every WriteConflictException created.
      * Can be set via setParameter named traceWriteConflictExceptions.
      */
-    static AtomicBool trace;
+    static AtomicWord<bool> trace;
 
 private:
     void defineOnlyInFinalSubclassToPreventSlicing() final {}

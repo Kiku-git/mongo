@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -40,84 +39,15 @@
 #include "mongo/db/server_parameters.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/util/log.h"
+#include "mongo/util/synchronized_value.h"
 
 namespace mongo {
-
-namespace {
-
-/**
- * Expose diagnosticDataCollectionDirectoryPath set parameter to specify the MongoS FTDC path.
- */
-class ExportedFTDCDirectoryPathParameter : public ServerParameter {
-public:
-    ExportedFTDCDirectoryPathParameter()
-        : ServerParameter(ServerParameterSet::getGlobal(),
-                          "diagnosticDataCollectionDirectoryPath",
-                          true,
-                          true) {}
-
-
-    void append(OperationContext* opCtx, BSONObjBuilder& b, const std::string& name) final {
-        stdx::lock_guard<stdx::mutex> guard(_lock);
-        b.append(name, _path.generic_string());
-    }
-
-    Status set(const BSONElement& newValueElement) {
-        if (newValueElement.type() != String) {
-            return Status(ErrorCodes::BadValue,
-                          "diagnosticDataCollectionDirectoryPath only supports type string");
-        }
-
-        std::string str = newValueElement.str();
-        return setFromString(str);
-    }
-
-    Status setFromString(const std::string& str) final {
-        stdx::lock_guard<stdx::mutex> guard(_lock);
-
-        FTDCController* controller = nullptr;
-
-        if (hasGlobalServiceContext()) {
-            controller = FTDCController::get(getGlobalServiceContext());
-        }
-
-        if (controller) {
-            Status s = controller->setDirectory(str);
-            if (!s.isOK()) {
-                return s;
-            }
-        }
-
-        _path = str;
-
-        return Status::OK();
-    }
-
-    boost::filesystem::path getDirectory() {
-        stdx::lock_guard<stdx::mutex> guard(_lock);
-        return _path;
-    }
-
-    void setDirectory(boost::filesystem::path& path) {
-        stdx::lock_guard<stdx::mutex> guard(_lock);
-        _path = path;
-    }
-
-private:
-    // Lock to guard _path
-    stdx::mutex _lock;
-
-    // Directory location of ftdc files, guarded by _lock
-    boost::filesystem::path _path;
-} exportedFTDCDirectoryPathParameter;
 
 void registerMongoSCollectors(FTDCController* controller) {
     // PoolStats
     controller->addPeriodicCollector(stdx::make_unique<FTDCSimpleInternalCommandCollector>(
         "connPoolStats", "connPoolStats", "", BSON("connPoolStats" << 1)));
 }
-
-}  // namespace
 
 void startMongoSFTDC() {
     // Get the path to use for FTDC:
@@ -127,7 +57,7 @@ void startMongoSFTDC() {
 
     // Only attempt to enable FTDC if we have a path to log files to.
     FTDCStartMode startMode = FTDCStartMode::kStart;
-    auto directory = exportedFTDCDirectoryPathParameter.getDirectory();
+    auto directory = getFTDCDirectoryPathParameter();
 
     if (directory.empty()) {
         if (serverGlobalParams.logpath.empty()) {
@@ -138,11 +68,9 @@ void startMongoSFTDC() {
             directory = boost::filesystem::absolute(
                 FTDCUtil::getMongoSPath(serverGlobalParams.logpath), serverGlobalParams.cwd);
 
-            // Update the server parameter with the computed path.
             // Note: If the computed FTDC directory conflicts with an existing file, then FTDC will
             // warn about the conflict, and not startup. It will not terminate MongoS in this
             // situation.
-            exportedFTDCDirectoryPathParameter.setDirectory(directory);
         }
     }
 

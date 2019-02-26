@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -87,6 +86,7 @@ TEST_F(UnsetNodeTest, UnsetNoOp) {
     ASSERT_EQUALS(fromjson("{b: 5}"), doc);
     ASSERT_TRUE(doc.isInPlaceModeEnabled());
     ASSERT_EQUALS(fromjson("{}"), getLogDoc());
+    ASSERT_EQUALS(getModifiedPaths(), "{a}");
 }
 
 TEST_F(UnsetNodeTest, UnsetNoOpDottedPath) {
@@ -105,6 +105,7 @@ TEST_F(UnsetNodeTest, UnsetNoOpDottedPath) {
     ASSERT_EQUALS(fromjson("{a: 5}"), doc);
     ASSERT_TRUE(doc.isInPlaceModeEnabled());
     ASSERT_EQUALS(fromjson("{}"), getLogDoc());
+    ASSERT_EQUALS(getModifiedPaths(), "{a.b}");
 }
 
 TEST_F(UnsetNodeTest, UnsetNoOpThroughArray) {
@@ -123,6 +124,7 @@ TEST_F(UnsetNodeTest, UnsetNoOpThroughArray) {
     ASSERT_EQUALS(fromjson("{a:[{b:1}]}"), doc);
     ASSERT_TRUE(doc.isInPlaceModeEnabled());
     ASSERT_EQUALS(fromjson("{}"), getLogDoc());
+    ASSERT_EQUALS(getModifiedPaths(), "{a.b}");
 }
 
 TEST_F(UnsetNodeTest, UnsetNoOpEmptyDoc) {
@@ -140,6 +142,7 @@ TEST_F(UnsetNodeTest, UnsetNoOpEmptyDoc) {
     ASSERT_EQUALS(fromjson("{}"), doc);
     ASSERT_TRUE(doc.isInPlaceModeEnabled());
     ASSERT_EQUALS(fromjson("{}"), getLogDoc());
+    ASSERT_EQUALS(getModifiedPaths(), "{a}");
 }
 
 TEST_F(UnsetNodeTest, UnsetTopLevelPath) {
@@ -157,6 +160,7 @@ TEST_F(UnsetNodeTest, UnsetTopLevelPath) {
     ASSERT_EQUALS(fromjson("{}"), doc);
     ASSERT_FALSE(doc.isInPlaceModeEnabled());
     ASSERT_EQUALS(fromjson("{$unset: {a: true}}"), getLogDoc());
+    ASSERT_EQUALS(getModifiedPaths(), "{a}");
 }
 
 TEST_F(UnsetNodeTest, UnsetNestedPath) {
@@ -174,6 +178,7 @@ TEST_F(UnsetNodeTest, UnsetNestedPath) {
     ASSERT_EQUALS(fromjson("{a: {b: {}}}"), doc);
     ASSERT_FALSE(doc.isInPlaceModeEnabled());
     ASSERT_EQUALS(fromjson("{$unset: {'a.b.c': true}}"), getLogDoc());
+    ASSERT_EQUALS(getModifiedPaths(), "{a.b.c}");
 }
 
 TEST_F(UnsetNodeTest, UnsetObject) {
@@ -191,6 +196,7 @@ TEST_F(UnsetNodeTest, UnsetObject) {
     ASSERT_EQUALS(fromjson("{a: {}}"), doc);
     ASSERT_FALSE(doc.isInPlaceModeEnabled());
     ASSERT_EQUALS(fromjson("{$unset: {'a.b': true}}"), getLogDoc());
+    ASSERT_EQUALS(getModifiedPaths(), "{a.b}");
 }
 
 TEST_F(UnsetNodeTest, UnsetArrayElement) {
@@ -208,6 +214,7 @@ TEST_F(UnsetNodeTest, UnsetArrayElement) {
     ASSERT_EQUALS(fromjson("{a:[null], b:1}"), doc);
     ASSERT_FALSE(doc.isInPlaceModeEnabled());
     ASSERT_EQUALS(fromjson("{$unset: {'a.0': true}}"), getLogDoc());
+    ASSERT_EQUALS(getModifiedPaths(), "{a.0}");
 }
 
 TEST_F(UnsetNodeTest, UnsetPositional) {
@@ -226,6 +233,7 @@ TEST_F(UnsetNodeTest, UnsetPositional) {
     ASSERT_EQUALS(fromjson("{a: [0, null, 2]}"), doc);
     ASSERT_FALSE(doc.isInPlaceModeEnabled());
     ASSERT_EQUALS(fromjson("{$unset: {'a.1': true}}"), getLogDoc());
+    ASSERT_EQUALS(getModifiedPaths(), "{a.1}");
 }
 
 TEST_F(UnsetNodeTest, UnsetEntireArray) {
@@ -243,6 +251,7 @@ TEST_F(UnsetNodeTest, UnsetEntireArray) {
     ASSERT_EQUALS(fromjson("{}"), doc);
     ASSERT_FALSE(doc.isInPlaceModeEnabled());
     ASSERT_EQUALS(fromjson("{$unset: {a: true}}"), getLogDoc());
+    ASSERT_EQUALS(getModifiedPaths(), "{a}");
 }
 
 TEST_F(UnsetNodeTest, UnsetFromObjectInArray) {
@@ -260,6 +269,7 @@ TEST_F(UnsetNodeTest, UnsetFromObjectInArray) {
     ASSERT_EQUALS(fromjson("{a:[{}]}"), doc);
     ASSERT_FALSE(doc.isInPlaceModeEnabled());
     ASSERT_EQUALS(fromjson("{$unset: {'a.0.b': true}}"), getLogDoc());
+    ASSERT_EQUALS(getModifiedPaths(), "{a.0.b}");
 }
 
 TEST_F(UnsetNodeTest, CanUnsetInvalidField) {
@@ -277,6 +287,7 @@ TEST_F(UnsetNodeTest, CanUnsetInvalidField) {
     ASSERT_EQUALS(fromjson("{b: 1, a: [{}]}"), doc);
     ASSERT_FALSE(doc.isInPlaceModeEnabled());
     ASSERT_EQUALS(fromjson("{$unset: {'a.0.$b': true}}"), getLogDoc());
+    ASSERT_EQUALS(getModifiedPaths(), "{a.0.$b}");
 }
 
 TEST_F(UnsetNodeTest, ApplyNoIndexDataNoLogBuilder) {
@@ -293,6 +304,7 @@ TEST_F(UnsetNodeTest, ApplyNoIndexDataNoLogBuilder) {
     ASSERT_FALSE(result.indexesAffected);
     ASSERT_EQUALS(fromjson("{}"), doc);
     ASSERT_FALSE(doc.isInPlaceModeEnabled());
+    ASSERT_EQUALS(getModifiedPaths(), "{a}");
 }
 
 TEST_F(UnsetNodeTest, ApplyDoesNotAffectIndexes) {
@@ -310,6 +322,7 @@ TEST_F(UnsetNodeTest, ApplyDoesNotAffectIndexes) {
     ASSERT_EQUALS(fromjson("{}"), doc);
     ASSERT_FALSE(doc.isInPlaceModeEnabled());
     ASSERT_EQUALS(fromjson("{$unset: {a: true}}"), getLogDoc());
+    ASSERT_EQUALS(getModifiedPaths(), "{a}");
 }
 
 TEST_F(UnsetNodeTest, ApplyFieldWithDot) {
@@ -327,6 +340,7 @@ TEST_F(UnsetNodeTest, ApplyFieldWithDot) {
     ASSERT_EQUALS(fromjson("{'a.b':4, a: {}}"), doc);
     ASSERT_FALSE(doc.isInPlaceModeEnabled());
     ASSERT_EQUALS(fromjson("{$unset: {'a.b': true}}"), getLogDoc());
+    ASSERT_EQUALS(getModifiedPaths(), "{a.b}");
 }
 
 TEST_F(UnsetNodeTest, ApplyCannotRemoveRequiredPartOfDBRef) {
@@ -361,6 +375,7 @@ TEST_F(UnsetNodeTest, ApplyCanRemoveRequiredPartOfDBRefIfValidateForStorageIsFal
     ASSERT_EQUALS(updated, doc);
     ASSERT_FALSE(doc.isInPlaceModeEnabled());
     ASSERT_EQUALS(fromjson("{$unset: {'a.$id': true}}"), getLogDoc());
+    ASSERT_EQUALS(getModifiedPaths(), "{a.$id}");
 }
 
 TEST_F(UnsetNodeTest, ApplyCannotRemoveImmutablePath) {
@@ -428,6 +443,7 @@ TEST_F(UnsetNodeTest, ApplyCanRemoveImmutablePathIfNoop) {
     ASSERT_EQUALS(fromjson("{a: {b: 1}}"), doc);
     ASSERT_TRUE(doc.isInPlaceModeEnabled());
     ASSERT_EQUALS(fromjson("{}"), getLogDoc());
+    ASSERT_EQUALS(getModifiedPaths(), "{a.b.c}");
 }
 
 }  // namespace

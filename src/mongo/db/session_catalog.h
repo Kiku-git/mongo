@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -34,7 +33,9 @@
 #include <vector>
 
 #include "mongo/base/disallow_copying.h"
+#include "mongo/db/client.h"
 #include "mongo/db/logical_session_id.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/session.h"
 #include "mongo/db/session_killer.h"
 #include "mongo/stdx/condition_variable.h"
@@ -44,10 +45,7 @@
 
 namespace mongo {
 
-class OperationContext;
-class ScopedSession;
-class ScopedCheckedOutSession;
-class ServiceContext;
+class ObservableSession;
 
 /**
  * Keeps track of the transaction runtime state for every active session on this instance.
@@ -55,10 +53,21 @@ class ServiceContext;
 class SessionCatalog {
     MONGO_DISALLOW_COPYING(SessionCatalog);
 
-    friend class ScopedSession;
-    friend class ScopedCheckedOutSession;
+    friend class ObservableSession;
+    friend class OperationContextSession;
 
 public:
+    class ScopedCheckedOutSession;
+    class SessionToKill;
+
+    struct KillToken {
+        KillToken(LogicalSessionId lsid) : lsidToKill(std::move(lsid)) {}
+        KillToken(KillToken&&) = default;
+        KillToken& operator=(KillToken&&) = default;
+
+        LogicalSessionId lsidToKill;
+    };
+
     SessionCatalog() = default;
     ~SessionCatalog();
 
@@ -75,35 +84,10 @@ public:
     void reset_forTest();
 
     /**
-     * Potentially blocking call, which uses the session information stored in the specified
-     * operation context and either creates a brand new session object (if one doesn't exist) or
-     * "checks-out" the existing one (if it is not currently in use or marked for kill).
-     *
-     * Checking out a session puts it in the 'checked out' state and all subsequent calls to
-     * checkout will block until it is checked back in. This happens when the returned object goes
-     * out of scope.
-     *
-     * Throws exception on errors.
+     * See the description of 'ObservableSession::kill' for more information on the session kill
+     * usage pattern.
      */
-    ScopedCheckedOutSession checkOutSession(OperationContext* opCtx);
-
-    /**
-     * See the description of 'Session::kill' for more information on the session kill usage
-     * pattern.
-     */
-    ScopedCheckedOutSession checkOutSessionForKill(OperationContext* opCtx,
-                                                   Session::KillToken killToken);
-
-    /**
-     * Returns a reference to the specified cached session regardless of whether it is checked-out
-     * or not. The returned session is not returned checked-out and is allowed to be checked-out
-     * concurrently.
-     *
-     * The intended usage for this method is to allow migrations to run in parallel with writes for
-     * the same session without blocking it. Because of this, it may not be used from operations
-     * which run on a session.
-     */
-    ScopedSession getOrCreateSession(OperationContext* opCtx, const LogicalSessionId& lsid);
+    SessionToKill checkOutSessionForKill(OperationContext* opCtx, KillToken killToken);
 
     /**
      * Iterates through the SessionCatalog under the SessionCatalog mutex and applies 'workerFn' to
@@ -116,7 +100,7 @@ public:
      *
      * TODO SERVER-33850: Take Matcher out of the SessionKiller namespace.
      */
-    using ScanSessionsCallbackFn = stdx::function<void(WithLock, Session*)>;
+    using ScanSessionsCallbackFn = stdx::function<void(const ObservableSession&)>;
     void scanSessions(const SessionKiller::Matcher& matcher,
                       const ScanSessionsCallbackFn& workerFn);
 
@@ -124,7 +108,7 @@ public:
      * Shortcut to invoke 'kill' on the specified session under the SessionCatalog mutex. Throws a
      * NoSuchSession exception if the session doesn't exist.
      */
-    Session::KillToken killSession(const LogicalSessionId& lsid);
+    KillToken killSession(const LogicalSessionId& lsid);
 
 private:
     struct SessionRuntimeInfo {
@@ -139,6 +123,8 @@ private:
         stdx::condition_variable availableCondVar;
     };
 
+    ScopedCheckedOutSession _checkOutSession(OperationContext* opCtx);
+
     /**
      * May release and re-acquire it zero or more times before returning. The returned
      * 'SessionRuntimeInfo' is guaranteed to be linked on the catalog's _txnTable as long as the
@@ -150,8 +136,8 @@ private:
     /**
      * Makes a session, previously checked out through 'checkoutSession', available again.
      */
-    void _releaseSession(const LogicalSessionId& lsid,
-                         boost::optional<Session::KillToken> killToken);
+    void _releaseSession(std::shared_ptr<SessionRuntimeInfo> sri,
+                         boost::optional<KillToken> killToken);
 
     stdx::mutex _mutex;
 
@@ -160,13 +146,25 @@ private:
 };
 
 /**
- * Scoped object representing a reference to a session.
+ * Scoped object representing a checked-out session. This type is an implementation detail
+ * of the SessionCatalog.
  */
-class ScopedSession {
+class SessionCatalog::ScopedCheckedOutSession {
 public:
-    explicit ScopedSession(std::shared_ptr<SessionCatalog::SessionRuntimeInfo> sri)
-        : _sri(std::move(sri)) {
-        invariant(_sri);
+    ScopedCheckedOutSession(SessionCatalog& catalog,
+                            std::shared_ptr<SessionCatalog::SessionRuntimeInfo> sri,
+                            boost::optional<SessionCatalog::KillToken> killToken)
+        : _catalog(catalog), _sri(std::move(sri)), _killToken(std::move(killToken)) {}
+
+    ScopedCheckedOutSession(ScopedCheckedOutSession&&) = default;
+    ScopedCheckedOutSession& operator=(ScopedCheckedOutSession&&) = delete;
+    ScopedCheckedOutSession(const ScopedCheckedOutSession&) = delete;
+    ScopedCheckedOutSession& operator=(ScopedCheckedOutSession&) = delete;
+
+    ~ScopedCheckedOutSession() {
+        if (_sri) {
+            _catalog._releaseSession(std::move(_sri), std::move(_killToken));
+        }
     }
 
     Session* get() const {
@@ -182,63 +180,113 @@ public:
     }
 
     operator bool() const {
-        return !!_sri;
+        return bool(_sri);
     }
 
 private:
+    // The owning session catalog into which the session should be checked back
+    SessionCatalog& _catalog;
+
     std::shared_ptr<SessionCatalog::SessionRuntimeInfo> _sri;
+    boost::optional<SessionCatalog::KillToken> _killToken;
 };
 
 /**
- * Scoped object representing a checked-out session. See comments for the 'checkoutSession' method
- * for more information on its behaviour.
+ * RAII type returned by SessionCatalog::checkOutSessionForKill.
+ *
+ * After calling kill() on an ObservableSession, let that ObservableSession go out
+ * of scope and in a context outside of SessionCatalog::scanSessions, call checkOutSessionForKill
+ * to get an instance of this type. Then, while holding that instance, perform any cleanup
+ * you need to perform on a session as part of killing it. More details in the description of
+ * ObservableSession::kill, below.
  */
-class ScopedCheckedOutSession {
-    MONGO_DISALLOW_COPYING(ScopedCheckedOutSession);
-
-    friend ScopedCheckedOutSession SessionCatalog::checkOutSession(OperationContext*);
-    friend ScopedCheckedOutSession SessionCatalog::checkOutSessionForKill(OperationContext*,
-                                                                          Session::KillToken);
-
+class SessionCatalog::SessionToKill {
 public:
-    ScopedCheckedOutSession(ScopedCheckedOutSession&&) = default;
-
-    ~ScopedCheckedOutSession() {
-        if (_scopedSession) {
-            SessionCatalog::get(_opCtx)->_releaseSession(_scopedSession->getSessionId(),
-                                                         std::move(_killToken));
-        }
-    }
-
+    SessionToKill(ScopedCheckedOutSession&& scos) : _scos(std::move(scos)) {}
     Session* get() const {
-        return _scopedSession.get();
+        return _scos.get();
     }
 
-    Session* operator->() const {
-        return get();
+    const LogicalSessionId& getSessionId() const {
+        return get()->getSessionId();
     }
-
-    Session& operator*() const {
-        return *get();
-    }
-
-    operator bool() const {
-        return _scopedSession;
+    OperationContext* currentOperation_forTest() const {
+        return get()->currentOperation_forTest();
     }
 
 private:
-    ScopedCheckedOutSession(OperationContext* opCtx,
-                            ScopedSession scopedSession,
-                            boost::optional<Session::KillToken> killToken)
-        : _opCtx(opCtx),
-          _killToken(std::move(killToken)),
-          _scopedSession(std::move(scopedSession)) {}
+    ScopedCheckedOutSession _scos;
+};
+using SessionToKill = SessionCatalog::SessionToKill;
 
-    OperationContext* const _opCtx;
+/**
+ * This type represents access to a session inside of a scanSessions loop.
+ * If you have one of these, you're in a scanSessions callback context, and so
+ * have locked the whole catalog and, if the observed session is bound to an operation context,
+ * you hold that operation context's client's mutex, as well.
+ */
+class ObservableSession {
+public:
+    ObservableSession(const ObservableSession&) = delete;
+    ObservableSession(ObservableSession&&) = delete;
+    ObservableSession& operator=(const ObservableSession&) = delete;
+    ObservableSession& operator=(ObservableSession&&) = delete;
 
-    boost::optional<Session::KillToken> _killToken;
+    /**
+     * The logical session id that this object represents.
+     */
+    const LogicalSessionId& getSessionId() const {
+        return _session->_sessionId;
+    }
 
-    ScopedSession _scopedSession;
+    /**
+     * Returns a pointer to the current operation running on this Session, or nullptr if there is no
+     * operation currently running on this Session.
+     */
+    OperationContext* currentOperation() const;
+
+    /**
+     * Increments the number of "killers" for this session and returns a 'kill token' to to be
+     * passed later on to 'checkOutSessionForKill' method of the SessionCatalog in order to permit
+     * the caller to execute any kill cleanup tasks. This token is later used to decrement the
+     * number of "killers".
+     *
+     * Marking session as killed is an internal property only that will cause any further calls to
+     * 'checkOutSession' to block until 'checkOutSessionForKill' is called the same number of times
+     * as 'kill' was called and the returned scoped object destroyed.
+     *
+     * If the first killer finds the session checked-out, this method will also interrupt the
+     * operation context which has it checked-out.
+     */
+    SessionCatalog::KillToken kill(ErrorCodes::Error reason = ErrorCodes::Interrupted) const;
+
+    /**
+     * Returns a pointer to the Session itself.
+     */
+    Session* get() const {
+        return _session;
+    }
+
+private:
+    friend class SessionCatalog;
+
+    static stdx::unique_lock<Client> _lockClientForSession(WithLock, Session* session) {
+        if (const auto opCtx = session->_checkoutOpCtx) {
+            return stdx::unique_lock<Client>{*opCtx->getClient()};
+        }
+        return {};
+    }
+
+    ObservableSession(WithLock wl, Session& session)
+        : _session(&session), _clientLock(_lockClientForSession(std::move(wl), _session)) {}
+
+    /**
+     * Returns whether 'kill' has been called on this session.
+     */
+    bool _killed() const;
+
+    Session* _session;
+    stdx::unique_lock<Client> _clientLock;
 };
 
 /**
@@ -250,11 +298,17 @@ class OperationContextSession {
     MONGO_DISALLOW_COPYING(OperationContextSession);
 
 public:
+    /**
+     * Acquires the session with id opCtx->getLogicalSessionId().  Because a session can only be
+     * checked out by one user at a time, construction of OperationContextSession can block waiting
+     * for the desired session to be checked in by another user.
+     */
     OperationContextSession(OperationContext* opCtx);
     ~OperationContextSession();
 
     /**
-     * Returns the session checked out in the constructor.
+     * Returns the session currently checked out by "opCtx", or nullptr if the opCtx has no
+     * checked out session.
      */
     static Session* get(OperationContext* opCtx);
 

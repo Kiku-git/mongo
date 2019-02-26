@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -100,12 +99,13 @@ ShardingMongodTestFixture::~ShardingMongodTestFixture() = default;
 void ShardingMongodTestFixture::setUp() {
     ServiceContextMongoDTest::setUp();
 
-    auto service = getServiceContext();
-    _opCtx = cc().makeOperationContext();
+    const auto service = getServiceContext();
+    _opCtx = makeOperationContext();
 
     // Set up this node as part of a replica set.
 
     repl::ReplSettings replSettings;
+    replSettings.setOplogSizeBytes(512'000);
     replSettings.setReplSetString(ConnectionString::forReplicaSet(_setName, _servers).toString());
     auto replCoordPtr = makeReplicationCoordinator(replSettings);
     _replCoord = replCoordPtr.get();
@@ -172,18 +172,12 @@ std::unique_ptr<executor::TaskExecutorPool> ShardingMongodTestFixture::makeTaskE
     // again just the (single) thread the unit test is running on. Therefore, all tasks, local and
     // remote, must be carried out synchronously by the test thread.
     auto fixedTaskExecutor = makeThreadPoolTestExecutor(std::move(netForFixedTaskExecutor));
-
     _networkTestEnv = stdx::make_unique<NetworkTestEnv>(fixedTaskExecutor.get(), _mockNetwork);
 
-    // Set up a NetworkInterfaceMock for the (one) arbitrary TaskExecutor that will go in the set
-    // of arbitrary TaskExecutors.
-    auto netForArbitraryExecutor = stdx::make_unique<executor::NetworkInterfaceMock>();
-
     // Set up (one) TaskExecutor for the set of arbitrary TaskExecutors.
-    auto arbitraryExecutorForExecutorPool =
-        makeThreadPoolTestExecutor(std::move(netForArbitraryExecutor));
     std::vector<std::unique_ptr<executor::TaskExecutor>> arbitraryExecutorsForExecutorPool;
-    arbitraryExecutorsForExecutorPool.emplace_back(std::move(arbitraryExecutorForExecutorPool));
+    arbitraryExecutorsForExecutorPool.emplace_back(
+        makeThreadPoolTestExecutor(stdx::make_unique<executor::NetworkInterfaceMock>()));
 
     // Set up the TaskExecutorPool with the fixed TaskExecutor and set of arbitrary TaskExecutors.
     auto executorPool = stdx::make_unique<executor::TaskExecutorPool>();
@@ -363,29 +357,6 @@ DistLockManager* ShardingMongodTestFixture::distLock() const {
 RemoteCommandTargeterFactoryMock* ShardingMongodTestFixture::targeterFactory() const {
     invariant(_targeterFactory);
     return _targeterFactory;
-}
-
-OperationContext* ShardingMongodTestFixture::operationContext() const {
-    invariant(_opCtx);
-    return _opCtx.get();
-}
-
-void ShardingMongodTestFixture::onCommand(NetworkTestEnv::OnCommandFunction func) {
-    _networkTestEnv->onCommand(func);
-}
-
-void ShardingMongodTestFixture::onCommandWithMetadata(
-    NetworkTestEnv::OnCommandWithMetadataFunction func) {
-    _networkTestEnv->onCommandWithMetadata(func);
-}
-
-void ShardingMongodTestFixture::onFindCommand(NetworkTestEnv::OnFindCommandFunction func) {
-    _networkTestEnv->onFindCommand(func);
-}
-
-void ShardingMongodTestFixture::onFindWithMetadataCommand(
-    NetworkTestEnv::OnFindCommandWithMetadataFunction func) {
-    _networkTestEnv->onFindWithMetadataCommand(func);
 }
 
 }  // namespace mongo

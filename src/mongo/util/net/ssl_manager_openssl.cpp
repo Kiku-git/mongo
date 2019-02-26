@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -58,6 +57,7 @@
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/net/cidr.h"
+#include "mongo/util/net/dh_openssl.h"
 #include "mongo/util/net/private/ssl_expiration.h"
 #include "mongo/util/net/socket_exception.h"
 #include "mongo/util/net/ssl_options.h"
@@ -70,6 +70,7 @@
 #endif
 #include <openssl/asn1.h>
 #include <openssl/asn1t.h>
+#include <openssl/dh.h>
 #include <openssl/evp.h>
 #include <openssl/ssl.h>
 #include <openssl/x509_vfy.h>
@@ -87,6 +88,36 @@ namespace mongo {
 
 namespace {
 
+// Modulus for Diffie-Hellman parameter 'ffdhe3072' defined in RFC 7919
+constexpr std::array<std::uint8_t, 384> ffdhe3072_p = {
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xAD, 0xF8, 0x54, 0x58, 0xA2, 0xBB, 0x4A, 0x9A,
+    0xAF, 0xDC, 0x56, 0x20, 0x27, 0x3D, 0x3C, 0xF1, 0xD8, 0xB9, 0xC5, 0x83, 0xCE, 0x2D, 0x36, 0x95,
+    0xA9, 0xE1, 0x36, 0x41, 0x14, 0x64, 0x33, 0xFB, 0xCC, 0x93, 0x9D, 0xCE, 0x24, 0x9B, 0x3E, 0xF9,
+    0x7D, 0x2F, 0xE3, 0x63, 0x63, 0x0C, 0x75, 0xD8, 0xF6, 0x81, 0xB2, 0x02, 0xAE, 0xC4, 0x61, 0x7A,
+    0xD3, 0xDF, 0x1E, 0xD5, 0xD5, 0xFD, 0x65, 0x61, 0x24, 0x33, 0xF5, 0x1F, 0x5F, 0x06, 0x6E, 0xD0,
+    0x85, 0x63, 0x65, 0x55, 0x3D, 0xED, 0x1A, 0xF3, 0xB5, 0x57, 0x13, 0x5E, 0x7F, 0x57, 0xC9, 0x35,
+    0x98, 0x4F, 0x0C, 0x70, 0xE0, 0xE6, 0x8B, 0x77, 0xE2, 0xA6, 0x89, 0xDA, 0xF3, 0xEF, 0xE8, 0x72,
+    0x1D, 0xF1, 0x58, 0xA1, 0x36, 0xAD, 0xE7, 0x35, 0x30, 0xAC, 0xCA, 0x4F, 0x48, 0x3A, 0x79, 0x7A,
+    0xBC, 0x0A, 0xB1, 0x82, 0xB3, 0x24, 0xFB, 0x61, 0xD1, 0x08, 0xA9, 0x4B, 0xB2, 0xC8, 0xE3, 0xFB,
+    0xB9, 0x6A, 0xDA, 0xB7, 0x60, 0xD7, 0xF4, 0x68, 0x1D, 0x4F, 0x42, 0xA3, 0xDE, 0x39, 0x4D, 0xF4,
+    0xAE, 0x56, 0xED, 0xE7, 0x63, 0x72, 0xBB, 0x19, 0x0B, 0x07, 0xA7, 0xC8, 0xEE, 0x0A, 0x6D, 0x70,
+    0x9E, 0x02, 0xFC, 0xE1, 0xCD, 0xF7, 0xE2, 0xEC, 0xC0, 0x34, 0x04, 0xCD, 0x28, 0x34, 0x2F, 0x61,
+    0x91, 0x72, 0xFE, 0x9C, 0xE9, 0x85, 0x83, 0xFF, 0x8E, 0x4F, 0x12, 0x32, 0xEE, 0xF2, 0x81, 0x83,
+    0xC3, 0xFE, 0x3B, 0x1B, 0x4C, 0x6F, 0xAD, 0x73, 0x3B, 0xB5, 0xFC, 0xBC, 0x2E, 0xC2, 0x20, 0x05,
+    0xC5, 0x8E, 0xF1, 0x83, 0x7D, 0x16, 0x83, 0xB2, 0xC6, 0xF3, 0x4A, 0x26, 0xC1, 0xB2, 0xEF, 0xFA,
+    0x88, 0x6B, 0x42, 0x38, 0x61, 0x1F, 0xCF, 0xDC, 0xDE, 0x35, 0x5B, 0x3B, 0x65, 0x19, 0x03, 0x5B,
+    0xBC, 0x34, 0xF4, 0xDE, 0xF9, 0x9C, 0x02, 0x38, 0x61, 0xB4, 0x6F, 0xC9, 0xD6, 0xE6, 0xC9, 0x07,
+    0x7A, 0xD9, 0x1D, 0x26, 0x91, 0xF7, 0xF7, 0xEE, 0x59, 0x8C, 0xB0, 0xFA, 0xC1, 0x86, 0xD9, 0x1C,
+    0xAE, 0xFE, 0x13, 0x09, 0x85, 0x13, 0x92, 0x70, 0xB4, 0x13, 0x0C, 0x93, 0xBC, 0x43, 0x79, 0x44,
+    0xF4, 0xFD, 0x44, 0x52, 0xE2, 0xD7, 0x4D, 0xD3, 0x64, 0xF2, 0xE2, 0x1E, 0x71, 0xF5, 0x4B, 0xFF,
+    0x5C, 0xAE, 0x82, 0xAB, 0x9C, 0x9D, 0xF6, 0x9E, 0xE8, 0x6D, 0x2B, 0xC5, 0x22, 0x36, 0x3A, 0x0D,
+    0xAB, 0xC5, 0x21, 0x97, 0x9B, 0x0D, 0xEA, 0xDA, 0x1D, 0xBF, 0x9A, 0x42, 0xD5, 0xC4, 0x48, 0x4E,
+    0x0A, 0xBC, 0xD0, 0x6B, 0xFA, 0x53, 0xDD, 0xEF, 0x3C, 0x1B, 0x20, 0xEE, 0x3F, 0xD5, 0x9D, 0x7C,
+    0x25, 0xE4, 0x1D, 0x2B, 0x66, 0xC6, 0x2E, 0x37, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
+// Generator for Diffie-Hellman parameter 'ffdhe3072' defined in RFC 7919 (2)
+constexpr std::uint8_t ffdhe3072_g = 0x02;
+
 // Because the hostname having a slash is used by `mongo::SockAddr` to determine if a hostname is a
 // Unix Domain Socket endpoint, this function uses the same logic.  (See
 // `mongo::SockAddr::Sockaddr(StringData, int, sa_family_t)`).  A user explicitly specifying a Unix
@@ -99,36 +130,14 @@ bool isUnixDomainSocket(const std::string& hostname) {
     return end(hostname) != std::find(begin(hostname), end(hostname), '/');
 }
 
-struct DHFreer {
-    void operator()(DH* const dh) noexcept {
-        if (dh) {
-            ::DH_free(dh);
-        }
-    }
-};
-using UniqueDHParams = std::unique_ptr<DH, DHFreer>;
-
-struct BIOFree {
-    void operator()(BIO* const p) noexcept {
-        // Assumes that BIO_free succeeds.
-        if (p) {
-            ::BIO_free(p);
-        }
-    }
-};
-using UniqueBIO = std::unique_ptr<BIO, BIOFree>;
+using UniqueBIO = std::unique_ptr<BIO, OpenSSLDeleter<decltype(::BIO_free), ::BIO_free>>;
 
 #ifdef MONGO_CONFIG_HAVE_SSL_EC_KEY_NEW
-struct EC_KEYFree {
-    void operator()(EC_KEY* const ec_key) noexcept {
-        if (ec_key) {
-            ::EC_KEY_free(ec_key);
-        }
-    }
-};
-
-using UniqueEC_KEY = std::unique_ptr<EC_KEY, EC_KEYFree>;
+using UniqueEC_KEY =
+    std::unique_ptr<EC_KEY, OpenSSLDeleter<decltype(::EC_KEY_free), ::EC_KEY_free>>;
 #endif
+
+using UniqueBIGNUM = std::unique_ptr<BIGNUM, OpenSSLDeleter<decltype(::BN_free), ::BN_free>>;
 
 UniqueBIO makeUniqueMemBio(std::vector<std::uint8_t>& v) {
     UniqueBIO rv(::BIO_new_mem_buf(v.data(), v.size()));
@@ -157,7 +166,7 @@ bool useDefaultECKey(SSL_CTX* const ctx) {
     UniqueEC_KEY key(EC_KEY_new_by_curve_name(NID_X9_62_prime256v1));
 
     if (key) {
-        return ::SSL_CTX_set_tmp_ecdh(ctx, key.get()) == 1;
+        return SSL_CTX_set_tmp_ecdh(ctx, key.get()) == 1;
     }
 #endif
     return false;
@@ -166,22 +175,28 @@ bool useDefaultECKey(SSL_CTX* const ctx) {
 // If the underlying SSL supports auto-configuration of ECDH parameters, this function will select
 // it. If not, this function will attempt to use a hard-coded but widely supported elliptic curve.
 // If that fails, ECDHE will not be enabled.
-void enableECDHE(SSL_CTX* const ctx) {
+bool enableECDHE(SSL_CTX* const ctx) {
 #ifdef MONGO_CONFIG_HAVE_SSL_SET_ECDH_AUTO
-    ::SSL_CTX_set_ecdh_auto(ctx, true);
-#else
+    SSL_CTX_set_ecdh_auto(ctx, true);
+#elif OPENSSL_VERSION_NUMBER < 0x10100000L || \
+    (defined(LIBRESSL_VERSION_NUMBER) && LIBRESSL_VERSION_NUMBER < 0x2070000fL)
     // SSL_CTRL_SET_ECDH_AUTO is defined to be 94 in OpenSSL 1.0.2. On RHEL 7, Mongo could be built
     // against 1.0.1 but actually linked with 1.0.2 at runtime. The define may not be present, but
-    // this call could actually enable auto ecdh.
-    if (::SSL_CTX_ctrl(ctx, 94, 1, NULL) != 1) {
+    // this call could actually enable auto ecdh. We also ensure the OpenSSL version is sufficiently
+    // old to protect against future versions where SSL_CTX_set_ecdh_auto could be removed and 94
+    // ctrl code could be repurposed.
+    if (SSL_CTX_ctrl(ctx, 94, 1, NULL) != 1) {
         // If manually setting the configuration option failed, use a hard coded curve
         if (!useDefaultECKey(ctx)) {
             error() << "Failed to enable ECDHE.";
+            return false;
         }
     }
 #endif
     std::ignore = ctx;
+    return true;
 }
+
 
 // Old copies of OpenSSL will not have constants to disable protocols they don't support.
 // Define them to values we can OR together safely to generically disable these protocols across
@@ -221,13 +236,30 @@ IMPLEMENT_ASN1_ENCODE_FUNCTIONS_const_fname(ASN1_SEQUENCE_ANY, ASN1_SET_ANY, ASN
 #if OPENSSL_VERSION_NUMBER < 0x10100000L || \
     (defined(LIBRESSL_VERSION_NUMBER) && LIBRESSL_VERSION_NUMBER < 0x2070000fL)
 // Copies of OpenSSL after 1.1.0 define new functions for interaction with
-// X509 structure. We must polyfill used definitions to interact with older
-// OpenSSL versions.
+// X509 and DH structures. We must polyfill used definitions to interact with older OpenSSL
+// versions.
 const STACK_OF(X509_EXTENSION) * X509_get0_extensions(const X509* peerCert) {
     return peerCert->cert_info->extensions;
 }
 inline int X509_NAME_ENTRY_set(const X509_NAME_ENTRY* ne) {
     return ne->set;
+}
+
+int DH_set0_pqg(DH* dh, BIGNUM* p, BIGNUM* q, BIGNUM* g) {
+    dh->p = p;
+    dh->g = g;
+
+    return 1;
+}
+
+void DH_get0_pqg(const DH* dh, const BIGNUM** p, const BIGNUM** q, const BIGNUM** g) {
+    if (p) {
+        *p = dh->p;
+    }
+
+    if (g) {
+        *g = dh->g;
+    }
 }
 #endif
 
@@ -328,16 +360,6 @@ private:
 std::vector<std::unique_ptr<stdx::recursive_mutex>> SSLThreadInfo::_mutex;
 SSLThreadInfo::ThreadIDManager SSLThreadInfo::_idManager;
 
-namespace {
-// We only want to free SSL_CTX objects if they have been populated. OpenSSL seems to perform this
-// check before freeing them, but because it does not document this, we should protect ourselves.
-void free_ssl_context(SSL_CTX* ctx) {
-    if (ctx != nullptr) {
-        SSL_CTX_free(ctx);
-    }
-}
-}  // namespace
-
 class SSLConnectionOpenSSL : public SSLConnectionInterface {
 public:
     SSL* ssl;
@@ -360,19 +382,12 @@ public:
 
 ////////////////////////////////////////////////////////////////
 
-SimpleMutex sslManagerMtx;
-SSLManagerInterface* theSSLManager = NULL;
-using UniqueSSLContext = std::unique_ptr<SSL_CTX, decltype(&free_ssl_context)>;
+using UniqueSSLContext =
+    std::unique_ptr<SSL_CTX, OpenSSLDeleter<decltype(::SSL_CTX_free), ::SSL_CTX_free>>;
 static const int BUFFER_SIZE = 8 * 1024;
 static const int DATE_LEN = 128;
 
-struct UniqueX509Free {
-    void operator()(X509* ptr) const {
-        X509_free(ptr);
-    }
-};
-
-using UniqueX509 = std::unique_ptr<X509, UniqueX509Free>;
+using UniqueX509 = std::unique_ptr<X509, OpenSSLDeleter<decltype(X509_free), ::X509_free>>;
 
 class SSLManagerOpenSSL : public SSLManagerInterface {
 public:
@@ -586,6 +601,7 @@ void setupFIPS() {
 // Global variable indicating if this is a server or a client instance
 bool isSSLServer = false;
 
+extern SSLManagerInterface* theSSLManager;
 
 MONGO_INITIALIZER(SetupOpenSSL)(InitializerContext*) {
     SSL_library_init();
@@ -606,8 +622,8 @@ MONGO_INITIALIZER(SetupOpenSSL)(InitializerContext*) {
     return Status::OK();
 }
 
-MONGO_INITIALIZER_WITH_PREREQUISITES(SSLManager, ("SetupOpenSSL"))(InitializerContext*) {
-    stdx::lock_guard<SimpleMutex> lck(sslManagerMtx);
+MONGO_INITIALIZER_WITH_PREREQUISITES(SSLManager, ("SetupOpenSSL", "EndStartupOptionHandling"))
+(InitializerContext*) {
     if (!isSSLServer || (sslGlobalParams.sslMode.load() != SSLParams::SSLMode_disabled)) {
         theSSLManager = new SSLManagerOpenSSL(sslGlobalParams, isSSLServer);
     }
@@ -617,13 +633,6 @@ MONGO_INITIALIZER_WITH_PREREQUISITES(SSLManager, ("SetupOpenSSL"))(InitializerCo
 std::unique_ptr<SSLManagerInterface> SSLManagerInterface::create(const SSLParams& params,
                                                                  bool isServer) {
     return stdx::make_unique<SSLManagerOpenSSL>(params, isServer);
-}
-
-SSLManagerInterface* getSSLManager() {
-    stdx::lock_guard<SimpleMutex> lck(sslManagerMtx);
-    if (theSSLManager)
-        return theSSLManager;
-    return NULL;
 }
 
 SSLX509Name getCertificateSubjectX509Name(X509* cert) {
@@ -661,7 +670,61 @@ SSLX509Name getCertificateSubjectX509Name(X509* cert) {
         entries.push_back(std::move(rdn));
     }
 
-    return SSLX509Name(std::move(entries));
+    SSLX509Name subjectName = SSLX509Name(std::move(entries));
+    uassertStatusOK(subjectName.normalizeStrings());
+    return subjectName;
+}
+
+int verifyDHParameters(const UniqueDHParams& dhparams) {
+    int codes = 0;
+
+    ::DH_check(dhparams.get(), &codes);
+
+    const BIGNUM* p = nullptr;
+    const BIGNUM* g = nullptr;
+
+    DH_get0_pqg(dhparams.get(), &p, nullptr, &g);
+
+    // Many RFC's define DH parameters where 2 is listed as the generator for the group. If p = 11
+    // mod 24, then 2 generates the entire group. However, it becomes trivial for an attacker to
+    // determine the lsb of any shared secret. Instead of leaking this bit, the RFC designers chose
+    // primes which halve the number of possible shared secrets. Since 2 does not generate the
+    // entire group associated with such primes, OpenSSL fails the DH_check with
+    // DH_NOT_SUITABLE_GENERATOR. Since leaking a single bit and halving the number of possible
+    // shared secrets is essentially the same thing, we manually check for it here (p = 23 mod 24)
+    // and strip out the errors as necessary. See Appendix E of RFC 2412.
+    if (BN_is_word(g, DH_GENERATOR_2)) {
+        long residue = BN_mod_word(p, 24);
+        if (residue == 11 || residue == 23) {
+            codes &= ~DH_NOT_SUITABLE_GENERATOR;
+        }
+    }
+    return codes;
+}
+
+UniqueDHParams makeDefaultDHParameters() {
+    UniqueDHParams dhparams(::DH_new());
+
+    if (!dhparams) {
+        return nullptr;
+    }
+
+    UniqueBIGNUM p(::BN_bin2bn(ffdhe3072_p.data(), ffdhe3072_p.size(), nullptr));
+    UniqueBIGNUM g(::BN_bin2bn(&ffdhe3072_g, sizeof(ffdhe3072_g), nullptr));
+
+    if (!p || !g) {
+        return nullptr;
+    }
+
+    if (DH_set0_pqg(dhparams.get(), p.get(), nullptr, g.get()) != 1) {
+        return nullptr;
+    }
+
+    // DH takes over memory management responsibilities after successfully setting these
+    p.release();
+    g.release();
+
+    return dhparams;
 }
 
 SSLConnectionOpenSSL::SSLConnectionOpenSSL(SSL_CTX* context,
@@ -697,8 +760,8 @@ SSLConnectionOpenSSL::~SSLConnectionOpenSSL() {
 }
 
 SSLManagerOpenSSL::SSLManagerOpenSSL(const SSLParams& params, bool isServer)
-    : _serverContext(nullptr, free_ssl_context),
-      _clientContext(nullptr, free_ssl_context),
+    : _serverContext(nullptr),
+      _clientContext(nullptr),
 #if defined(__APPLE__)
       _systemCACertificates(_getSystemCerts()),
 #endif
@@ -738,12 +801,15 @@ SSLManagerOpenSSL::SSLManagerOpenSSL(const SSLParams& params, bool isServer)
             uasserted(16562, "ssl initialization problem");
         }
 
+        SSLX509Name serverSubjectName;
         if (!_parseAndValidateCertificate(params.sslPEMKeyFile,
                                           &_serverPEMPassword,
-                                          &_sslConfiguration.serverSubjectName,
+                                          &serverSubjectName,
                                           &_sslConfiguration.serverCertificateExpirationDate)) {
             uasserted(16942, "ssl initialization problem");
         }
+
+        uassertStatusOK(_sslConfiguration.setServerSubjectName(std::move(serverSubjectName)));
 
         static CertificateExpirationMonitor task =
             CertificateExpirationMonitor(_sslConfiguration.serverCertificateExpirationDate);
@@ -920,7 +986,21 @@ Status SSLManagerOpenSSL::initSSLContext(SSL_CTX* context,
     }
 
     // We always set ECDH mode anyhow, if available.
-    enableECDHE(context);
+    if (enableECDHE(context)) {
+        // If we enable ECDHE successfully, we can also enable DHE without breaking compatibility
+        // with Java 7. Java 7 clients are unable to use DHE with strong parameters, but they will
+        // ignore that we advertise it if we advertise ECDHE first, which it does support.
+
+        // If opensslDiffieHellmanParameters has been specified, we set it above (even if ECDHE is
+        // not enabled). Otherwise, we use a default, (currently) strong DHE parameter.
+        if (params.sslPEMTempDHParam.empty()) {
+            UniqueDHParams dhparams = makeDefaultDHParameters();
+
+            if (!dhparams || SSL_CTX_set_tmp_dh(context, dhparams.get()) != 1) {
+                error() << "Failed to enable DHE";
+            }
+        }
+    }
 
     return Status::OK();
 }
@@ -928,7 +1008,7 @@ Status SSLManagerOpenSSL::initSSLContext(SSL_CTX* context,
 bool SSLManagerOpenSSL::_initSynchronousSSLContext(UniqueSSLContext* contextPtr,
                                                    const SSLParams& params,
                                                    ConnectionDirection direction) {
-    *contextPtr = UniqueSSLContext(SSL_CTX_new(SSLv23_method()), free_ssl_context);
+    *contextPtr = UniqueSSLContext(SSL_CTX_new(SSLv23_method()));
 
     uassertStatusOK(initSSLContext(contextPtr->get(), params, direction));
 
@@ -942,7 +1022,7 @@ bool SSLManagerOpenSSL::_initSynchronousSSLContext(UniqueSSLContext* contextPtr,
 unsigned long long SSLManagerOpenSSL::_convertASN1ToMillis(ASN1_TIME* asn1time) {
     BIO* outBIO = BIO_new(BIO_s_mem());
     int timeError = ASN1_TIME_print(outBIO, asn1time);
-    ON_BLOCK_EXIT(BIO_free, outBIO);
+    ON_BLOCK_EXIT([&] { BIO_free(outBIO); });
 
     if (timeError <= 0) {
         error() << "ASN1_TIME_print failed or wrote no data.";
@@ -985,7 +1065,7 @@ bool SSLManagerOpenSSL::_parseAndValidateCertificate(const std::string& keyFile,
         return false;
     }
 
-    ON_BLOCK_EXIT(BIO_free, inBIO);
+    ON_BLOCK_EXIT([&] { BIO_free(inBIO); });
     if (BIO_read_filename(inBIO, keyFile.c_str()) <= 0) {
         error() << "cannot read key file when setting subject name: " << keyFile << ' '
                 << getSSLErrorMessage(ERR_get_error());
@@ -999,7 +1079,7 @@ bool SSLManagerOpenSSL::_parseAndValidateCertificate(const std::string& keyFile,
                 << getSSLErrorMessage(ERR_get_error());
         return false;
     }
-    ON_BLOCK_EXIT(X509_free, x509);
+    ON_BLOCK_EXIT([&] { X509_free(x509); });
 
     *subjectName = getCertificateSubjectX509Name(x509);
     if (serverCertificateExpirationDate != NULL) {
@@ -1040,7 +1120,7 @@ bool SSLManagerOpenSSL::_setupPEM(SSL_CTX* context,
         error() << "failed to allocate BIO object: " << getSSLErrorMessage(ERR_get_error());
         return false;
     }
-    const auto bioGuard = MakeGuard([&inBio]() { BIO_free(inBio); });
+    const auto bioGuard = makeGuard([&inBio]() { BIO_free(inBio); });
 
     if (BIO_read_filename(inBio, keyFile.c_str()) <= 0) {
         error() << "cannot read PEM key file: " << keyFile << ' '
@@ -1057,7 +1137,7 @@ bool SSLManagerOpenSSL::_setupPEM(SSL_CTX* context,
                 << getSSLErrorMessage(ERR_get_error());
         return false;
     }
-    const auto privateKeyGuard = MakeGuard([&privateKey]() { EVP_PKEY_free(privateKey); });
+    const auto privateKeyGuard = makeGuard([&privateKey]() { EVP_PKEY_free(privateKey); });
 
     if (SSL_CTX_use_PrivateKey(context, privateKey) != 1) {
         error() << "cannot use PEM key file: " << keyFile << ' '
@@ -1124,7 +1204,7 @@ Status importCertStoreToX509_STORE(const wchar_t* storeName,
         return {ErrorCodes::InvalidSSLConfiguration,
                 str::stream() << "error opening system CA store: " << errnoWithDescription()};
     }
-    auto systemStoreGuard = MakeGuard([systemStore]() { CertCloseStore(systemStore, 0); });
+    auto systemStoreGuard = makeGuard([systemStore]() { CertCloseStore(systemStore, 0); });
 
     PCCERT_CONTEXT certCtx = NULL;
     while ((certCtx = CertEnumCertificatesInStore(systemStore, certCtx)) != NULL) {
@@ -1135,7 +1215,7 @@ Status importCertStoreToX509_STORE(const wchar_t* storeName,
                     str::stream() << "Error parsing X509 object from Windows certificate store"
                                   << SSLManagerInterface::getSSLErrorMessage(ERR_get_error())};
         }
-        const auto x509ObjGuard = MakeGuard([&x509Obj]() { X509_free(x509Obj); });
+        const auto x509ObjGuard = makeGuard([&x509Obj]() { X509_free(x509Obj); });
 
         if (X509_STORE_add_cert(verifyStore, x509Obj) != 1) {
             auto status = checkX509_STORE_error();
@@ -1420,7 +1500,7 @@ StatusWith<boost::optional<SSLPeerInfo>> SSLManagerOpenSSL::parseAndValidatePeer
             return Status(ErrorCodes::SSLHandshakeFailed, msg);
         }
     }
-    ON_BLOCK_EXIT(X509_free, peerCert);
+    ON_BLOCK_EXIT([&] { X509_free(peerCert); });
 
     long result = SSL_get_verify_result(conn);
 
@@ -1441,6 +1521,11 @@ StatusWith<boost::optional<SSLPeerInfo>> SSLManagerOpenSSL::parseAndValidatePeer
     // TODO: check optional cipher restriction, using cert.
     auto peerSubject = getCertificateSubjectX509Name(peerCert);
     LOG(2) << "Accepted TLS connection from peer: " << peerSubject;
+
+    // If this is a server and client and server certificate are the same, log a warning.
+    if (remoteHost.empty() && _sslConfiguration.serverSubjectName() == peerSubject) {
+        warning() << "Client connecting with server's own TLS certificate";
+    }
 
     StatusWith<stdx::unordered_set<RoleName>> swPeerCertificateRoles = _parsePeerRoles(peerCert);
     if (!swPeerCertificateRoles.isOK()) {

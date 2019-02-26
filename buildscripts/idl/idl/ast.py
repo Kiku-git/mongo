@@ -67,6 +67,7 @@ class IDLAST(object):
         self.structs = []  # type: List[Struct]
 
         self.server_parameters = []  # type: List[ServerParameter]
+        self.configs = []  # type: List[ConfigOption]
 
 
 class Global(common.SourceLocation):
@@ -81,6 +82,8 @@ class Global(common.SourceLocation):
         """Construct a Global."""
         self.cpp_namespace = None  # type: unicode
         self.cpp_includes = []  # type: List[unicode]
+        self.configs = None  # type: ConfigGlobal
+
         super(Global, self).__init__(file_name, line, column)
 
 
@@ -107,6 +110,19 @@ class Struct(common.SourceLocation):
         super(Struct, self).__init__(file_name, line, column)
 
 
+class Expression(common.SourceLocation):
+    """Literal of C++ expression representation."""
+
+    def __init__(self, file_name, line, column):
+        # type: (unicode, int, int) -> None
+        """Construct an Expression."""
+        self.expr = None  # type: unicode
+        self.validate_constexpr = True  # type: bool
+        self.export = False  # type: bool
+
+        super(Expression, self).__init__(file_name, line, column)
+
+
 class Validator(common.SourceLocation):
     """
     An instance of a validator for a field.
@@ -122,10 +138,10 @@ class Validator(common.SourceLocation):
         """Construct a Validator."""
         # Don't lint gt/lt as bad attribute names.
         # pylint: disable=C0103
-        self.gt = None  # type: Optional[Union[int, float]]
-        self.lt = None  # type: Optional[Union[int, float]]
-        self.gte = None  # type: Optional[Union[int, float]]
-        self.lte = None  # type: Optional[Union[int, float]]
+        self.gt = None  # type: Expression
+        self.lt = None  # type: Expression
+        self.gte = None  # type: Expression
+        self.lte = None  # type: Expression
         self.callback = None  # type: Optional[unicode]
 
         super(Validator, self).__init__(file_name, line, column)
@@ -234,6 +250,34 @@ class Enum(common.SourceLocation):
         super(Enum, self).__init__(file_name, line, column)
 
 
+class Condition(common.SourceLocation):
+    """Condition(s) for a ServerParameter or ConfigOption."""
+
+    def __init__(self, file_name, line, column):
+        # type: (unicode, int, int) -> None
+        """Construct a Condition."""
+        self.expr = None  # type: unicode
+        self.constexpr = None  # type: unicode
+        self.preprocessor = None  # type: unicode
+
+        super(Condition, self).__init__(file_name, line, column)
+
+
+class ServerParameterClass(common.SourceLocation):
+    """ServerParameter as C++ class specialization."""
+
+    def __init__(self, file_name, line, column):
+        # type: (unicode, int, int) -> None
+        """Construct a ServerParameterClass."""
+
+        self.name = None  # type: unicode
+        self.data = None  # type: unicode
+        self.override_ctor = False  # type: bool
+        self.override_set = False  # type: bool
+
+        super(ServerParameterClass, self).__init__(file_name, line, column)
+
+
 class ServerParameter(common.SourceLocation):
     """IDL ServerParameter setting."""
 
@@ -245,18 +289,81 @@ class ServerParameter(common.SourceLocation):
         self.name = None  # type: unicode
         self.set_at = None  # type: unicode
         self.description = None  # type: unicode
+        self.cpp_class = None  # type: ServerParameterClass
         self.cpp_vartype = None  # type: unicode
         self.cpp_varname = None  # type: unicode
+        self.condition = None  # type: Condition
+        self.redact = False  # type: bool
+        self.test_only = False  # type: bool
         self.deprecated_name = []  # type: List[unicode]
+        self.default = None  # type: Expression
 
         # Only valid if cpp_varname is specified.
-        self.default = None  # type: unicode
         self.validator = None  # type: Validator
         self.on_update = None  # type: unicode
 
-        # Required if cpp_varname is NOT specified.
-        self.from_bson = None  # type: unicode
-        self.append_bson = None  # type: unicode
-        self.from_string = None  # type: unicode
-
         super(ServerParameter, self).__init__(file_name, line, column)
+
+
+class GlobalInitializer(common.SourceLocation):
+    """Initializer details for custom registration/storage."""
+
+    def __init__(self, file_name, line, column):
+        # type: (unicode, int, int) -> None
+        """Construct a GlobalInitializer."""
+
+        self.name = None  # type: unicode
+        self.register = None  # type: unicode
+        self.store = None  # type: unicode
+
+        super(GlobalInitializer, self).__init__(file_name, line, column)
+
+
+class ConfigGlobal(common.SourceLocation):
+    """IDL ConfigOption Globals."""
+
+    def __init__(self, file_name, line, column):
+        # type: (unicode, int, int) -> None
+        """Construct a ConfigGlobal."""
+
+        # Other config globals are consumed in bind phase.
+        self.initializer = None  # type: GlobalInitializer
+
+        super(ConfigGlobal, self).__init__(file_name, line, column)
+
+
+class ConfigOption(common.SourceLocation):
+    """IDL ConfigOption setting."""
+
+    # pylint: disable=too-many-instance-attributes
+
+    def __init__(self, file_name, line, column):
+        # type: (unicode, int, int) -> None
+        """Construct a ConfigOption."""
+        self.name = None  # type: unicode
+        self.short_name = None  # type: unicode
+        self.deprecated_name = []  # type: List[unicode]
+        self.deprecated_short_name = []  # type: List[unicode]
+
+        self.description = None  # type: Expression
+        self.section = None  # type: unicode
+        self.arg_vartype = None  # type: unicode
+        self.cpp_vartype = None  # type: unicode
+        self.cpp_varname = None  # type: unicode
+        self.condition = None  # type: Condition
+
+        self.conflicts = []  # type: List[unicode]
+        self.requires = []  # type: List[unicode]
+        self.hidden = False  # type: bool
+        self.redact = False  # type: bool
+        self.default = None  # type: Expression
+        self.implicit = None  # type: Expression
+        self.source = None  # type: unicode
+        self.canonicalize = None  # type: unicode
+
+        self.duplicates_append = False  # type: bool
+        self.positional_start = None  # type: int
+        self.positional_end = None  # type: int
+        self.validator = None  # type: Validator
+
+        super(ConfigOption, self).__init__(file_name, line, column)

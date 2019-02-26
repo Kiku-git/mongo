@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -67,6 +66,8 @@ public:
 protected:
     ServiceContextTest();
     virtual ~ServiceContextTest() = default;
+
+private:
     ThreadClient _threadClient;
 };
 

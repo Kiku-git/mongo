@@ -1,9 +1,3 @@
-/* hasher.cpp
- *
- * Defines a simple hash function class
- */
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -31,6 +25,10 @@
  *    delete this exception statement from your version. If you delete this
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
+ */
+
+/**
+ * Defines a simple hash function class.
  */
 
 #include "mongo/db/hasher.h"
@@ -92,8 +90,8 @@ void recursiveHash(Hasher* h, const BSONElement& e, bool includeFieldName) {
         // if there are no embedded objects (subobjects or arrays),
         // compute the hash, squashing numeric types to 64-bit ints
         if (e.isNumber()) {
-            // Use safeNumberLong, it is well-defined for troublesome doubles.
-            const auto i = endian::nativeToLittle(e.safeNumberLong());
+            // Use safeNumberLongForHash, it is well-defined for troublesome doubles.
+            const auto i = endian::nativeToLittle(e.safeNumberLongForHash());
             h->addData(&i, sizeof(i));
         } else {
             h->addData(e.value(), e.valuesize());

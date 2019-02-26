@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -79,7 +78,8 @@ TEST_F(StorePossibleCursorTest, ReturnsValidCursorResponse) {
                             cursorResponse.toBSON(CursorResponse::ResponseType::InitialResponse),
                             nss,
                             nullptr,  // TaskExecutor
-                            getManager());
+                            getManager(),
+                            PrivilegeVector());
     ASSERT_OK(outgoingCursorResponse.getStatus());
 
     auto parsedOutgoingResponse = CursorResponse::parseFromBSON(outgoingCursorResponse.getValue());
@@ -99,7 +99,8 @@ TEST_F(StorePossibleCursorTest, FailsGracefullyOnBadCursorResponseDocument) {
                                                       fromjson("{ok: 1, cursor: {}}"),
                                                       nss,
                                                       nullptr,  // TaskExecutor
-                                                      getManager());
+                                                      getManager(),
+                                                      PrivilegeVector());
     ASSERT_NOT_OK(outgoingCursorResponse.getStatus());
     ASSERT_EQ(ErrorCodes::TypeMismatch, outgoingCursorResponse.getStatus());
 }
@@ -115,7 +116,8 @@ TEST_F(StorePossibleCursorTest, PassesUpCommandResultIfItDoesNotDescribeACursor)
                                                       notACursorObj,
                                                       nss,
                                                       nullptr,  // TaskExecutor
-                                                      getManager());
+                                                      getManager(),
+                                                      PrivilegeVector());
     ASSERT_OK(outgoingCursorResponse.getStatus());
     ASSERT_BSONOBJ_EQ(notACursorObj, outgoingCursorResponse.getValue());
 }

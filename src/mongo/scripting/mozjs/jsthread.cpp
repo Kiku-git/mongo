@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -234,7 +233,7 @@ JSThreadConfig* getConfig(JSContext* cx, JS::CallArgs args) {
 
 }  // namespace
 
-void JSThreadInfo::finalize(JSFreeOp* fop, JSObject* obj) {
+void JSThreadInfo::finalize(js::FreeOp* fop, JSObject* obj) {
     auto config = static_cast<JSThreadConfig*>(JS_GetPrivate(obj));
 
     if (!config)

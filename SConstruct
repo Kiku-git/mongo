@@ -28,12 +28,13 @@ import mongo.toolchain as mongo_toolchain
 import mongo.generators as mongo_generators
 
 EnsurePythonVersion(2, 7)
-EnsureSConsVersion(2, 5)
+EnsureSConsVersion(3, 0, 4)
 
 from buildscripts import utils
 from buildscripts import moduleconfig
 
 import libdeps
+import psutil
 
 atexit.register(mongo.print_build_failures)
 
@@ -272,7 +273,7 @@ add_option('durableDefaultOn',
 )
 
 add_option('allocator',
-    choices=["auto", "system", "tcmalloc"],
+    choices=["auto", "system", "tcmalloc", "tcmalloc-experimental"],
     default="auto",
     help='allocator to use (use "auto" for best choice for current platform)',
     type='choice',
@@ -353,6 +354,11 @@ add_option('use-system-google-benchmark',
 
 add_option('use-system-zlib',
     help='use system version of zlib library',
+    nargs=0,
+)
+
+add_option('use-system-zstd',
+    help="use system version of Zstandard library",
     nargs=0,
 )
 
@@ -469,8 +475,8 @@ add_option('cache-dir',
 )
 
 add_option("cxx-std",
-    choices=["14", "17"],
-    default="14",
+    choices=["17"],
+    default="17",
     help="Select the C++ langauge standard to build with",
 )
 
@@ -543,9 +549,14 @@ add_option('msvc-debugging-format',
 )
 
 add_option('jlink',
-        help="Limit link concurrency to given value",
-        nargs=1,
-        type=int)
+        help="Limit link concurrency. Takes either an integer to limit to or a"
+        " float between 0 and 1.0 whereby jobs will be multiplied to get the final"
+        " jlink value."
+        "\n\nExample: --jlink=0.75 --jobs 8 will result in a jlink value of 6",
+        const=0.5,
+        default=None,
+        nargs='?',
+        type=float)
 
 try:
     with open("version.json", "r") as version_fp:
@@ -1277,27 +1288,6 @@ if has_option("cache"):
         env.FatalError("Mixing --cache and --gcov doesn't work correctly yet. See SERVER-11084")
     env.CacheDir(str(env.Dir(cacheDir)))
 
-    if get_option("cache") == "nolinked":
-        def noCacheEmitter(target, source, env):
-            for t in target:
-                env.NoCache(t)
-            return target, source
-
-        def addNoCacheEmitter(builder):
-            origEmitter = builder.emitter
-            if SCons.Util.is_Dict(origEmitter):
-                for k,v in origEmitter:
-                    origEmitter[k] = SCons.Builder.ListEmitter([v, noCacheEmitter])
-            elif SCons.Util.is_List(origEmitter):
-                emitter.append(noCacheEmitter)
-            else:
-                builder.emitter = SCons.Builder.ListEmitter([origEmitter, noCacheEmitter])
-
-        addNoCacheEmitter(env['BUILDERS']['Program'])
-        addNoCacheEmitter(env['BUILDERS']['StaticLibrary'])
-        addNoCacheEmitter(env['BUILDERS']['SharedLibrary'])
-        addNoCacheEmitter(env['BUILDERS']['LoadableModule'])
-
 # Normalize the link model. If it is auto, then for now both developer and release builds
 # use the "static" mode. Somday later, we probably want to make the developer build default
 # dynamic, but that will require the hygienic builds project.
@@ -1392,6 +1382,10 @@ if link_model.startswith("dynamic"):
     # If that condition is met, then the graph will be acyclic.
 
     if env.TargetOSIs('darwin'):
+        if link_model.startswith('dynamic'):
+            print("WARNING: Building MongoDB server with dynamic linking " +
+                  "on macOS is not supported. Static linking is recommended.")
+
         if link_model == "dynamic-strict":
             # Darwin is strict by default
             pass
@@ -1602,41 +1596,84 @@ elif env.TargetOSIs('windows'):
     env.Append( CPPDEFINES=[ "_UNICODE" ] )
     env.Append( CPPDEFINES=[ "UNICODE" ] )
 
+    # Temporary fixes to allow compilation with VS2017
+    env.Append(CPPDEFINES=[
+        "_SILENCE_CXX17_ALLOCATOR_VOID_DEPRECATION_WARNING",
+        "_SILENCE_CXX17_OLD_ALLOCATOR_MEMBERS_DEPRECATION_WARNING",
+        "_SILENCE_CXX17_CODECVT_HEADER_DEPRECATION_WARNING",
+    ])
+
     # /EHsc exception handling style for visual studio
     # /W3 warning level
     env.Append(CCFLAGS=["/EHsc","/W3"])
 
-    # some warnings we don't like:
-    # c4355
-    # 'this' : used in base member initializer list
-    #    The this pointer is valid only within nonstatic member functions. It cannot be used in the initializer list for a base class.
-    # c4800
-    # 'type' : forcing value to bool 'true' or 'false' (performance warning)
-    #    This warning is generated when a value that is not bool is assigned or coerced into type bool.
-    # c4267
-    # 'var' : conversion from 'size_t' to 'type', possible loss of data
-    # When compiling with /Wp64, or when compiling on a 64-bit operating system, type is 32 bits but size_t is 64 bits when compiling for 64-bit targets. To fix this warning, use size_t instead of a type.
-    # c4244
-    # 'conversion' conversion from 'type1' to 'type2', possible loss of data
-    #  An integer type is converted to a smaller integer type.
-    # c4290
-    #  C++ exception specification ignored except to indicate a function is not __declspec(nothrow
-    #  A function is declared using exception specification, which Visual C++ accepts but does not
-    #  implement
-    # c4068
-    #  unknown pragma -- added so that we can specify unknown pragmas for other compilers
-    # c4351
-    #  on extremely old versions of MSVC (pre 2k5), default constructing an array member in a
-    #  constructor's initialization list would not zero the array members "in some cases".
-    #  since we don't target MSVC versions that old, this warning is safe to ignore.
-    # c4373
-    #  Older versions of MSVC would fail to make a function in a derived class override a virtual
-    #  function in the parent, when defined inline and at least one of the parameters is made const.
-    #  The behavior is incorrect under the standard.  MSVC is fixed now, and the warning exists
-    #  merely to alert users who may have relied upon the older, non-compliant behavior.  Our code
-    #  should not have any problems with the older behavior, so we can just disable this warning.
-    env.Append( CCFLAGS=["/wd4355", "/wd4800", "/wd4267", "/wd4244",
-                         "/wd4290", "/wd4068", "/wd4351", "/wd4373"] )
+    # Suppress some warnings we don't like, or find necessary to
+    # suppress. Please keep this list alphabetized and commented.
+    env.Append(CCFLAGS=[
+
+        # C4068: unknown pragma. added so that we can specify unknown
+        # pragmas for other compilers.
+        "/wd4068",
+
+        # C4244: 'conversion' conversion from 'type1' to 'type2',
+        # possible loss of data. An integer type is converted to a
+        # smaller integer type.
+        "/wd4244",
+
+        # C4267: 'var' : conversion from 'size_t' to 'type', possible
+        # loss of data. When compiling with /Wp64, or when compiling
+        # on a 64-bit operating system, type is 32 bits but size_t is
+        # 64 bits when compiling for 64-bit targets. To fix this
+        # warning, use size_t instead of a type.
+        "/wd4267",
+
+        # C4290: C++ exception specification ignored except to
+        # indicate a function is not __declspec(nothrow). A function
+        # is declared using exception specification, which Visual C++
+        # accepts but does not implement.
+        "/wd4290",
+
+        # C4351: On extremely old versions of MSVC (pre 2k5), default
+        # constructing an array member in a constructor's
+        # initialization list would not zero the array members "in
+        # some cases". Since we don't target MSVC versions that old,
+        # this warning is safe to ignore.
+        "/wd4351",
+
+        # C4355: 'this' : used in base member initializer list. The
+        # this pointer is valid only within nonstatic member
+        # functions. It cannot be used in the initializer list for a
+        # base class
+        "/wd4355",
+
+        # C4373: Older versions of MSVC would fail to make a function
+        # in a derived class override a virtual function in the
+        # parent, when defined inline and at least one of the
+        # parameters is made const. The behavior is incorrect under
+        # the standard. MSVC is fixed now, and the warning exists
+        # merely to alert users who may have relied upon the older,
+        # non-compliant behavior. Our code should not have any
+        # problems with the older behavior, so we can just disable
+        # this warning.
+        "/wd4373",
+
+        # C4800: 'type' : forcing value to bool 'true' or 'false'
+        # (performance warning). This warning is generated when a
+        # value that is not bool is assigned or coerced into type
+        # bool.
+        "/wd4800",
+
+        # C5041: out-of-line definition for constexpr static data
+        # member is not needed and is deprecated in C++17. We still
+        # have these, but we don't want to fix them up before we roll
+        # over to C++17.
+        "/wd5041",
+    ])
+
+    # mozjs-60 requires the following
+    #  'declaration' : no matching operator delete found; memory will not be freed if
+    #  initialization throws an exception
+    env.Append( CCFLAGS=["/wd4291"] )
 
     # some warnings we should treat as errors:
     # c4013
@@ -1665,7 +1702,7 @@ elif env.TargetOSIs('windows'):
     #env.Append( CCFLAGS=['/Yu"pch.h"'] )
 
     # Don't send error reports in case of internal compiler error
-    env.Append( CCFLAGS= ["/errorReport:none"] ) 
+    env.Append( CCFLAGS= ["/errorReport:none"] )
 
     # Select debugging format. /Zi gives faster links but seem to use more memory
     if get_option('msvc-debugging-format') == "codeview":
@@ -1840,7 +1877,7 @@ if env.TargetOSIs('posix'):
 
     if optBuild and not optBuildForSize:
         env.Append( CCFLAGS=["-O2"] )
-    elif optBuild and optBuildForSize: 
+    elif optBuild and optBuildForSize:
         env.Append( CCFLAGS=["-Os"] )
     else:
         env.Append( CCFLAGS=["-O0"] )
@@ -1914,7 +1951,6 @@ if get_option("system-boost-lib-search-suffixes") is not None:
 
 # discover modules, and load the (python) module for each module's build.py
 mongo_modules = moduleconfig.discover_modules('src/mongo/db/modules', get_option('modules'))
-env['MONGO_MODULES'] = [m.name for m in mongo_modules]
 
 # --- check system ---
 ssl_provider = None
@@ -1933,14 +1969,14 @@ def doConfigure(myenv):
     # bare compilers, and we should re-check at the very end that TryCompile and TryLink still
     # work with the flags we have selected.
     if myenv.ToolchainIs('msvc'):
-        compiler_minimum_string = "Microsoft Visual Studio 2015 Update 3"
+        compiler_minimum_string = "Microsoft Visual Studio 2017 15.9"
         compiler_test_body = textwrap.dedent(
         """
         #if !defined(_MSC_VER)
         #error
         #endif
 
-        #if _MSC_VER < 1900 || (_MSC_VER == 1900 && _MSC_FULL_VER < 190024218)
+        #if _MSC_VER < 1916
         #error %s or newer is required to build MongoDB
         #endif
 
@@ -1949,14 +1985,14 @@ def doConfigure(myenv):
         }
         """ % compiler_minimum_string)
     elif myenv.ToolchainIs('gcc'):
-        compiler_minimum_string = "GCC 5.3.0"
+        compiler_minimum_string = "GCC 8.2"
         compiler_test_body = textwrap.dedent(
         """
         #if !defined(__GNUC__) || defined(__clang__)
         #error
         #endif
 
-        #if (__GNUC__ < 5) || (__GNUC__ == 5 && __GNUC_MINOR__ < 3) || (__GNUC__ == 5 && __GNUC_MINOR__ == 3 && __GNUC_PATCHLEVEL__ < 0)
+        #if (__GNUC__ < 8) || (__GNUC__ == 8 && __GNUC_MINOR__ < 2)
         #error %s or newer is required to build MongoDB
         #endif
 
@@ -1965,7 +2001,7 @@ def doConfigure(myenv):
         }
         """ % compiler_minimum_string)
     elif myenv.ToolchainIs('clang'):
-        compiler_minimum_string = "clang 3.8 (or Apple XCode 8.3.2)"
+        compiler_minimum_string = "clang 7.0 (or Apple XCode 10.0)"
         compiler_test_body = textwrap.dedent(
         """
         #if !defined(__clang__)
@@ -1973,10 +2009,10 @@ def doConfigure(myenv):
         #endif
 
         #if defined(__apple_build_version__)
-        #if __apple_build_version__ < 8020042
+        #if __apple_build_version__ < 10001044
         #error %s or newer is required to build MongoDB
         #endif
-        #elif (__clang_major__ < 3) || (__clang_major__ == 3 && __clang_minor__ < 8)
+        #elif (__clang_major__ < 7) || (__clang_major__ == 7 && __clang_minor__ < 0)
         #error %s or newer is required to build MongoDB
         #endif
 
@@ -2227,10 +2263,6 @@ def doConfigure(myenv):
         # exceptionToStatus(). See https://bugs.llvm.org/show_bug.cgi?id=34804
         AddToCCFLAGSIfSupported(myenv, "-Wno-exceptions")
 
-        # These warnings begin in gcc-8.2 and we should get rid of these disables at some point.
-        AddToCCFLAGSIfSupported(env, '-Wno-format-truncation')
-        AddToCXXFLAGSIfSupported(env, '-Wno-class-memaccess')
-
 
         # Check if we can set "-Wnon-virtual-dtor" when "-Werror" is set. The only time we can't set it is on
         # clang 3.4, where a class with virtual function(s) and a non-virtual destructor throws a warning when
@@ -2358,15 +2390,11 @@ def doConfigure(myenv):
         conf.Finish()
 
     if myenv.ToolchainIs('msvc'):
-        if get_option('cxx-std') == "14":
-            myenv.AppendUnique(CCFLAGS=['/std:c++14'])
-        elif get_option('cxx-std') == "17":
-            myenv.AppendUnique(CCFLAGS=['/std:c++17', '/Zc:__cplusplus'])
+        myenv.AppendUnique(CCFLAGS=['/Zc:__cplusplus', '/permissive-'])
+        if get_option('cxx-std') == "17":
+            myenv.AppendUnique(CCFLAGS=['/std:c++17'])
     else:
-        if get_option('cxx-std') == "14":
-            if not AddToCXXFLAGSIfSupported(myenv, '-std=c++14'):
-                myenv.ConfError('Compiler does not honor -std=c++14')
-        elif get_option('cxx-std') == "17":
+        if get_option('cxx-std') == "17":
             if not AddToCXXFLAGSIfSupported(myenv, '-std=c++17'):
                 myenv.ConfError('Compiler does not honor -std=c++17')
 
@@ -2375,29 +2403,6 @@ def doConfigure(myenv):
 
     if using_system_version_of_cxx_libraries():
         print( 'WARNING: System versions of C++ libraries must be compiled with C++14/17 support' )
-
-    # We appear to have C++14, or at least a flag to enable it. Check that the declared C++
-    # language level is not less than C++14, and that we can at least compile an 'auto'
-    # expression. We don't check the __cplusplus macro when using MSVC because as of our
-    # current required MS compiler version (MSVS 2015 Update 2), they don't set it. If
-    # MSFT ever decides (in MSVS 2017?) to define __cplusplus >= 201402L, remove the exception
-    # here for _MSC_VER
-    def CheckCxx14(context):
-        test_body = """
-        #ifndef _MSC_VER
-        #if __cplusplus < 201402L
-        #error
-        #endif
-        #endif
-        auto DeducedReturnTypesAreACXX14Feature() {
-            return 0;
-        }
-        """
-
-        context.Message('Checking for C++14... ')
-        ret = context.TryCompile(textwrap.dedent(test_body), ".cpp")
-        context.Result(ret)
-        return ret
 
     def CheckCxx17(context):
         test_body = """
@@ -2413,15 +2418,11 @@ def doConfigure(myenv):
         return ret
 
     conf = Configure(myenv, help=False, custom_tests = {
-        'CheckCxx14' : CheckCxx14,
         'CheckCxx17' : CheckCxx17,
     })
 
-    if not conf.CheckCxx14():
-        myenv.ConfError('C++14 support is required to build MongoDB')
-
     if get_option('cxx-std') == "17" and not conf.CheckCxx17():
-        myenv.ConfError('C++17 was requested, but the compiler appears not to offer it')
+        myenv.ConfError('C++17 support is required to build MongoDB')
 
     conf.Finish()
 
@@ -2589,17 +2590,17 @@ def doConfigure(myenv):
             # GCC's implementation of ASAN depends on libdl.
             env.Append(LIBS=['dl'])
 
-        if env['MONGO_ALLOCATOR'] == 'tcmalloc':
-            # There are multiply defined symbols between the sanitizer and
-            # our vendorized tcmalloc.
-            env.FatalError("Cannot use --sanitize with tcmalloc")
-
         sanitizer_list = get_option('sanitize').split(',')
 
         using_lsan = 'leak' in sanitizer_list
         using_asan = 'address' in sanitizer_list or using_lsan
         using_tsan = 'thread' in sanitizer_list
         using_ubsan = 'undefined' in sanitizer_list
+
+        if env['MONGO_ALLOCATOR'] in ['tcmalloc', 'tcmalloc-experimental'] and (using_lsan or using_asan):
+            # There are multiply defined symbols between the sanitizer and
+            # our vendorized tcmalloc.
+            env.FatalError("Cannot use --sanitize=leak or --sanitize=address with tcmalloc")
 
         # If the user asked for leak sanitizer, turn on the detect_leaks
         # ASAN_OPTION. If they asked for address sanitizer as well, drop
@@ -2679,11 +2680,17 @@ def doConfigure(myenv):
             myenv.FatalError("Using the leak sanitizer requires a valid symbolizer")
 
         if using_asan:
-            myenv.AppendUnique(CCFLAGS=['-DADDRESS_SANITIZER'])
+            # Unfortunately, abseil requires that we make these macros
+            # (this, and THREAD_ and UNDEFINED_BEHAVIOR_ below) set,
+            # because apparently it is too hard to query the running
+            # compiler. We do this unconditionally because abseil is
+            # basically pervasive via the 'base' library.
+            myenv.AppendUnique(CPPDEFINES=['ADDRESS_SANITIZER'])
 
         if using_tsan:
             tsan_options += "suppressions=\"%s\" " % myenv.File("#etc/tsan.suppressions").abspath
             myenv['ENV']['TSAN_OPTIONS'] = tsan_options
+            myenv.AppendUnique(CPPDEFINES=['THREAD_SANITIZER'])
 
         if using_ubsan:
             # By default, undefined behavior sanitizer doesn't stop on
@@ -2691,6 +2698,7 @@ def doConfigure(myenv):
             # have renamed the flag.
             if not AddToCCFLAGSIfSupported(myenv, "-fno-sanitize-recover"):
                 AddToCCFLAGSIfSupported(myenv, "-fno-sanitize-recover=undefined")
+            myenv.AppendUnique(CPPDEFINES=['UNDEFINED_BEHAVIOR_SANITIZER'])
 
     if myenv.ToolchainIs('msvc') and optBuild:
         # http://blogs.msdn.com/b/vcblog/archive/2013/09/11/introducing-gw-compiler-switch.aspx
@@ -3095,7 +3103,7 @@ def doConfigure(myenv):
 
         conf.AddTest("CheckOpenSSL_EC_DH", CheckOpenSSL_EC_DH)
         if conf.CheckOpenSSL_EC_DH():
-            conf.env.SetConfigHeaderDefine('MONGO_CONFIG_HAS_SSL_SET_ECDH_AUTO')
+            conf.env.SetConfigHeaderDefine('MONGO_CONFIG_HAVE_SSL_SET_ECDH_AUTO')
 
         conf.AddTest("CheckOpenSSL_EC_KEY_new", CheckOpenSSL_EC_KEY_new)
         if conf.CheckOpenSSL_EC_KEY_new():
@@ -3184,32 +3192,6 @@ def doConfigure(myenv):
 
         return False
 
-    # Resolve --enable-free-mon
-    if free_monitoring == "auto":
-        if "enterprise" not in env['MONGO_MODULES']:
-            free_monitoring = "on"
-        else:
-            free_monitoring = "off"
-
-    if free_monitoring == "on":
-        checkHTTPLib(required=True)
-
-    # Resolve --enable-http-client
-    if http_client == "auto":
-        if checkHTTPLib():
-            http_client = "on"
-        else:
-            print("Disabling http-client as libcurl was not found")
-            http_client = "off"
-    elif http_client == "on":
-        checkHTTPLib(required=True)
-
-    # Sanity check.
-    # We know that http_client was explicitly disabled here,
-    # because the free_monitoring check would have failed if no http lib were available.
-    if (free_monitoring == "on") and (http_client == "off"):
-        env.ConfError("FreeMonitoring requires an HTTP client which has been explicitly disabled")
-
     if use_system_version_of_library("pcre"):
         conf.FindSysLibDep("pcre", ["pcre"])
         conf.FindSysLibDep("pcrecpp", ["pcrecpp"])
@@ -3221,6 +3203,9 @@ def doConfigure(myenv):
 
     if use_system_version_of_library("zlib"):
         conf.FindSysLibDep("zlib", ["zdll" if conf.env.TargetOSIs('windows') else "z"])
+
+    if use_system_version_of_library("zstd"):
+        conf.FindSysLibDep("zstd", ["libzstd" if conf.env.TargetOSIs('windows') else "zstd"])
 
     if use_system_version_of_library("stemmer"):
         conf.FindSysLibDep("stemmer", ["stemmer"])
@@ -3256,6 +3241,7 @@ def doConfigure(myenv):
         CPPDEFINES=[
             "BOOST_SYSTEM_NO_DEPRECATED",
             "BOOST_MATH_NO_LONG_DOUBLE_MATH_FUNCTIONS",
+            "ABSL_FORCE_ALIGNED_ACCESS",
         ]
     )
 
@@ -3316,7 +3302,7 @@ def doConfigure(myenv):
     if myenv['MONGO_ALLOCATOR'] == 'tcmalloc':
         if use_system_version_of_library('tcmalloc'):
             conf.FindSysLibDep("tcmalloc", ["tcmalloc"])
-    elif myenv['MONGO_ALLOCATOR'] == 'system':
+    elif myenv['MONGO_ALLOCATOR'] in ['system', 'tcmalloc-experimental']:
         pass
     else:
         myenv.FatalError("Invalid --allocator parameter: $MONGO_ALLOCATOR")
@@ -3421,7 +3407,7 @@ def doConfigure(myenv):
         if conf.CheckExtendedAlignment(size):
             conf.env.SetConfigHeaderDefine("MONGO_CONFIG_MAX_EXTENDED_ALIGNMENT", size)
             break
- 
+
     def CheckMongoCMinVersion(context):
         compile_test_body = textwrap.dedent("""
         #include <mongoc/mongoc.h>
@@ -3437,7 +3423,7 @@ def doConfigure(myenv):
         return result
 
     conf.AddTest('CheckMongoCMinVersion', CheckMongoCMinVersion)
-    
+
     if env.TargetOSIs('darwin'):
         def CheckMongoCFramework(context):
             context.Message("Checking for mongoc_get_major_version() in darwin framework mongoc...")
@@ -3457,7 +3443,7 @@ def doConfigure(myenv):
             context.Result(result)
             context.env['FRAMEWORKS'] = lastFRAMEWORKS
             return result
-        
+
         conf.AddTest('CheckMongoCFramework', CheckMongoCFramework)
 
     mongoc_mode = get_option('use-system-mongo-c')
@@ -3469,7 +3455,7 @@ def doConfigure(myenv):
                 "C",
                 "mongoc_get_major_version();",
                 autoadd=False ):
-            conf.env['MONGO_HAVE_LIBMONGOC'] = "library" 
+            conf.env['MONGO_HAVE_LIBMONGOC'] = "library"
         if not conf.env['MONGO_HAVE_LIBMONGOC'] and env.TargetOSIs('darwin') and conf.CheckMongoCFramework():
             conf.env['MONGO_HAVE_LIBMONGOC'] = "framework"
         if not conf.env['MONGO_HAVE_LIBMONGOC'] and mongoc_mode == 'on':
@@ -3479,6 +3465,32 @@ def doConfigure(myenv):
 
     # ask each module to configure itself and the build environment.
     moduleconfig.configure_modules(mongo_modules, conf)
+
+    # Resolve --enable-free-mon
+    if free_monitoring == "auto":
+        if 'enterprise' not in env['MONGO_MODULES']:
+            free_monitoring = "on"
+        else:
+            free_monitoring = "off"
+
+    if free_monitoring == "on":
+        checkHTTPLib(required=True)
+
+    # Resolve --enable-http-client
+    if http_client == "auto":
+        if checkHTTPLib():
+            http_client = "on"
+        else:
+            print("Disabling http-client as libcurl was not found")
+            http_client = "off"
+    elif http_client == "on":
+        checkHTTPLib(required=True)
+
+    # Sanity check.
+    # We know that http_client was explicitly disabled here,
+    # because the free_monitoring check would have failed if no http lib were available.
+    if (free_monitoring == "on") and (http_client == "off"):
+        env.ConfError("FreeMonitoring requires an HTTP client which has been explicitly disabled")
 
     if env['TARGET_ARCH'] == "ppc64le":
         # This checks for an altivec optimization we use in full text search.
@@ -3736,13 +3748,35 @@ vcxprojFile = env.Command(
     r"$PYTHON buildscripts\make_vcxproj.py mongodb")
 vcxproj = env.Alias("vcxproj", vcxprojFile)
 
-env.Alias("distsrc-tar", env.DistSrc("mongodb-src-${MONGO_VERSION}.tar"))
-env.Alias("distsrc-tgz", env.GZip(
+distSrc = env.DistSrc("mongodb-src-${MONGO_VERSION}.tar")
+env.NoCache(distSrc)
+env.Alias("distsrc-tar", distSrc)
+
+distSrcGzip = env.GZip(
     target="mongodb-src-${MONGO_VERSION}.tgz",
-    source=["mongodb-src-${MONGO_VERSION}.tar"])
-)
-env.Alias("distsrc-zip", env.DistSrc("mongodb-src-${MONGO_VERSION}.zip"))
+    source=[distSrc])
+env.NoCache(distSrcGzip)
+env.Alias("distsrc-tgz", distSrcGzip)
+
+distSrcZip = env.DistSrc("mongodb-src-${MONGO_VERSION}.zip")
+env.NoCache(distSrcZip)
+env.Alias("distsrc-zip", distSrcZip)
+
 env.Alias("distsrc", "distsrc-tgz")
+
+# Defaults for SCons provided flags. SetOption only sets the option to our value
+# if the user did not provide it. So for any flag here if it's explicitly passed
+# the values below set with SetOption will be overwritten.
+#
+# Default j to the number of CPUs on the system. Note: in containers this
+# reports the number of CPUs for the host system. Perhaps in a future version of
+# psutil it will instead report the correct number when in a container.
+#
+# psutil.cpu_count returns None when it can't determine the number. This always
+# fails on BSD's for example.
+if psutil.cpu_count() is not None:
+    env.SetOption('num_jobs', psutil.cpu_count())
+
 
 # Do this as close to last as possible before reading SConscripts, so
 # that any tools that may have injected other things via emitters are included
@@ -3751,9 +3785,16 @@ env.Alias("distsrc", "distsrc-tgz")
 # TODO: Move this to a tool.
 if has_option('jlink'):
     jlink = get_option('jlink')
-    if jlink < 1:
-        env.FatalError("The argument to jlink must be a positive integer")
+    if jlink <= 0:
+        env.FatalError("The argument to jlink must be a positive integer or float")
+    elif jlink < 1 and jlink > 0:
+        jlink = env.GetOption('num_jobs') * jlink
+        jlink = round(jlink)
+        if jlink < 1.0:
+            print("Computed jlink value was less than 1; Defaulting to 1")
+            jlink = 1.0
 
+    jlink = int(jlink)
     target_builders = ['Program', 'SharedLibrary', 'LoadableModule']
 
     # A bound map of stream (as in stream of work) name to side-effect
@@ -3780,6 +3821,34 @@ if has_option('jlink'):
         new_emitter = SCons.Builder.ListEmitter([base_emitter, jlink_emitter])
         builder.emitter = new_emitter
 
+# Keep this late in the game so that we can investigate attributes set by all the tools that have run.
+if has_option("cache"):
+    if get_option("cache") == "nolinked":
+        def noCacheEmitter(target, source, env):
+            for t in target:
+                try:
+                    if getattr(t.attributes, 'thin_archive', False):
+                        continue
+                except(AttributeError):
+                    pass
+                env.NoCache(t)
+            return target, source
+
+        def addNoCacheEmitter(builder):
+            origEmitter = builder.emitter
+            if SCons.Util.is_Dict(origEmitter):
+                for k,v in origEmitter:
+                    origEmitter[k] = SCons.Builder.ListEmitter([v, noCacheEmitter])
+            elif SCons.Util.is_List(origEmitter):
+                origEmitter.append(noCacheEmitter)
+            else:
+                builder.emitter = SCons.Builder.ListEmitter([origEmitter, noCacheEmitter])
+
+        addNoCacheEmitter(env['BUILDERS']['Program'])
+        addNoCacheEmitter(env['BUILDERS']['StaticLibrary'])
+        addNoCacheEmitter(env['BUILDERS']['SharedLibrary'])
+        addNoCacheEmitter(env['BUILDERS']['LoadableModule'])
+
 env.SConscript(
     dirs=[
         'src',
@@ -3791,7 +3860,12 @@ env.SConscript(
     variant_dir='$BUILD_DIR',
 )
 
-all = env.Alias('all', ['core', 'tools', 'dbtest', 'unittests', 'integration_tests', 'benchmarks'])
+allTargets = ['core', 'tools', 'unittests', 'integration_tests', 'benchmarks']
+
+if not has_option('noshell') and usemozjs:
+    allTargets.extend(['dbtest'])
+
+env.Alias('all', allTargets)
 
 # run the Dagger tool if it's installed
 if should_dagger:

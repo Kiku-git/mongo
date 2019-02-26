@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -311,8 +310,9 @@ public:
                                         stdx::unique_lock<stdx::mutex>& m,
                                         Milliseconds ms,
                                         Pred pred) {
+        const auto deadline = getExpirationDateForWaitForValue(ms);
         while (!pred()) {
-            if (stdx::cv_status::timeout == waitForConditionOrInterruptFor(cv, m, ms)) {
+            if (stdx::cv_status::timeout == waitForConditionOrInterruptUntil(cv, m, deadline)) {
                 return pred();
             }
         }

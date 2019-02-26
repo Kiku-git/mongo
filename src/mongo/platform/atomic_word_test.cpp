@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -65,11 +64,23 @@ void testAtomicWordBasicOperations() {
     ASSERT_EQUALS(WordType(0), w.load());
 }
 
-TEST(AtomicWordTests, BasicOperationsUnsigned32Bit) {
-    typedef AtomicUInt32::WordType WordType;
-    testAtomicWordBasicOperations<AtomicUInt32>();
+enum TestEnum { E0, E1, E2, E3 };
 
-    AtomicUInt32 w(0xdeadbeef);
+TEST(AtomicWordTests, BasicOperationsEnum) {
+    MONGO_STATIC_ASSERT(sizeof(AtomicWord<TestEnum>) == sizeof(TestEnum));
+    AtomicWord<TestEnum> w;
+    ASSERT_EQUALS(E0, w.load());
+    ASSERT_EQUALS(E0, w.compareAndSwap(E0, E1));
+    ASSERT_EQUALS(E1, w.load());
+    ASSERT_EQUALS(E1, w.compareAndSwap(E0, E2));
+    ASSERT_EQUALS(E1, w.load());
+}
+
+TEST(AtomicWordTests, BasicOperationsUnsigned32Bit) {
+    typedef unsigned WordType;
+    testAtomicWordBasicOperations<AtomicWord<unsigned>>();
+
+    AtomicWord<unsigned> w(0xdeadbeef);
     ASSERT_EQUALS(WordType(0xdeadbeef), w.compareAndSwap(0, 1));
     ASSERT_EQUALS(WordType(0xdeadbeef), w.compareAndSwap(0xdeadbeef, 0xcafe1234));
     ASSERT_EQUALS(WordType(0xcafe1234), w.fetchAndAdd(0xf000));
@@ -78,10 +89,10 @@ TEST(AtomicWordTests, BasicOperationsUnsigned32Bit) {
 }
 
 TEST(AtomicWordTests, BasicOperationsUnsigned64Bit) {
-    typedef AtomicUInt64::WordType WordType;
-    testAtomicWordBasicOperations<AtomicUInt64>();
+    typedef unsigned long long WordType;
+    testAtomicWordBasicOperations<AtomicWord<unsigned long long>>();
 
-    AtomicUInt64 w(0xdeadbeefcafe1234ULL);
+    AtomicWord<unsigned long long> w(0xdeadbeefcafe1234ULL);
     ASSERT_EQUALS(WordType(0xdeadbeefcafe1234ULL), w.compareAndSwap(0, 1));
     ASSERT_EQUALS(WordType(0xdeadbeefcafe1234ULL),
                   w.compareAndSwap(0xdeadbeefcafe1234ULL, 0xfedcba9876543210ULL));
@@ -91,10 +102,10 @@ TEST(AtomicWordTests, BasicOperationsUnsigned64Bit) {
 }
 
 TEST(AtomicWordTests, BasicOperationsSigned32Bit) {
-    typedef AtomicInt32::WordType WordType;
-    testAtomicWordBasicOperations<AtomicInt32>();
+    typedef int WordType;
+    testAtomicWordBasicOperations<AtomicWord<int>>();
 
-    AtomicInt32 w(0xdeadbeef);
+    AtomicWord<int> w(0xdeadbeef);
     ASSERT_EQUALS(WordType(0xdeadbeef), w.compareAndSwap(0, 1));
     ASSERT_EQUALS(WordType(0xdeadbeef), w.compareAndSwap(0xdeadbeef, 0xcafe1234));
     ASSERT_EQUALS(WordType(0xcafe1234), w.fetchAndAdd(0xf000));
@@ -103,10 +114,10 @@ TEST(AtomicWordTests, BasicOperationsSigned32Bit) {
 }
 
 TEST(AtomicWordTests, BasicOperationsSigned64Bit) {
-    typedef AtomicInt64::WordType WordType;
-    testAtomicWordBasicOperations<AtomicInt64>();
+    typedef long long WordType;
+    testAtomicWordBasicOperations<AtomicWord<long long>>();
 
-    AtomicInt64 w(0xdeadbeefcafe1234ULL);
+    AtomicWord<long long> w(0xdeadbeefcafe1234ULL);
     ASSERT_EQUALS(WordType(0xdeadbeefcafe1234LL), w.compareAndSwap(0, 1));
     ASSERT_EQUALS(WordType(0xdeadbeefcafe1234LL),
                   w.compareAndSwap(0xdeadbeefcafe1234LL, 0xfedcba9876543210LL));
@@ -159,32 +170,6 @@ struct Chars {
 
 std::ostream& operator<<(std::ostream& os, const Chars& chars) {
     return (os << chars._storage.data());
-}
-
-TEST(AtomicWordTests, BasicOperationsComplex) {
-    using WordType = Chars;
-
-    AtomicWord<WordType> checkZero(AtomicWord<WordType>::ZeroInitTag{});
-    ASSERT_EQUALS(WordType(""), checkZero.load());
-
-    AtomicWord<WordType> w;
-
-    ASSERT_EQUALS(WordType(), w.load());
-
-    w.store("b");
-    ASSERT_EQUALS(WordType("b"), w.load());
-
-    ASSERT_EQUALS(WordType("b"), w.swap("c"));
-    ASSERT_EQUALS(WordType("c"), w.load());
-
-    ASSERT_EQUALS(WordType("c"), w.compareAndSwap("a", "b"));
-    ASSERT_EQUALS(WordType("c"), w.load());
-    ASSERT_EQUALS(WordType("c"), w.compareAndSwap("c", "b"));
-    ASSERT_EQUALS(WordType("b"), w.load());
-
-    w.store("foo");
-    ASSERT_EQUALS(WordType("foo"), w.compareAndSwap("foo", "bar"));
-    ASSERT_EQUALS(WordType("bar"), w.load());
 }
 
 template <typename T>

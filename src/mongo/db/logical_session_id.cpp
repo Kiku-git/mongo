@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -34,10 +33,6 @@
 #include "mongo/db/server_parameters.h"
 
 namespace mongo {
-
-MONGO_EXPORT_STARTUP_SERVER_PARAMETER(localLogicalSessionTimeoutMinutes,
-                                      int,
-                                      kLogicalSessionDefaultTimeout.count());
 
 LogicalSessionId makeLogicalSessionIdForTest() {
     LogicalSessionId lsid;

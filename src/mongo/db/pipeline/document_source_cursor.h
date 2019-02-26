@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -70,6 +69,10 @@ public:
         return constraints;
     }
 
+    boost::optional<MergingLogic> mergingLogic() final {
+        return boost::none;
+    }
+
     void detachFromOperationContext() final;
 
     void reattachToOperationContext(OperationContext* opCtx) final;
@@ -81,7 +84,8 @@ public:
     static boost::intrusive_ptr<DocumentSourceCursor> create(
         Collection* collection,
         std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> exec,
-        const boost::intrusive_ptr<ExpressionContext>& pExpCtx);
+        const boost::intrusive_ptr<ExpressionContext>& pExpCtx,
+        bool trackOplogTimestamp = false);
 
     /*
       Record the query that was specified for the cursor this wraps, if
@@ -140,10 +144,7 @@ public:
     }
 
     Timestamp getLatestOplogTimestamp() const {
-        if (_exec) {
-            return _exec->getLatestOplogTimestamp();
-        }
-        return Timestamp();
+        return _latestOplogTimestamp;
     }
 
     const std::string& getPlanSummaryStr() const {
@@ -157,7 +158,8 @@ public:
 protected:
     DocumentSourceCursor(Collection* collection,
                          std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> exec,
-                         const boost::intrusive_ptr<ExpressionContext>& pExpCtx);
+                         const boost::intrusive_ptr<ExpressionContext>& pExpCtx,
+                         bool trackOplogTimestamp = false);
 
     ~DocumentSourceCursor();
 
@@ -189,17 +191,18 @@ private:
     void cleanupExecutor();
 
     /**
-     * Destroys and de-registers '_exec'. '_exec' must be non-null.
-     */
-    void cleanupExecutor(const AutoGetCollectionForRead& readLock);
-
-    /**
      * Reads a batch of data from '_exec'. Subclasses can specify custom behavior to be performed on
      * each document by overloading transformBSONObjToDocument().
      */
     void loadBatch();
 
     void recordPlanSummaryStats();
+
+    /**
+     * If we are tailing the oplog, this method updates the cached timestamp to that of the latest
+     * document returned, or the latest timestamp observed in the oplog if we have no more results.
+     */
+    void _updateOplogTimestamp();
 
     // Batches results returned from the underlying PlanExecutor.
     std::deque<Document> _currentBatch;
@@ -230,6 +233,13 @@ private:
     // stage is a MultiPlanStage. When the query is executed (with exec->executePlan()), it will
     // wipe out its own copy of the winning plan's statistics, so they need to be saved here.
     std::unique_ptr<PlanStageStats> _winningPlanTrialStats;
+
+    // True if we are tracking the latest observed oplog timestamp, false otherwise.
+    bool _trackOplogTS = false;
+
+    // If we are tailing the oplog and tracking the latest observed oplog time, this is the latest
+    // timestamp seen in the collection. Otherwise, this is a null timestamp.
+    Timestamp _latestOplogTimestamp;
 };
 
 }  // namespace mongo

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -82,7 +81,7 @@ PlanStage::StageState CountStage::doWork(WorkingSetID* out) {
     if (PlanStage::IS_EOF == state) {
         _commonStats.isEOF = true;
         return PlanStage::IS_EOF;
-    } else if (PlanStage::FAILURE == state || PlanStage::DEAD == state) {
+    } else if (PlanStage::FAILURE == state) {
         // The stage which produces a failure is responsible for allocating a working set member
         // with error details.
         invariant(WorkingSet::INVALID_ID != id);

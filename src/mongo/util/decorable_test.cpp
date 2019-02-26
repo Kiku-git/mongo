@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -137,9 +136,6 @@ TEST(DecorableTest, SimpleDecoration) {
     ASSERT_EQ(4, numDestructedAs);
 }
 
-#ifndef __s390x__
-// TODO(SERVER-34872) Re-enable this test, when we know that s390x will have correct exception
-// unwind handling.
 TEST(DecorableTest, ThrowingConstructor) {
     numConstructedAs = 0;
     numDestructedAs = 0;
@@ -157,7 +153,6 @@ TEST(DecorableTest, ThrowingConstructor) {
     ASSERT_EQ(1, numConstructedAs);
     ASSERT_EQ(1, numDestructedAs);
 }
-#endif
 
 TEST(DecorableTest, Alignment) {
     DecorationRegistry<MyDecorable> registry;

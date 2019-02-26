@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -49,8 +48,6 @@
 
 namespace mongo {
 
-MONGO_EXPORT_SERVER_PARAMETER(AsyncRequestsSenderUseBaton, bool, true);
-
 namespace {
 
 // Maximum number of retries for network and replication notMaster errors (per host).
@@ -66,7 +63,6 @@ AsyncRequestsSender::AsyncRequestsSender(OperationContext* opCtx,
                                          Shard::RetryPolicy retryPolicy)
     : _opCtx(opCtx),
       _executor(executor),
-      _baton(opCtx),
       _db(dbName.toString()),
       _readPreference(readPreference),
       _retryPolicy(retryPolicy) {
@@ -85,9 +81,16 @@ AsyncRequestsSender::AsyncRequestsSender(OperationContext* opCtx,
 AsyncRequestsSender::~AsyncRequestsSender() {
     _cancelPendingRequests();
 
-    // Wait on remaining callbacks to run.
-    while (!done()) {
-        next();
+    try {
+        // Wait on remaining callbacks to run.
+        while (!done()) {
+            next();
+        }
+    } catch (const ExceptionFor<ErrorCodes::InterruptedAtShutdown>&) {
+        // Ignore interrupted at shutdown.  No need to cleanup if we're going into process-wide
+        // shutdown.
+        //
+        // TODO: Figure out how to do actual NonInterruptibility in SERVER-39427
     }
 }
 
@@ -182,6 +185,10 @@ void AsyncRequestsSender::_scheduleRequests() {
                 status = getStatusFromCommandResult(remote.swResponse->getValue().data);
             }
 
+            if (status.isOK()) {
+                status = getWriteConcernStatusFromCommandResult(remote.swResponse->getValue().data);
+            }
+
             if (!status.isOK()) {
                 // There was an error with either the response or the command.
                 auto shard = remote.getShard();
@@ -240,7 +247,7 @@ Status AsyncRequestsSender::_scheduleRequest(size_t remoteIndex) {
             const executor::TaskExecutor::RemoteCommandCallbackArgs& cbData) {
             producer.push(Job{cbData, remoteIndex});
         },
-        _baton);
+        _opCtx->getBaton());
     if (!callbackStatus.isOK()) {
         return callbackStatus.getStatus();
     }
@@ -299,9 +306,7 @@ Status AsyncRequestsSender::RemoteData::resolveShardIdToHostAndPort(
                       str::stream() << "Could not find shard " << shardId);
     }
 
-    auto findHostStatus =
-        shard->getTargeter()->findHostWithMaxWait(readPref, Seconds{20}).getNoThrow(ars->_opCtx);
-
+    auto findHostStatus = shard->getTargeter()->findHost(ars->_opCtx, readPref);
     if (findHostStatus.isOK())
         shardHostAndPort = std::move(findHostStatus.getValue());
 
@@ -311,19 +316,6 @@ Status AsyncRequestsSender::RemoteData::resolveShardIdToHostAndPort(
 std::shared_ptr<Shard> AsyncRequestsSender::RemoteData::getShard() {
     // TODO: Pass down an OperationContext* to use here.
     return Grid::get(getGlobalServiceContext())->shardRegistry()->getShardNoReload(shardId);
-}
-
-AsyncRequestsSender::BatonDetacher::BatonDetacher(OperationContext* opCtx)
-    : _baton(AsyncRequestsSenderUseBaton.load()
-                 ? (opCtx->getServiceContext()->getTransportLayer()
-                        ? opCtx->getServiceContext()->getTransportLayer()->makeBaton(opCtx)
-                        : nullptr)
-                 : nullptr) {}
-
-AsyncRequestsSender::BatonDetacher::~BatonDetacher() {
-    if (_baton) {
-        _baton->detach();
-    }
 }
 
 }  // namespace mongo

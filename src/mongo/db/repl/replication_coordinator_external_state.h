@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -174,6 +173,11 @@ public:
      * Sets the global opTime to be 'newTime'.
      */
     virtual void setGlobalTimestamp(ServiceContext* service, const Timestamp& newTime) = 0;
+
+    /**
+     * Gets the global opTime timestamp, i.e. the latest cluster time.
+     */
+    virtual Timestamp getGlobalTimestamp(ServiceContext* service) = 0;
 
     /**
      * Checks if the oplog exists.

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -1220,6 +1219,17 @@ TEST(CollatorFactoryICUTest, TraditionalSpanishAliasNotSupported) {
                       .makeFromBSON(BSON("locale"
                                          << "es__TRADITIONAL"))
                       .getStatus());
+}
+
+TEST(CollatorFactoryICUTest, InvalidIdPrefixedLocaleFailsGracefully) {
+    CollatorFactoryICU factory;
+    auto collator = factory.makeFromBSON(BSON("locale"
+                                              << "x_test"));
+    ASSERT_NOT_OK(collator.getStatus());
+
+    collator = factory.makeFromBSON(BSON("locale"
+                                         << "I-test"));
+    ASSERT_NOT_OK(collator.getStatus());
 }
 
 }  // namespace

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -59,10 +58,10 @@ bool InternalSchemaUniqueItemsMatchExpression::equivalent(const MatchExpression*
     return path() == other->path();
 }
 
-void InternalSchemaUniqueItemsMatchExpression::serialize(BSONObjBuilder* builder) const {
-    BSONObjBuilder subobj(builder->subobjStart(path()));
-    subobj.append(kName, true);
-    subobj.doneFast();
+BSONObj InternalSchemaUniqueItemsMatchExpression::getSerializedRightHandSide() const {
+    BSONObjBuilder bob;
+    bob.append(kName, true);
+    return bob.obj();
 }
 
 std::unique_ptr<MatchExpression> InternalSchemaUniqueItemsMatchExpression::shallowClone() const {

@@ -1,6 +1,3 @@
-// biggie_sorted_impl.h
-
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -41,6 +38,7 @@ namespace biggie {
 class SortedDataBuilderInterface : public ::mongo::SortedDataBuilderInterface {
 public:
     SortedDataBuilderInterface(OperationContext* opCtx,
+                               bool unique,
                                bool dupsAllowed,
                                Ordering order,
                                const std::string& prefix,
@@ -53,6 +51,7 @@ public:
 
 private:
     OperationContext* _opCtx;
+    bool _unique;
     bool _dupsAllowed;
     // Order of the keys.
     Ordering _order;
@@ -76,6 +75,7 @@ public:
     // Truncate is not required at the time of writing but will be when the truncate command is
     // created
     Status truncate(OperationContext* opCtx);
+    SortedDataInterface(OperationContext* opCtx, StringData ident, const IndexDescriptor* desc);
     SortedDataInterface(const Ordering& ordering, bool isUnique, StringData ident);
     virtual SortedDataBuilderInterface* getBulkBuilder(OperationContext* opCtx,
                                                        bool dupsAllowed) override;
@@ -87,9 +87,7 @@ public:
                          const BSONObj& key,
                          const RecordId& loc,
                          bool dupsAllowed) override;
-    virtual Status dupKeyCheck(OperationContext* opCtx,
-                               const BSONObj& key,
-                               const RecordId& loc) override;
+    virtual Status dupKeyCheck(OperationContext* opCtx, const BSONObj& key) override;
     virtual void fullValidate(OperationContext* opCtx,
                               long long* numKeysOut,
                               ValidateResults* fullResults) const override;
@@ -173,6 +171,18 @@ public:
     };
 
 private:
+    /**
+     * Returns false only when the index is partial and the IndexKeyEntry's record id does not match
+     * the provided rid from the given key.
+     *
+     * Returns true in all other cases.
+     */
+    bool ifPartialCheckRecordIdEquals(OperationContext* opCtx,
+                                      const std::string key,
+                                      const RecordId rid) const;
+
+    bool keyExists(OperationContext* opCtx, const BSONObj& key);
+
     const Ordering _order;
     // These two are the same as before.
     std::string _prefix;
@@ -186,6 +196,8 @@ private:
     std::string _KSForIdentEnd;
     // This stores whether or not the end position is inclusive.
     bool _isUnique;
+    // Whether or not the index is partial
+    bool _isPartial;
 };
 }  // namespace biggie
 }  // namespace mongo

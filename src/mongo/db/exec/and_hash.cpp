@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -141,7 +140,7 @@ PlanStage::StageState AndHashStage::doWork(WorkingSetID* out) {
                     // yield.
                     _ws->get(_lookAheadResults[i])->makeObjOwnedIfNeeded();
                     break;  // Stop looking at this child.
-                } else if (PlanStage::FAILURE == childStatus || PlanStage::DEAD == childStatus) {
+                } else if (PlanStage::FAILURE == childStatus) {
                     // The stage which produces a failure is responsible for allocating a working
                     // set member with error details.
                     invariant(WorkingSet::INVALID_ID != _lookAheadResults[i]);
@@ -280,7 +279,7 @@ PlanStage::StageState AndHashStage::readFirstChild(WorkingSetID* out) {
         _specificStats.mapAfterChild.push_back(_dataMap.size());
 
         return PlanStage::NEED_TIME;
-    } else if (PlanStage::FAILURE == childStatus || PlanStage::DEAD == childStatus) {
+    } else if (PlanStage::FAILURE == childStatus) {
         // The stage which produces a failure is responsible for allocating a working set member
         // with error details.
         invariant(WorkingSet::INVALID_ID != id);
@@ -365,7 +364,7 @@ PlanStage::StageState AndHashStage::hashOtherChildren(WorkingSetID* out) {
         }
 
         return PlanStage::NEED_TIME;
-    } else if (PlanStage::FAILURE == childStatus || PlanStage::DEAD == childStatus) {
+    } else if (PlanStage::FAILURE == childStatus) {
         // The stage which produces a failure is responsible for allocating a working set member
         // with error details.
         invariant(WorkingSet::INVALID_ID != id);

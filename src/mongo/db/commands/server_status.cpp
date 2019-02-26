@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -229,11 +228,13 @@ namespace {
 class ExtraInfo : public ServerStatusSection {
 public:
     ExtraInfo() : ServerStatusSection("extra_info") {}
-    virtual bool includeByDefault() const {
+
+    bool includeByDefault() const override {
         return true;
     }
 
-    BSONObj generateSection(OperationContext* opCtx, const BSONElement& configElement) const {
+    BSONObj generateSection(OperationContext* opCtx,
+                            const BSONElement& configElement) const override {
         BSONObjBuilder bb;
 
         bb.append("note", "fields vary by platform");
@@ -245,21 +246,22 @@ public:
 
 } extraInfo;
 
-
 class Asserts : public ServerStatusSection {
 public:
     Asserts() : ServerStatusSection("asserts") {}
-    virtual bool includeByDefault() const {
+
+    bool includeByDefault() const override {
         return true;
     }
 
-    BSONObj generateSection(OperationContext* opCtx, const BSONElement& configElement) const {
+    BSONObj generateSection(OperationContext* opCtx,
+                            const BSONElement& configElement) const override {
         BSONObjBuilder asserts;
-        asserts.append("regular", assertionCount.regular);
-        asserts.append("warning", assertionCount.warning);
-        asserts.append("msg", assertionCount.msg);
-        asserts.append("user", assertionCount.user);
-        asserts.append("rollovers", assertionCount.rollovers);
+        asserts.append("regular", assertionCount.regular.loadRelaxed());
+        asserts.append("warning", assertionCount.warning.loadRelaxed());
+        asserts.append("msg", assertionCount.msg.loadRelaxed());
+        asserts.append("user", assertionCount.user.loadRelaxed());
+        asserts.append("rollovers", assertionCount.rollovers.loadRelaxed());
         return asserts.obj();
     }
 

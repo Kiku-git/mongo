@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -45,7 +44,7 @@ class EphemeralForBtreeImplTestHarnessHelper final
 public:
     EphemeralForBtreeImplTestHarnessHelper() : _order(Ordering::make(BSONObj())) {}
 
-    std::unique_ptr<SortedDataInterface> newSortedDataInterface(bool unique) final {
+    std::unique_ptr<SortedDataInterface> newSortedDataInterface(bool unique, bool partial) final {
         return std::unique_ptr<SortedDataInterface>(getEphemeralForTestBtreeImpl(
             _order, unique, "test.EphemeralForTest", "indexName", BSONObj(), &_data));
     }

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -43,6 +42,7 @@
 #include "mongo/scripting/bson_template_evaluator.h"
 #include "mongo/shell/bench.h"
 #include "mongo/tools/mongoebench_options.h"
+#include "mongo/tools/mongoebench_options_gen.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/log.h"
 #include "mongo/util/options_parser/option_section.h"

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -481,6 +480,7 @@ private:
                                                   kUninitializedStmtId,
                                                   {},
                                                   false /* prepare */,
+                                                  false /* inTxn */,
                                                   OplogSlot());
                 uow.commit();
                 return result;

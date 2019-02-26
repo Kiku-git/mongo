@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -221,7 +220,7 @@ public:
      * the server handles them. Is false by default, although the check only happens in debug
      * builds.
      */
-    static AtomicBool disableDupeFieldCheck_forTest;
+    static AtomicWord<bool> disableDupeFieldCheck_forTest;
 
     /**
      * Similar to finish, any calls on this object after are illegal.

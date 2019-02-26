@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Public Domain 2014-2018 MongoDB, Inc.
+# Public Domain 2014-2019 MongoDB, Inc.
 # Public Domain 2008-2014 WiredTiger, Inc.
 #
 # This is free and unencumbered software released into the public domain.
@@ -173,9 +173,6 @@ class test_timestamp07(wttest.WiredTigerTestCase, suite_subprocess):
             check_value, valcnt, valcnt2, valcnt)
 
     def test_timestamp07(self):
-        if not wiredtiger.timestamp_build():
-            self.skipTest('requires a timestamp build')
-
         uri = self.uri + self.tablename
         uri2 = self.uri + self.tablename2
         uri3 = self.uri + self.tablename3

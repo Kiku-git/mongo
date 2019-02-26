@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -36,7 +35,6 @@
 #include <string>
 #include <vector>
 
-#include "mongo/base/disallow_copying.h"
 #include "mongo/base/string_data.h"
 
 namespace mongo {
@@ -179,6 +177,10 @@ public:
         return numParts() == 0;
     }
 
+    StringData operator[](int index) const {
+        return getPart(index);
+    }
+
 private:
     // Dotted fields are most often not longer than four parts. We use a mixed structure
     // here that will not require any extra memory allocation when that is the case. And
@@ -273,6 +275,14 @@ inline bool operator>(const FieldRef& lhs, const FieldRef& rhs) {
 
 inline bool operator>=(const FieldRef& lhs, const FieldRef& rhs) {
     return lhs.compare(rhs) >= 0;
+}
+
+inline FieldRef operator+(const FieldRef& lhs, const FieldRef& rhs) {
+    FieldRef result = lhs;
+    for (size_t i = 0; i < rhs.numParts(); ++i) {
+        result.appendPart(rhs.getPart(i));
+    }
+    return result;
 }
 
 std::ostream& operator<<(std::ostream& stream, const FieldRef& value);

@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -58,6 +57,7 @@ FreeMonOpObserver::~FreeMonOpObserver() = default;
 repl::OpTime FreeMonOpObserver::onDropCollection(OperationContext* opCtx,
                                                  const NamespaceString& collectionName,
                                                  OptionalCollectionUUID uuid,
+                                                 std::uint64_t numRecords,
                                                  const CollectionDropType dropType) {
     if (collectionName == NamespaceString::kServerConfigurationNamespace) {
         auto controller = FreeMonController::get(opCtx->getServiceContext());

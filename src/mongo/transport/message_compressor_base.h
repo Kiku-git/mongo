@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -42,6 +41,7 @@ enum class MessageCompressor : uint8_t {
     kNoop = 0,
     kSnappy = 1,
     kZlib = 2,
+    kZstd = 3,
     kExtended = 255,
 };
 
@@ -55,7 +55,7 @@ public:
     virtual ~MessageCompressorBase() = default;
 
     /*
-     * Returns the name for subclass compressors (e.g. "snappy", "zlib", or "noop")
+     * Returns the name for subclass compressors (e.g. "snappy", "zlib", "zstd" or "noop")
      */
     const std::string& getName() const {
         return _name;
@@ -145,10 +145,10 @@ private:
     const MessageCompressorId _id;
     const std::string _name;
 
-    AtomicInt64 _compressBytesIn;
-    AtomicInt64 _compressBytesOut;
+    AtomicWord<long long> _compressBytesIn;
+    AtomicWord<long long> _compressBytesOut;
 
-    AtomicInt64 _decompressBytesIn;
-    AtomicInt64 _decompressBytesOut;
+    AtomicWord<long long> _decompressBytesIn;
+    AtomicWord<long long> _decompressBytesOut;
 };
 }  // namespace mongo

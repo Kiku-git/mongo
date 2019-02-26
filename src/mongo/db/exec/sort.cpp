@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -41,7 +40,7 @@
 #include "mongo/db/index/btree_key_generator.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/query/find_common.h"
-#include "mongo/db/query/query_knobs.h"
+#include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_planner.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/util/log.h"
@@ -151,7 +150,7 @@ PlanStage::StageState SortStage::doWork(WorkingSetID* out) {
             _resultIterator = _data.begin();
             _sorted = true;
             return PlanStage::NEED_TIME;
-        } else if (PlanStage::FAILURE == code || PlanStage::DEAD == code) {
+        } else if (PlanStage::FAILURE == code) {
             // The stage which produces a failure is responsible for allocating a working set member
             // with error details.
             invariant(WorkingSet::INVALID_ID != id);

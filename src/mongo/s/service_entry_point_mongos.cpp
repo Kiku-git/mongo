@@ -1,4 +1,3 @@
-
 /**
  *    Copyright (C) 2018-present MongoDB, Inc.
  *
@@ -64,7 +63,7 @@ BSONObj buildErrReply(const DBException& ex) {
 
 DbResponse ServiceEntryPointMongos::handleRequest(OperationContext* opCtx, const Message& message) {
     // Release any cached egress connections for client back to pool before destroying
-    auto guard = MakeGuard(ShardConnection::releaseMyConnections);
+    auto guard = makeGuard(ShardConnection::releaseMyConnections);
 
     const int32_t msgId = message.header().getId();
     const NetworkOp op = message.operation();
@@ -125,6 +124,7 @@ DbResponse ServiceEntryPointMongos::handleRequest(OperationContext* opCtx, const
             case dbQuery:
                 // Commands are handled above through Strategy::clientCommand().
                 invariant(!nss.isCommand());
+                opCtx->markKillOnClientDisconnect();
                 dbResponse = Strategy::queryOp(opCtx, nss, &dbm);
                 break;
 
