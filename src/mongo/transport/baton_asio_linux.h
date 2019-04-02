@@ -80,9 +80,14 @@ class TransportLayerASIO::BatonASIO : public NetworkingBaton {
     struct EventFDHolder {
         EventFDHolder() : fd(::eventfd(0, EFD_CLOEXEC)) {
             if (fd < 0) {
-                auto ewd = errnoWithDescription();
-                severe() << "error in eventfd: " << ewd;
-                fassertFailed(50833);
+                auto e = errno;
+                std::string reason = str::stream() << "error in creating eventfd: "
+                                                   << errnoWithDescription(e);
+
+                auto code = (e == EMFILE || e == ENFILE) ? ErrorCodes::TooManyFilesOpen
+                                                         : ErrorCodes::UnknownError;
+
+                uasserted(code, reason);
             }
         }
 
@@ -96,7 +101,7 @@ class TransportLayerASIO::BatonASIO : public NetworkingBaton {
         // Writes to the underlying eventfd
         void notify() {
             while (true) {
-                if (eventfd_write(fd, 1) == 0) {
+                if (::eventfd_write(fd, 1) == 0) {
                     break;
                 }
 
@@ -285,17 +290,16 @@ public:
             deadline = _timers.begin()->first;
         }
 
-        std::vector<decltype(_sessions)::iterator> sessions;
-        sessions.reserve(_sessions.size());
-        std::vector<pollfd> pollSet;
+        _pollSessions.clear();
+        _pollSet.clear();
+        _pollSessions.reserve(_sessions.size());
+        _pollSet.reserve(_sessions.size() + 1);
 
-        pollSet.reserve(_sessions.size() + 1);
-
-        pollSet.push_back(pollfd{efd().fd, POLLIN, 0});
+        _pollSet.push_back(pollfd{efd().fd, POLLIN, 0});
 
         for (auto iter = _sessions.begin(); iter != _sessions.end(); ++iter) {
-            pollSet.push_back(pollfd{iter->second.fd, iter->second.type, 0});
-            sessions.push_back(iter);
+            _pollSet.push_back(pollfd{iter->second.fd, iter->second.type, 0});
+            _pollSessions.push_back(iter);
         }
 
         auto now = clkSource->now();
@@ -311,8 +315,8 @@ public:
 
             _inPoll = true;
             lk.unlock();
-            rval = ::poll(pollSet.data(),
-                          pollSet.size(),
+            rval = ::poll(_pollSet.data(),
+                          _pollSet.size(),
                           deadline ? Milliseconds(*deadline - now).count() : -1);
 
             const auto pollGuard = makeGuard([&] {
@@ -340,7 +344,7 @@ public:
         if (rval > 0) {
             size_t remaining = rval;
 
-            auto pollIter = pollSet.begin();
+            auto pollIter = _pollSet.begin();
 
             if (pollIter->revents) {
                 efd().wait();
@@ -350,7 +354,8 @@ public:
 
             ++pollIter;
 
-            for (auto sessionIter = sessions.begin(); sessionIter != sessions.end() && remaining;
+            for (auto sessionIter = _pollSessions.begin();
+                 sessionIter != _pollSessions.end() && remaining;
                  ++sessionIter, ++pollIter) {
                 if (pollIter->revents) {
                     toFulfill.push_back(std::move((*sessionIter)->second.promise));
@@ -394,11 +399,8 @@ private:
         {
             stdx::lock_guard<stdx::mutex> lk(_mutex);
 
-            {
-                stdx::lock_guard<Client> lk(*_opCtx->getClient());
-                invariant(_opCtx->getBaton().get() == this);
-                _opCtx->setBaton(nullptr);
-            }
+            invariant(_opCtx->getBaton().get() == this);
+            _opCtx->setBaton(nullptr);
 
             _opCtx = nullptr;
 
@@ -476,6 +478,15 @@ private:
 
     // For tasks that come in via schedule.  Or that were deferred because we were in poll
     std::vector<unique_function<void(OperationContext*)>> _scheduled;
+
+    // We hold the two following values at the object level to save on allocations when a baton is
+    // waited on many times over the course of its lifetime.
+
+    // Holds the pollset for ::poll
+    std::vector<pollfd> _pollSet;
+
+    // Mirrors the above pollset with mappings back to _sessions
+    std::vector<decltype(_sessions)::iterator> _pollSessions;
 };
 
 const Client::Decoration<TransportLayerASIO::BatonASIO::EventFDHolder>

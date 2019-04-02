@@ -32,7 +32,6 @@
 #include <boost/optional.hpp>
 #include <cstddef>
 
-#include "mongo/base/disallow_copying.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/optime.h"
@@ -65,7 +64,9 @@ class ReplicationCoordinator;
  * ReplicationCoordinatorImpl should be moved here.
  */
 class ReplicationCoordinatorExternalState {
-    MONGO_DISALLOW_COPYING(ReplicationCoordinatorExternalState);
+    ReplicationCoordinatorExternalState(const ReplicationCoordinatorExternalState&) = delete;
+    ReplicationCoordinatorExternalState& operator=(const ReplicationCoordinatorExternalState&) =
+        delete;
 
 public:
     ReplicationCoordinatorExternalState() {}
@@ -185,10 +186,10 @@ public:
     virtual bool oplogExists(OperationContext* opCtx) = 0;
 
     /**
-     * Gets the last optime of an operation performed on this host, from stable
-     * storage.
+     * Gets the last optime, and corresponding wall clock time, of an operation performed on this
+     * host, from stable storage.
      */
-    virtual StatusWith<OpTime> loadLastOpTime(OperationContext* opCtx) = 0;
+    virtual StatusWith<OpTimeAndWallTime> loadLastOpTimeAndWallTime(OperationContext* opCtx) = 0;
 
     /**
      * Returns the HostAndPort of the remote client connected to us that initiated the operation

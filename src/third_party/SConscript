@@ -14,13 +14,16 @@ pcreSuffix = "-8.42"
 mozjsSuffix = '-60'
 yamlSuffix = '-0.6.2'
 icuSuffix = '-57.1'
-gperftoolsSuffix = '-2.7' if env['MONGO_ALLOCATOR'] == "tcmalloc-experimental" else '-2.5'
+gperftoolsSuffix = '-2.7'
 timelibSuffix = '-2018.01'
 tomcryptSuffix = '-1.18.2'
 benchmarkSuffix = '-1.4.1'
 sqliteSuffix = '-amalgamation-3260000'
 
 thirdPartyEnvironmentModifications = {
+   'fmt' : {
+        'CPPPATH' : ['#src/third_party/fmt/dist/include'],
+   },
    's2' : {
         'CPPPATH' : ['#src/third_party/s2'],
    },
@@ -30,9 +33,14 @@ thirdPartyEnvironmentModifications = {
 }
 
 if not use_system_version_of_library('tcmalloc'):
-    thirdPartyEnvironmentModifications['gperftools'] = {
-        'CPPPATH' : ['#/src/third_party/gperftools' + gperftoolsSuffix + '/src'],
-    }
+    # Only gperftools-2.5 is covered here. gperftools-2.7 does something different further
+    # down in the file. Its SConscript internally calculates a CPPPATH for its consumers.
+    if gperftoolsSuffix == '-2.5':
+        thirdPartyEnvironmentModifications['gperftools'] = {
+            'CPPPATH' : ['#/src/third_party/gperftools-2.5/src']
+        }
+    else:
+        thirdPartyEnvironmentModifications['gperftools'] = {}
 
 if not use_system_version_of_library('pcre'):
     thirdPartyEnvironmentModifications['pcre'] = {
@@ -133,15 +141,22 @@ if not use_system_version_of_library('icu'):
                      '#/src/third_party/icu4c' + icuSuffix + '/source/i18n'],
     }
 
+if not use_system_version_of_library('kms-message'):
+    thirdPartyEnvironmentModifications['kms-message'] = {
+        'CPPPATH' : ['#/src/third_party/kms-message/src'],
+        'CPPDEFINES' :['KMS_MSG_STATIC']
+    }
+
 def injectThirdParty(thisEnv, libraries=[], parts=[]):
     libraries = thisEnv.Flatten([libraries])
     parts = thisEnv.Flatten([parts])
     for lib in libraries:
+        mods = thirdPartyEnvironmentModifications[lib]
         if not parts:
-            thisEnv.PrependUnique(**thirdPartyEnvironmentModifications[lib])
+            thisEnv.PrependUnique(**mods)
         else:
             for part in parts:
-                thisEnv.PrependUnique({part : thirdPartyEnvironmentModifications[lib][part]})
+                thisEnv.PrependUnique({part : mods[part]})
 
 env.AddMethod(injectThirdParty, 'InjectThirdParty')
 
@@ -156,6 +171,10 @@ s2Env.InjectThirdParty(libraries=['s2', 'boost', 'abseil-cpp'])
 s2Env.InjectMongoIncludePaths()
 s2Env.SConscript('s2/SConscript', exports={'env' : s2Env})
 
+fmtEnv = env.Clone()
+fmtEnv.InjectThirdParty(libraries=['fmt'])
+fmtEnv.InjectMongoIncludePaths()
+fmtEnv.SConscript('fmt/SConscript', exports={'env' : fmtEnv})
 
 if use_system_version_of_library("pcre"):
     pcreEnv = env.Clone(
@@ -347,7 +366,7 @@ if "tom" in env["MONGO_CRYPTO"]:
         ])
 
 gperftoolsEnv = env
-if (gperftoolsEnv['MONGO_ALLOCATOR'] in ["tcmalloc", "tcmalloc-experimental"]):
+if gperftoolsEnv['MONGO_ALLOCATOR'] in ["tcmalloc", "tcmalloc-experimental"]:
     if use_system_version_of_library("tcmalloc"):
         gperftoolsEnv = env.Clone(
             SYSLIBDEPS=[
@@ -356,7 +375,16 @@ if (gperftoolsEnv['MONGO_ALLOCATOR'] in ["tcmalloc", "tcmalloc-experimental"]):
     else:
         gperftoolsEnv = env.Clone()
         gperftoolsEnv.InjectThirdParty(libraries=['gperftools'])
-        gperftoolsEnv.SConscript('gperftools' + gperftoolsSuffix + '/SConscript', exports={ 'env' : gperftoolsEnv })
+        # Allow gperftools to determine its own consumer-side include/ dirs.
+        # Needed because those are in a platform-specific subdirectory.
+        mods = {}
+        gperftoolsEnv.SConscript(
+            'gperftools' + gperftoolsSuffix + '/SConscript',
+            exports={'env' : gperftoolsEnv, 'consumerMods' : mods})
+        # Propagate settings that were deposited into 'mods' by gperftools' SConscript.
+        for k,v in mods.items():
+            thirdPartyEnvironmentModifications['gperftools'][k] = v
+
         gperftoolsEnv = gperftoolsEnv.Clone(
             LIBDEPS_INTERFACE=[
                 'gperftools' + gperftoolsSuffix + '/tcmalloc_minimal',
@@ -526,3 +554,24 @@ icuEnv.Library(
     source=[
         'shim_icu.cpp',
     ])
+
+if use_system_version_of_library("kms-message"):
+    kmsEnv = env.Clone(
+        SYSLIBDEPS=[
+            env['LIBDEPS_KMS-MESSAGE_SYSLIBDEP'],
+        ])
+else:
+    kmsEnv = env.Clone()
+    kmsEnv.InjectThirdParty(libraries=['kms-message'])
+    kmsEnv.SConscript('kms-message/SConscript', exports={ 'env' : kmsEnv })
+    kmsEnv = kmsEnv.Clone(
+        LIBDEPS_INTERFACE=[
+            'kms-message/kms-message',
+        ])
+
+kmsEnv.Library(
+    target="shim_kms_message",
+    source=[
+        'shim_kms_message.cpp',
+    ])
+

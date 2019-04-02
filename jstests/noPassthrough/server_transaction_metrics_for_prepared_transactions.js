@@ -69,7 +69,7 @@
     const doc1 = {_id: 1, x: 1};
 
     // Start transaction and prepare transaction.
-    session.startTransaction();
+    session.startTransaction({readConcern: {level: 'snapshot'}});
     assert.commandWorked(sessionColl.insert(doc1));
 
     // Trigger the oldestOpenUnpreparedReadTimestamp to be set.
@@ -95,7 +95,7 @@
 
     // Verify the total prepared and committed transaction counters are updated after a commit
     // and that the current prepared counter is decremented.
-    PrepareHelpers.commitTransactionAfterPrepareTS(session, prepareTimestampForCommit);
+    PrepareHelpers.commitTransaction(session, prepareTimestampForCommit);
     newStatus = assert.commandWorked(testDB.adminCommand({serverStatus: 1}));
     verifyServerStatusFields(newStatus);
     verifyServerStatusChange(
@@ -118,7 +118,7 @@
     const doc2 = {_id: 2, x: 2};
 
     // Start transaction and prepare transaction.
-    session.startTransaction();
+    session.startTransaction({readConcern: {level: 'snapshot'}});
     assert.commandWorked(sessionColl.insert(doc2));
 
     // Trigger the oldestOpenUnpreparedReadTimestamp to be set.

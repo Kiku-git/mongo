@@ -31,6 +31,9 @@ selector:
   # Enable when 4.2 becomes last-stable.
   - jstests/sharding/aggregation_internal_parameters.js
   - jstests/sharding/agg_error_reports_shard_host_and_port.js
+  - jstests/sharding/change_stream_metadata_notifications.js
+  - jstests/sharding/change_stream_transaction_sharded.js
+  - jstests/sharding/change_streams.js
   - jstests/sharding/collation_lookup.js
   - jstests/sharding/collation_targeting.js
   - jstests/sharding/collation_targeting_inherited.js
@@ -61,6 +64,10 @@ selector:
   - jstests/sharding/shard7.js
   - jstests/sharding/shard_config_db_collections.js
   - jstests/sharding/unsharded_collection_targetting.js
+  - jstests/sharding/array_shard_key.js
+  - jstests/sharding/update_immutable_fields.js
+  - jstests/sharding/update_shard_key_doc_on_same_shard.js
+  - jstests/sharding/update_shard_key_doc_moves_shards.js
   # TODO: SERVER-38541 remove from blacklist
   - jstests/sharding/shard_collection_existing_zones.js
   - jstests/sharding/single_shard_transaction_with_arbiter.js
@@ -88,7 +95,9 @@ selector:
   - jstests/sharding/txn_two_phase_commit_killop.js
   - jstests/sharding/txn_two_phase_commit_recover_decision.js
   - jstests/sharding/txn_two_phase_commit_wait_for_majority_commit_after_stepup.js
+  - jstests/sharding/txn_read_only_transactions.js
   - jstests/sharding/txn_being_applied_to_secondary_cannot_be_killed.js
+  - jstests/sharding/txn_with_several_routers.js
   - jstests/sharding/txn_writes_during_movechunk.js
   - jstests/sharding/update_sharded.js
   - jstests/sharding/shard_existing_coll_chunk_count.js
@@ -98,6 +107,10 @@ selector:
   - jstests/sharding/sharding_statistics_server_status.js
   # Enable if SERVER-36966 is backported or 4.2 becomes last-stable
   - jstests/sharding/mr_output_sharded_validation.js
+  # Enable when 4.2 becomes last-stable
+  - jstests/sharding/now_variable_replset.js
+  - jstests/sharding/now_variable_sharding.js
+
 executor:
   config:
     shell_options:

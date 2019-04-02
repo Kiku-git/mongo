@@ -226,9 +226,6 @@ void ServiceContext::ClientDeleter::operator()(Client* client) const {
     {
         stdx::lock_guard<stdx::mutex> lk(service->_mutex);
         invariant(service->_clients.erase(client));
-        if (service->_clients.empty()) {
-            service->_clientsEmptyCondVar.notify_all();
-        }
     }
     onDestroy(client, service->_clientObservers);
     delete client;
@@ -236,7 +233,7 @@ void ServiceContext::ClientDeleter::operator()(Client* client) const {
 
 ServiceContext::UniqueOperationContext ServiceContext::makeOperationContext(Client* client) {
     auto opCtx = std::make_unique<OperationContext>(client, _nextOpId.fetchAndAdd(1));
-    if (client && client->session()) {
+    if (client->session()) {
         _numCurrentOps.addAndFetch(1);
     }
 
@@ -248,23 +245,22 @@ ServiceContext::UniqueOperationContext ServiceContext::makeOperationContext(Clie
         opCtx->setRecoveryUnit(std::make_unique<RecoveryUnitNoop>(),
                                WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork);
     }
-    {
-        stdx::lock_guard<Client> lk(*client);
-        client->setOperationContext(opCtx.get());
-    }
+    // The baton must be attached before attaching to a client
     if (_transportLayer) {
         _transportLayer->makeBaton(opCtx.get());
     } else {
         makeBaton(opCtx.get());
     }
+    {
+        stdx::lock_guard<Client> lk(*client);
+        client->setOperationContext(opCtx.get());
+    }
     return UniqueOperationContext(opCtx.release());
 };
 
 void ServiceContext::OperationContextDeleter::operator()(OperationContext* opCtx) const {
-    opCtx->getBaton()->detach();
-
     auto client = opCtx->getClient();
-    if (client && client->session()) {
+    if (client->session()) {
         _numCurrentOps.subtractAndFetch(1);
     }
     auto service = client->getServiceContext();
@@ -272,6 +268,8 @@ void ServiceContext::OperationContextDeleter::operator()(OperationContext* opCtx
         stdx::lock_guard<Client> lk(*client);
         client->resetOperationContext();
     }
+    opCtx->getBaton()->detach();
+
     onDestroy(opCtx, service->_clientObservers);
     delete opCtx;
 }
@@ -342,14 +340,6 @@ void ServiceContext::waitForStartupComplete() {
     _startupCompleteCondVar.wait(lk, [this] { return _startupComplete; });
 }
 
-void ServiceContext::waitForClientsToFinish() {
-    stdx::unique_lock<stdx::mutex> lk(_mutex);
-    for (const auto& client : _clients) {
-        log() << "Waiting for client " << client->desc() << " to exit";
-    }
-    _clientsEmptyCondVar.wait(lk, [this] { return _clients.empty(); });
-}
-
 void ServiceContext::notifyStartupComplete() {
     stdx::unique_lock<stdx::mutex> lk(_mutex);
     _startupComplete = true;
@@ -413,13 +403,10 @@ void ServiceContext::ServiceContextDeleter::operator()(ServiceContext* service) 
 }
 
 BatonHandle ServiceContext::makeBaton(OperationContext* opCtx) const {
-    auto baton = std::make_shared<DefaultBaton>(opCtx);
+    invariant(!opCtx->getBaton());
 
-    {
-        stdx::lock_guard<Client> lk(*opCtx->getClient());
-        invariant(!opCtx->getBaton());
-        opCtx->setBaton(baton);
-    }
+    auto baton = std::make_shared<DefaultBaton>(opCtx);
+    opCtx->setBaton(baton);
 
     return baton;
 }

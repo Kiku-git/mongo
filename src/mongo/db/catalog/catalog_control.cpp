@@ -32,12 +32,14 @@
 
 #include "mongo/db/catalog/catalog_control.h"
 
+#include "mongo/db/background.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_catalog_entry.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/uuid_catalog.h"
 #include "mongo/db/ftdc/ftdc_mongod.h"
+#include "mongo/db/index_builds_coordinator.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/repair_database.h"
 #include "mongo/util/log.h"
@@ -47,6 +49,9 @@ namespace catalog {
 MinVisibleTimestampMap closeCatalog(OperationContext* opCtx) {
     invariant(opCtx->lockState()->isW());
 
+    BackgroundOperation::assertNoBgOpInProg();
+    IndexBuildsCoordinator::get(opCtx)->assertNoIndexBuildInProgress();
+
     MinVisibleTimestampMap minVisibleTimestampMap;
     std::vector<std::string> allDbs;
     opCtx->getServiceContext()->getStorageEngine()->listDatabases(&allDbs);
@@ -54,7 +59,12 @@ MinVisibleTimestampMap closeCatalog(OperationContext* opCtx) {
     auto databaseHolder = DatabaseHolder::get(opCtx);
     for (auto&& dbName : allDbs) {
         const auto db = databaseHolder->getDb(opCtx, dbName);
-        for (Collection* coll : *db) {
+        for (auto collIt = db->begin(opCtx); collIt != db->end(opCtx); ++collIt) {
+            auto coll = *collIt;
+            if (!coll) {
+                break;
+            }
+
             OptionalCollectionUUID uuid = coll->uuid();
             boost::optional<Timestamp> minVisible = coll->getMinimumVisibleSnapshot();
 
@@ -167,7 +177,6 @@ void openCatalog(OperationContext* opCtx, const MinVisibleTimestampMap& minVisib
 
     // Open all databases and repopulate the UUID catalog.
     log() << "openCatalog: reopening all databases";
-    auto& uuidCatalog = UUIDCatalog::get(opCtx);
     auto databaseHolder = DatabaseHolder::get(opCtx);
     std::vector<std::string> databasesToOpen;
     storageEngine->listDatabases(&databasesToOpen);
@@ -188,10 +197,6 @@ void openCatalog(OperationContext* opCtx, const MinVisibleTimestampMap& minVisib
 
             auto uuid = collection->uuid();
             invariant(uuid);
-
-            LOG(1) << "openCatalog: registering uuid " << uuid->toString() << " for collection "
-                   << collName;
-            uuidCatalog.registerUUIDCatalogEntry(*uuid, collection);
 
             if (minVisibleTimestampMap.count(*uuid) > 0) {
                 collection->setMinimumVisibleSnapshot(minVisibleTimestampMap.find(*uuid)->second);

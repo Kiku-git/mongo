@@ -34,8 +34,10 @@
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/db/query/canonical_query.h"
+#include "mongo/db/query/distinct_command_gen.h"
 #include "mongo/db/query/query_request.h"
 #include "mongo/db/repl/read_concern_args.h"
+#include "mongo/idl/idl_parser.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/util/mongoutils/str.h"
 
@@ -45,6 +47,74 @@ const char ParsedDistinct::kKeyField[] = "key";
 const char ParsedDistinct::kQueryField[] = "query";
 const char ParsedDistinct::kCollationField[] = "collation";
 const char ParsedDistinct::kCommentField[] = "comment";
+
+namespace {
+/**
+ * Checks dotted field for a projection and truncates the field name if we could be projecting on an
+ * array element. Sets 'isIDOut' to true if the projection is on a sub document of _id. For example,
+ * _id.a.2, _id.b.c.
+ */
+std::string getProjectedDottedField(const std::string& field, bool* isIDOut) {
+    // Check if field contains an array index.
+    std::vector<std::string> res;
+    mongo::splitStringDelim(field, &res, '.');
+
+    // Since we could exit early from the loop,
+    // we should check _id here and set '*isIDOut' accordingly.
+    *isIDOut = ("_id" == res[0]);
+
+    // Skip the first dotted component. If the field starts
+    // with a number, the number cannot be an array index.
+    int arrayIndex = 0;
+    for (size_t i = 1; i < res.size(); ++i) {
+        if (mongo::parseNumberFromStringWithBase(res[i], 10, &arrayIndex).isOK()) {
+            // Array indices cannot be negative numbers (this is not $slice).
+            // Negative numbers are allowed as field names.
+            if (arrayIndex >= 0) {
+                // Generate prefix of field up to (but not including) array index.
+                std::vector<std::string> prefixStrings(res);
+                prefixStrings.resize(i);
+                // Reset projectedField. Instead of overwriting, joinStringDelim() appends joined
+                // string
+                // to the end of projectedField.
+                std::string projectedField;
+                mongo::joinStringDelim(prefixStrings, &projectedField, '.');
+                return projectedField;
+            }
+        }
+    }
+
+    return field;
+}
+
+/**
+ * Creates a projection spec for a distinct command from the requested field. In most cases, the
+ * projection spec will be {_id: 0, key: 1}.
+ * The exceptions are:
+ * 1) When the requested field is '_id', the projection spec will {_id: 1}.
+ * 2) When the requested field could be an array element (eg. a.0), the projected field will be the
+ *    prefix of the field up to the array element. For example, a.b.2 => {_id: 0, 'a.b': 1} Note
+ *    that we can't use a $slice projection because the distinct command filters the results from
+ *    the executor using the dotted field name. Using $slice will re-order the documents in the
+ *    array in the results.
+ */
+BSONObj getDistinctProjection(const std::string& field) {
+    std::string projectedField(field);
+
+    bool isID = false;
+    if ("_id" == field) {
+        isID = true;
+    } else if (str::contains(field, '.')) {
+        projectedField = getProjectedDottedField(field, &isID);
+    }
+    BSONObjBuilder bob;
+    if (!isID) {
+        bob.append("_id", 0);
+    }
+    bob.append(projectedField, 1);
+    return bob.obj();
+}
+}  // namespace
 
 StatusWith<BSONObj> ParsedDistinct::asAggregationCommand() const {
     BSONObjBuilder aggregationBuilder;
@@ -118,46 +188,38 @@ StatusWith<ParsedDistinct> ParsedDistinct::parse(OperationContext* opCtx,
                                                  const NamespaceString& nss,
                                                  const BSONObj& cmdObj,
                                                  const ExtensionsCallback& extensionsCallback,
-                                                 bool isExplain) {
-    // Extract the key field.
-    BSONElement keyElt;
-    auto statusKey = bsonExtractTypedField(cmdObj, kKeyField, BSONType::String, &keyElt);
-    if (!statusKey.isOK()) {
-        return {statusKey};
+                                                 bool isExplain,
+                                                 const CollatorInterface* defaultCollator) {
+    IDLParserErrorContext ctx("distinct");
+
+    DistinctCommand parsedDistinct(nss);
+    try {
+        parsedDistinct = DistinctCommand::parse(ctx, cmdObj);
+    } catch (...) {
+        return exceptionToStatus();
     }
-    auto key = keyElt.valuestrsafe();
 
     auto qr = stdx::make_unique<QueryRequest>(nss);
 
-    // Extract the query field. If the query field is nonexistent, an empty query is used.
-    if (BSONElement queryElt = cmdObj[kQueryField]) {
-        if (queryElt.type() == BSONType::Object) {
-            qr->setFilter(queryElt.embeddedObject());
-        } else if (queryElt.type() != BSONType::jstNULL) {
-            return Status(ErrorCodes::TypeMismatch,
-                          str::stream() << "\"" << kQueryField << "\" had the wrong type. Expected "
-                                        << typeName(BSONType::Object)
-                                        << " or "
-                                        << typeName(BSONType::jstNULL)
-                                        << ", found "
-                                        << typeName(queryElt.type()));
-        }
+    // Create a projection on the fields needed by the distinct command, so that the query planner
+    // will produce a covered plan if possible.
+    qr->setProj(getDistinctProjection(std::string(parsedDistinct.getKey())));
+
+    if (auto query = parsedDistinct.getQuery()) {
+        qr->setFilter(query.get());
     }
 
-    // Extract the collation field, if it exists.
-    if (BSONElement collationElt = cmdObj[kCollationField]) {
-        if (collationElt.type() != BSONType::Object) {
-            return Status(ErrorCodes::TypeMismatch,
-                          str::stream() << "\"" << kCollationField
-                                        << "\" had the wrong type. Expected "
-                                        << typeName(BSONType::Object)
-                                        << ", found "
-                                        << typeName(collationElt.type()));
-        }
-        qr->setCollation(collationElt.embeddedObject());
+    if (auto collation = parsedDistinct.getCollation()) {
+        qr->setCollation(collation.get());
     }
 
-    if (BSONElement readConcernElt = cmdObj[repl::ReadConcernArgs::kReadConcernFieldName]) {
+    if (auto comment = parsedDistinct.getComment()) {
+        qr->setComment(comment.get().toString());
+    }
+
+    // The IDL parser above does not handle generic command arguments. Since the underlying query
+    // request requires the following options, manually parse and verify them here.
+    if (auto readConcernElt = cmdObj[repl::ReadConcernArgs::kReadConcernFieldName]) {
         if (readConcernElt.type() != BSONType::Object) {
             return Status(ErrorCodes::TypeMismatch,
                           str::stream() << "\"" << repl::ReadConcernArgs::kReadConcernFieldName
@@ -169,19 +231,7 @@ StatusWith<ParsedDistinct> ParsedDistinct::parse(OperationContext* opCtx,
         qr->setReadConcern(readConcernElt.embeddedObject());
     }
 
-    if (BSONElement commentElt = cmdObj[kCommentField]) {
-        if (commentElt.type() != BSONType::String) {
-            return Status(ErrorCodes::TypeMismatch,
-                          str::stream() << "\"" << kCommentField
-                                        << "\" had the wrong type. Expected "
-                                        << typeName(BSONType::String)
-                                        << ", found "
-                                        << typeName(commentElt.type()));
-        }
-        qr->setComment(commentElt.str());
-    }
-
-    if (BSONElement queryOptionsElt = cmdObj[QueryRequest::kUnwrappedReadPrefField]) {
+    if (auto queryOptionsElt = cmdObj[QueryRequest::kUnwrappedReadPrefField]) {
         if (queryOptionsElt.type() != BSONType::Object) {
             return Status(ErrorCodes::TypeMismatch,
                           str::stream() << "\"" << QueryRequest::kUnwrappedReadPrefField
@@ -193,7 +243,7 @@ StatusWith<ParsedDistinct> ParsedDistinct::parse(OperationContext* opCtx,
         qr->setUnwrappedReadPref(queryOptionsElt.embeddedObject());
     }
 
-    if (BSONElement maxTimeMSElt = cmdObj[QueryRequest::cmdOptionMaxTimeMS]) {
+    if (auto maxTimeMSElt = cmdObj[QueryRequest::cmdOptionMaxTimeMS]) {
         auto maxTimeMS = QueryRequest::parseMaxTimeMS(maxTimeMSElt);
         if (!maxTimeMS.isOK()) {
             return maxTimeMS.getStatus();
@@ -213,7 +263,11 @@ StatusWith<ParsedDistinct> ParsedDistinct::parse(OperationContext* opCtx,
         return cq.getStatus();
     }
 
-    return ParsedDistinct(std::move(cq.getValue()), std::move(key));
+    if (cq.getValue()->getQueryRequest().getCollation().isEmpty() && defaultCollator) {
+        cq.getValue()->setCollator(defaultCollator->clone());
+    }
+
+    return ParsedDistinct(std::move(cq.getValue()), parsedDistinct.getKey().toString());
 }
 
 }  // namespace mongo

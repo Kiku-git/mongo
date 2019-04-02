@@ -51,7 +51,8 @@ namespace mongo {
  * the database reference returned by this class should not be retained.
  */
 class AutoGetDb {
-    MONGO_DISALLOW_COPYING(AutoGetDb);
+    AutoGetDb(const AutoGetDb&) = delete;
+    AutoGetDb& operator=(const AutoGetDb&) = delete;
 
 public:
     AutoGetDb(OperationContext* opCtx,
@@ -81,7 +82,8 @@ private:
  * and the collection references returned by this class should not be retained.
  */
 class AutoGetCollection {
-    MONGO_DISALLOW_COPYING(AutoGetCollection);
+    AutoGetCollection(const AutoGetCollection&) = delete;
+    AutoGetCollection& operator=(const AutoGetCollection&) = delete;
 
 public:
     enum ViewMode { kViewsPermitted, kViewsForbidden };
@@ -165,7 +167,8 @@ private:
  * the database reference returned by this class should not be retained.
  */
 class AutoGetOrCreateDb {
-    MONGO_DISALLOW_COPYING(AutoGetOrCreateDb);
+    AutoGetOrCreateDb(const AutoGetOrCreateDb&) = delete;
+    AutoGetOrCreateDb& operator=(const AutoGetOrCreateDb&) = delete;
 
 public:
     AutoGetOrCreateDb(OperationContext* opCtx,
@@ -195,7 +198,8 @@ private:
  * The caller must hold the global exclusive lock for the life of the instance.
  */
 class ConcealUUIDCatalogChangesBlock {
-    MONGO_DISALLOW_COPYING(ConcealUUIDCatalogChangesBlock);
+    ConcealUUIDCatalogChangesBlock(const ConcealUUIDCatalogChangesBlock&) = delete;
+    ConcealUUIDCatalogChangesBlock& operator=(const ConcealUUIDCatalogChangesBlock&) = delete;
 
 public:
     /**
@@ -212,6 +216,23 @@ public:
 private:
     // Needed for the destructor to access the UUIDCatalog in order to call onOpenCatalog.
     OperationContext* _opCtx;
+};
+
+/**
+ * RAII type to set and restore the timestamp read source on the recovery unit.
+ *
+ * Snapshot is abandoned in constructor and destructor, so it can only be used before
+ * the recovery unit becomes active or when the existing snapshot is no longer needed.
+ */
+class ReadSourceScope {
+public:
+    ReadSourceScope(OperationContext* opCtx);
+    ~ReadSourceScope();
+
+private:
+    OperationContext* _opCtx;
+    RecoveryUnit::ReadSource _originalReadSource;
+    Timestamp _originalReadTimestamp;
 };
 
 }  // namespace mongo

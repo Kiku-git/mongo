@@ -39,11 +39,13 @@
 #include "mongo/db/matcher/matcher.h"
 #include "mongo/db/ops/parsed_update.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
+#include "mongo/db/query/parsed_projection.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/update/update_driver.h"
 #include "mongo/util/assert_util.h"
 
 #include <algorithm>
+#include <memory>
 #include <string>
 
 #if defined(_WIN32)
@@ -138,6 +140,20 @@ struct ServiceContextDestructor {
 
 using EmbeddedServiceContextPtr = std::unique_ptr<mongo::ServiceContext, ServiceContextDestructor>;
 
+ProjectionExec makeProjectionExecChecked(OperationContext* opCtx,
+                                         const BSONObj& spec,
+                                         const MatchExpression* queryExpression,
+                                         const CollatorInterface* collator) {
+    /**
+     * ParsedProjction::make performs necessary checks to ensure a projection spec is valid however
+     * we are not interested in the ParsedProjection object it produces.
+     */
+    ParsedProjection* dummy;
+    uassertStatusOK(ParsedProjection::make(opCtx, spec, queryExpression, &dummy));
+    delete dummy;
+    return ProjectionExec(opCtx, spec, queryExpression, collator);
+}
+
 }  // namespace
 }  // namespace mongo
 
@@ -178,10 +194,11 @@ struct stitch_support_v1_projection {
                                  stitch_support_v1_collator* collator)
         : client(std::move(client)),
           opCtx(this->client->makeOperationContext()),
-          projectionExec(opCtx.get(),
-                         pattern.getOwned(),
-                         matcher ? matcher->matcher.getMatchExpression() : nullptr,
-                         collator ? collator->collator.get() : nullptr),
+          projectionExec(mongo::makeProjectionExecChecked(
+              opCtx.get(),
+              pattern.getOwned(),
+              matcher ? matcher->matcher.getMatchExpression() : nullptr,
+              collator ? collator->collator.get() : nullptr)),
           matcher(matcher) {
         uassert(51050,
                 "Projections with a positional operator require a matcher",
@@ -513,6 +530,14 @@ stitch_support_v1_projection_apply(stitch_support_v1_projection* const projectio
     });
 }
 
+bool MONGO_API_CALL
+stitch_support_v1_projection_requires_match(stitch_support_v1_projection* const projection) {
+    return [projection]() noexcept {
+        return projection->projectionExec.projectRequiresQueryExpression();
+    }
+    ();
+}
+
 stitch_support_v1_update* MONGO_API_CALL
 stitch_support_v1_update_create(stitch_support_v1_lib* lib,
                                 const uint8_t* updateExprBSON,
@@ -627,6 +652,11 @@ uint8_t* MONGO_API_CALL stitch_support_v1_update_upsert(stitch_support_v1_update
         static_cast<void>(std::copy_n(outputObj.objdata(), outputSize, output));
         return mongo::toInterfaceType(output);
     });
+}
+
+bool MONGO_API_CALL
+stitch_support_v1_update_requires_match(stitch_support_v1_update* const update) {
+    return [update]() { return update->updateDriver.needMatchDetails(); }();
 }
 
 stitch_support_v1_update_details* MONGO_API_CALL stitch_support_v1_update_details_create(void) {

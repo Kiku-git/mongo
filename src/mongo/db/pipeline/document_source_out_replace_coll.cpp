@@ -28,16 +28,41 @@
  */
 
 #include "mongo/platform/basic.h"
-#include "mongo/rpc/get_status_from_command_result.h"
 
 #include "mongo/db/pipeline/document_source_out_replace_coll.h"
+
+#include "mongo/rpc/get_status_from_command_result.h"
 
 namespace mongo {
 
 static AtomicWord<unsigned> aggOutCounter;
 
+DocumentSourceOutReplaceColl::~DocumentSourceOutReplaceColl() {
+    DESTRUCTOR_GUARD(
+        // Make sure we drop the temp collection if anything goes wrong. Errors are ignored
+        // here because nothing can be done about them. Additionally, if this fails and the
+        // collection is left behind, it will be cleaned up next time the server is started.
+        if (_tempNs.size()) {
+            auto cleanupClient =
+                pExpCtx->opCtx->getServiceContext()->makeClient("$out_replace_coll_cleanup");
+            AlternativeClientRegion acr(cleanupClient);
+            // Create a new operation context so that any interrputs on the current operation will
+            // not affect the dropCollection operation below.
+            auto cleanupOpCtx = cc().makeOperationContext();
+
+            OutStageWriteBlock writeBlock(cleanupOpCtx.get());
+
+            // Reset the operation context back to original once dropCollection is done.
+            ON_BLOCK_EXIT(
+                [this] { pExpCtx->mongoProcessInterface->setOperationContext(pExpCtx->opCtx); });
+
+            pExpCtx->mongoProcessInterface->setOperationContext(cleanupOpCtx.get());
+            pExpCtx->mongoProcessInterface->directClient()->dropCollection(_tempNs.ns());
+        });
+}
+
 void DocumentSourceOutReplaceColl::initializeWriteNs() {
-    LocalReadConcernBlock readLocal(pExpCtx->opCtx);
+    OutStageWriteBlock writeBlock(pExpCtx->opCtx);
 
     DBClientBase* conn = pExpCtx->mongoProcessInterface->directClient();
 
@@ -98,7 +123,7 @@ void DocumentSourceOutReplaceColl::initializeWriteNs() {
 };
 
 void DocumentSourceOutReplaceColl::finalize() {
-    LocalReadConcernBlock readLocal(pExpCtx->opCtx);
+    OutStageWriteBlock writeBlock(pExpCtx->opCtx);
 
     const auto& outputNs = getOutputNs();
     auto renameCommandObj =

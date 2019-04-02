@@ -29,6 +29,7 @@
 
 #pragma once
 
+#include "mongo/base/string_data.h"
 #include "mongo/db/update/array_culling_node.h"
 #include "mongo/stdx/memory.h"
 
@@ -49,7 +50,15 @@ public:
         return stdx::make_unique<PullNode>(*this);
     }
 
+    void acceptVisitor(UpdateNodeVisitor* visitor) final {
+        visitor->visit(this);
+    }
+
 private:
+    StringData operatorName() const final {
+        return "$pull";
+    }
+
     class ObjectMatcher;
     class WrappedObjectMatcher;
     class EqualityMatcher;

@@ -33,7 +33,6 @@
 
 #include "mongo/s/client/shard.h"
 
-#include "mongo/base/disallow_copying.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/stdx/mutex.h"
 
@@ -44,7 +43,8 @@ namespace mongo {
  * the shard (if replica set).
  */
 class ShardRemote : public Shard {
-    MONGO_DISALLOW_COPYING(ShardRemote);
+    ShardRemote(const ShardRemote&) = delete;
+    ShardRemote& operator=(const ShardRemote&) = delete;
 
 public:
     /**
@@ -102,14 +102,14 @@ private:
 
     StatusWith<Shard::CommandResponse> _runCommand(OperationContext* opCtx,
                                                    const ReadPreferenceSetting& readPref,
-                                                   const std::string& dbname,
+                                                   StringData dbName,
                                                    Milliseconds maxTimeMSOverride,
                                                    const BSONObj& cmdObj) final;
 
     StatusWith<Shard::QueryResponse> _runExhaustiveCursorCommand(
         OperationContext* opCtx,
         const ReadPreferenceSetting& readPref,
-        const std::string& dbName,
+        StringData dbName,
         Milliseconds maxTimeMSOverride,
         const BSONObj& cmdObj) final;
 
@@ -125,7 +125,7 @@ private:
     StatusWith<AsyncCmdHandle> _scheduleCommand(
         OperationContext* opCtx,
         const ReadPreferenceSetting& readPref,
-        const std::string& dbName,
+        StringData dbName,
         Milliseconds maxTimeMSOverride,
         const BSONObj& cmdObj,
         const executor::TaskExecutor::RemoteCommandCallbackFn& cb);

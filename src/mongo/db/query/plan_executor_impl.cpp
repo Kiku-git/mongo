@@ -315,31 +315,6 @@ const NamespaceString& PlanExecutorImpl::nss() const {
     return _nss;
 }
 
-BSONObjSet PlanExecutorImpl::getOutputSorts() const {
-    if (_qs && _qs->root) {
-        _qs->root->computeProperties();
-        return _qs->root->getSort();
-    }
-
-    if (_root->stageType() == STAGE_MULTI_PLAN) {
-        // If we needed a MultiPlanStage, the PlanExecutor does not own the QuerySolution. We
-        // must go through the MultiPlanStage to access the output sort.
-        auto multiPlanStage = static_cast<MultiPlanStage*>(_root.get());
-        if (multiPlanStage->bestSolution()) {
-            multiPlanStage->bestSolution()->root->computeProperties();
-            return multiPlanStage->bestSolution()->root->getSort();
-        }
-    } else if (_root->stageType() == STAGE_SUBPLAN) {
-        auto subplanStage = static_cast<SubplanStage*>(_root.get());
-        if (subplanStage->compositeSolution()) {
-            subplanStage->compositeSolution()->root->computeProperties();
-            return subplanStage->compositeSolution()->root->getSort();
-        }
-    }
-
-    return SimpleBSONObjComparator::kInstance.makeBSONObjSet();
-}
-
 OperationContext* PlanExecutorImpl::getOpCtx() const {
     return _opCtx;
 }
@@ -452,7 +427,7 @@ std::shared_ptr<CappedInsertNotifier> PlanExecutorImpl::_getCappedInsertNotifier
 
     // We can only wait if we have a collection; otherwise we should retry immediately when
     // we hit EOF.
-    dassert(_opCtx->lockState()->isCollectionLockedForMode(_nss.ns(), MODE_IS));
+    dassert(_opCtx->lockState()->isCollectionLockedForMode(_nss, MODE_IS));
     auto databaseHolder = DatabaseHolder::get(_opCtx);
     auto db = databaseHolder->getDb(_opCtx, _nss.db());
     invariant(db);
@@ -593,7 +568,7 @@ PlanExecutor::ExecState PlanExecutorImpl::_getNextImpl(Snapshotted<BSONObj>* obj
             // This result didn't have the data the caller wanted, try again.
         } else if (PlanStage::NEED_YIELD == code) {
             invariant(id == WorkingSet::INVALID_ID);
-            if (!_yieldPolicy->canAutoYield()) {
+            if (!_yieldPolicy->canAutoYield() || MONGO_FAIL_POINT(skipWriteConflictRetries)) {
                 throw WriteConflictException();
             }
 

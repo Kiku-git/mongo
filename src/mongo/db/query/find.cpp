@@ -56,10 +56,10 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/server_options.h"
-#include "mongo/db/server_parameters.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/stats/top.h"
 #include "mongo/db/storage/storage_options.h"
+#include "mongo/db/views/view_catalog.h"
 #include "mongo/s/chunk_version.h"
 #include "mongo/s/stale_exception.h"
 #include "mongo/stdx/memory.h"
@@ -297,7 +297,7 @@ Message getMore(OperationContext* opCtx,
                                  Top::LockType::NotLocked,
                                  AutoStatsTracker::LogMode::kUpdateTopAndCurop,
                                  profilingLevel);
-            auto view = autoDb.getDb() ? autoDb.getDb()->getViewCatalog()->lookup(opCtx, nss.ns())
+            auto view = autoDb.getDb() ? ViewCatalog::get(autoDb.getDb())->lookup(opCtx, nss.ns())
                                        : nullptr;
             uassert(
                 ErrorCodes::CommandNotSupportedOnView,
@@ -607,8 +607,8 @@ std::string runQuery(OperationContext* opCtx,
             repl::ReplicationCoordinator::get(opCtx)->checkCanServeReadsFor(opCtx, nss, slaveOK));
     }
 
-    // We have a parsed query. Time to get the execution plan for it.
-    auto exec = uassertStatusOK(getExecutorLegacyFind(opCtx, collection, nss, std::move(cq)));
+    // Get the execution plan for the query.
+    auto exec = uassertStatusOK(getExecutorLegacyFind(opCtx, collection, std::move(cq)));
 
     const QueryRequest& qr = exec->getCanonicalQuery()->getQueryRequest();
 

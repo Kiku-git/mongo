@@ -53,14 +53,22 @@
     // has copied {_id: 1} and {_id: 3}. This way we can try to commit the prepared transaction
     // while initial sync is paused and know that its operations won't be copied during collection
     // cloning. Instead, the commitTransaction oplog entry must be applied during oplog application.
-    secondary = replTest.restart(secondary, {
-        startClean: true,
-        setParameter: {
-            'failpoint.initialSyncHangDuringCollectionClone': tojson(
-                {mode: 'alwaysOn', data: {namespace: testColl.getFullName(), numDocsToClone: 2}}),
-            'numInitialSyncAttempts': 1
-        }
-    });
+    replTest.stop(secondary,
+                  // signal
+                  undefined,
+                  // Validation would encounter a prepare conflict on the open transaction.
+                  {skipValidation: true});
+    secondary = replTest.start(
+        secondary,
+        {
+          startClean: true,
+          setParameter: {
+              'failpoint.initialSyncHangDuringCollectionClone': tojson(
+                  {mode: 'alwaysOn', data: {namespace: testColl.getFullName(), numDocsToClone: 2}}),
+              'numInitialSyncAttempts': 1
+          }
+        },
+        true /* wait */);
 
     // Wait for failpoint to be reached so we know that collection cloning is paused.
     checkLog.contains(secondary, "initialSyncHangDuringCollectionClone fail point enabled");
@@ -69,8 +77,7 @@
 
     // Commit a transaction on the sync source while collection cloning is paused so that we know
     // they must be applied during the oplog application stage of initial sync.
-    assert.commandWorked(
-        PrepareHelpers.commitTransactionAfterPrepareTS(session1, prepareTimestamp1));
+    assert.commandWorked(PrepareHelpers.commitTransaction(session1, prepareTimestamp1));
 
     jsTestLog("Resuming initial sync");
 
@@ -98,8 +105,7 @@
     session2.startTransaction();
     assert.commandWorked(sessionColl2.insert({_id: 4}));
     let prepareTimestamp2 = PrepareHelpers.prepareTransaction(session2);
-    assert.commandWorked(
-        PrepareHelpers.commitTransactionAfterPrepareTS(session2, prepareTimestamp2));
+    assert.commandWorked(PrepareHelpers.commitTransaction(session2, prepareTimestamp2));
     res = newPrimary.getDB(dbName).getCollection(collName).findOne({_id: 4});
     assert.docEq(res, {_id: 4}, res);
 

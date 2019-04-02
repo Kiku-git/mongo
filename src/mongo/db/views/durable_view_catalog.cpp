@@ -44,6 +44,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/storage/record_data.h"
+#include "mongo/db/views/view_catalog.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/log.h"
@@ -59,7 +60,7 @@ void DurableViewCatalog::onExternalChange(OperationContext* opCtx, const Namespa
     auto db = databaseHolder->getDb(opCtx, name.db());
     if (db) {
         opCtx->recoveryUnit()->onCommit(
-            [db](boost::optional<Timestamp>) { db->getViewCatalog()->invalidate(); });
+            [db](boost::optional<Timestamp>) { ViewCatalog::get(db)->invalidate(); });
     }
 }
 
@@ -137,8 +138,12 @@ Status DurableViewCatalogImpl::iterate(OperationContext* opCtx, Callback callbac
 void DurableViewCatalogImpl::upsert(OperationContext* opCtx,
                                     const NamespaceString& name,
                                     const BSONObj& view) {
-    dassert(opCtx->lockState()->isDbLockedForMode(_db->name(), MODE_X));
+    dassert(opCtx->lockState()->isDbLockedForMode(_db->name(), MODE_IX));
+    dassert(opCtx->lockState()->isCollectionLockedForMode(name, MODE_IX));
+
     NamespaceString systemViewsNs(_db->getSystemViewsName());
+    dassert(opCtx->lockState()->isCollectionLockedForMode(systemViewsNs, MODE_X));
+
     Collection* systemViews = _db->getCollection(opCtx, systemViewsNs);
     invariant(systemViews);
 
@@ -163,8 +168,12 @@ void DurableViewCatalogImpl::upsert(OperationContext* opCtx,
 }
 
 void DurableViewCatalogImpl::remove(OperationContext* opCtx, const NamespaceString& name) {
-    dassert(opCtx->lockState()->isDbLockedForMode(_db->name(), MODE_X));
+    dassert(opCtx->lockState()->isDbLockedForMode(_db->name(), MODE_IX));
+    dassert(opCtx->lockState()->isCollectionLockedForMode(name, MODE_IX));
+
     Collection* systemViews = _db->getCollection(opCtx, _db->getSystemViewsName());
+    dassert(opCtx->lockState()->isCollectionLockedForMode(systemViews->ns(), MODE_X));
+
     if (!systemViews)
         return;
     const bool requireIndex = false;

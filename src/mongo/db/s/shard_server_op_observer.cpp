@@ -73,7 +73,7 @@ public:
         : _opCtx(opCtx), _nss(nss) {}
 
     void commit(boost::optional<Timestamp>) override {
-        invariant(_opCtx->lockState()->isCollectionLockedForMode(_nss.ns(), MODE_IX));
+        invariant(_opCtx->lockState()->isCollectionLockedForMode(_nss, MODE_IX));
 
         CatalogCacheLoader::get(_opCtx).notifyOfCollectionVersionUpdate(_nss);
 
@@ -206,7 +206,7 @@ void ShardServerOpObserver::onInserts(OperationContext* opCtx,
                                       std::vector<InsertStatement>::const_iterator end,
                                       bool fromMigrate) {
     auto* const css = CollectionShardingState::get(opCtx, nss);
-    const auto metadata = css->getMetadataForOperation(opCtx);
+    const auto metadata = css->getCurrentMetadata();
 
     for (auto it = begin; it != end; ++it) {
         const auto& insertedDoc = it->doc;
@@ -236,7 +236,7 @@ void ShardServerOpObserver::onInserts(OperationContext* opCtx,
 
 void ShardServerOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArgs& args) {
     auto* const css = CollectionShardingState::get(opCtx, args.nss);
-    const auto metadata = css->getMetadataForOperation(opCtx);
+    const auto metadata = css->getCurrentMetadata();
 
     if (args.nss == NamespaceString::kShardConfigCollectionsNamespace) {
         // Notification of routing table changes are only needed on secondaries

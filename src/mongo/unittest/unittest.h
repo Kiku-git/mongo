@@ -99,7 +99,7 @@
 #define ASSERT_GTE(a, b) ASSERT_COMPARISON_(kGe, a, b)
 
 /**
- * Binary comparison utility macro.  Do not use directly.
+ * Binary comparison utility macro. Do not use directly.
  */
 #define ASSERT_COMPARISON_(OP, a, b)                                                           \
     if (auto ca = ::mongo::unittest::ComparisonAssertion<::mongo::unittest::ComparisonOp::OP>( \
@@ -111,6 +111,22 @@
  * values.
  */
 #define ASSERT_APPROX_EQUAL(a, b, ABSOLUTE_ERR) ASSERT_LTE(std::abs((a) - (b)), ABSOLUTE_ERR)
+
+/**
+ * Assert a function call returns its input unchanged.
+ */
+#define ASSERT_IDENTITY(INPUT, FUNCTION)                                                      \
+    [&](auto&& v) {                                                                           \
+        if (auto ca =                                                                         \
+                ::mongo::unittest::ComparisonAssertion<::mongo::unittest::ComparisonOp::kEq>( \
+                    __FILE__,                                                                 \
+                    __LINE__,                                                                 \
+                    #INPUT,                                                                   \
+                    #FUNCTION "(" #INPUT ")",                                                 \
+                    v,                                                                        \
+                    FUNCTION(std::forward<decltype(v)>(v))))                                  \
+            ca.failure().stream();                                                            \
+    }(INPUT)
 
 /**
  * Verify that the evaluation of "EXPRESSION" throws an exception of type EXCEPTION_TYPE.
@@ -274,7 +290,8 @@ typedef stdx::function<void(void)> TestFunction;
  * contain lists of these.
  */
 class TestHolder {
-    MONGO_DISALLOW_COPYING(TestHolder);
+    TestHolder(const TestHolder&) = delete;
+    TestHolder& operator=(const TestHolder&) = delete;
 
 public:
     TestHolder(const std::string& name, const TestFunction& fn) : _name(name), _fn(fn) {}
@@ -297,7 +314,8 @@ private:
  * by the TEST() macro.
  */
 class Test {
-    MONGO_DISALLOW_COPYING(Test);
+    Test(const Test&) = delete;
+    Test& operator=(const Test&) = delete;
 
 public:
     Test();
@@ -321,7 +339,8 @@ protected:
      */
     template <typename T>
     class RegistrationAgent {
-        MONGO_DISALLOW_COPYING(RegistrationAgent);
+        RegistrationAgent(const RegistrationAgent&) = delete;
+        RegistrationAgent& operator=(const RegistrationAgent&) = delete;
 
     public:
         RegistrationAgent(const std::string& suiteName, const std::string& testName);
@@ -393,7 +412,8 @@ private:
  * approach is deprecated.
  */
 class Suite {
-    MONGO_DISALLOW_COPYING(Suite);
+    Suite(const Suite&) = delete;
+    Suite& operator=(const Suite&) = delete;
 
 public:
     Suite(const std::string& name);

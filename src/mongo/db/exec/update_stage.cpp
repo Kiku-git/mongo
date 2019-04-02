@@ -46,11 +46,11 @@
 #include "mongo/db/op_observer.h"
 #include "mongo/db/query/explain.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/duplicate_key_error_info.h"
 #include "mongo/db/update/path_support.h"
 #include "mongo/db/update/storage_validation.h"
+#include "mongo/s/would_change_owning_shard_exception.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/log.h"
@@ -102,24 +102,24 @@ void addObjectIDIdField(mb::Document* doc) {
 }
 
 /**
- * Uasserts if any of the paths in 'immutablePaths' are not present in 'document', or if they are
+ * Uasserts if any of the paths in 'requiredPaths' are not present in 'document', or if they are
  * arrays or array descendants.
  */
-void checkImmutablePathsPresent(const mb::Document& document, const FieldRefSet& immutablePaths) {
-    for (auto path = immutablePaths.begin(); path != immutablePaths.end(); ++path) {
+void assertRequiredPathsPresent(const mb::Document& document, const FieldRefSet& requiredPaths) {
+    for (const auto& path : requiredPaths) {
         auto elem = document.root();
-        for (size_t i = 0; i < (*path)->numParts(); ++i) {
-            elem = elem[(*path)->getPart(i)];
+        for (size_t i = 0; i < (*path).numParts(); ++i) {
+            elem = elem[(*path).getPart(i)];
             uassert(ErrorCodes::NoSuchKey,
                     str::stream() << "After applying the update, the new document was missing the "
                                      "required field '"
-                                  << (*path)->dottedField()
+                                  << (*path).dottedField()
                                   << "'",
                     elem.ok());
             uassert(
                 ErrorCodes::NotSingleValueField,
                 str::stream() << "After applying the update to the document, the required field '"
-                              << (*path)->dottedField()
+                              << (*path).dottedField()
                               << "' was found to be an array or array descendant.",
                 elem.getType() != BSONType::Array);
         }
@@ -138,17 +138,6 @@ bool shouldRestartUpdateIfNoLongerMatches(const UpdateStageParams& params) {
     return params.request->shouldReturnAnyDocs() && !params.request->getSort().isEmpty();
 };
 
-const std::vector<std::unique_ptr<FieldRef>>* getImmutableFields(OperationContext* opCtx,
-                                                                 const NamespaceString& ns) {
-    auto metadata = CollectionShardingState::get(opCtx, ns)->getMetadataForOperation(opCtx);
-    if (metadata->isSharded()) {
-        const std::vector<std::unique_ptr<FieldRef>>& fields = metadata->getKeyPatternFields();
-        // Return shard-keys as immutable for the update system.
-        return &fields;
-    }
-    return NULL;
-}
-
 CollectionUpdateArgs::StoreDocOption getStoreDocMode(const UpdateRequest& updateRequest) {
     if (updateRequest.shouldReturnNewDocs()) {
         return CollectionUpdateArgs::StoreDocOption::PostImage;
@@ -161,7 +150,6 @@ CollectionUpdateArgs::StoreDocOption getStoreDocMode(const UpdateRequest& update
     invariant(!updateRequest.shouldReturnAnyDocs());
     return CollectionUpdateArgs::StoreDocOption::None;
 }
-
 }  // namespace
 
 const char* UpdateStage::kStageType = "UPDATE";
@@ -218,15 +206,21 @@ BSONObj UpdateStage::transformAndUpdate(const Snapshotted<BSONObj>& oldObj, Reco
 
     bool docWasModified = false;
 
+    const auto isFCV42 = serverGlobalParams.featureCompatibility.isVersionInitialized() &&
+        serverGlobalParams.featureCompatibility.getVersion() ==
+            ServerGlobalParams::FeatureCompatibility::Version::kFullyUpgradedTo42;
+
+    auto* const css = CollectionShardingState::get(getOpCtx(), collection()->ns());
+    auto metadata = css->getCurrentMetadata();
     Status status = Status::OK();
     const bool validateForStorage = getOpCtx()->writesAreReplicated() && _enforceOkForStorage;
     const bool isInsert = false;
     FieldRefSet immutablePaths;
     if (getOpCtx()->writesAreReplicated() && !request->isFromMigration()) {
-        auto immutablePathsVector = getImmutableFields(getOpCtx(), request->getNamespaceString());
-        if (immutablePathsVector) {
+        if (!isFCV42 && metadata->isSharded()) {
+            auto& immutablePathsVector = metadata->getKeyPatternFields();
             immutablePaths.fillFrom(
-                transitional_tools_do_not_use::unspool_vector(*immutablePathsVector));
+                transitional_tools_do_not_use::unspool_vector(immutablePathsVector));
         }
         immutablePaths.keepShortest(&idFieldRef);
     }
@@ -296,15 +290,13 @@ BSONObj UpdateStage::transformAndUpdate(const Snapshotted<BSONObj>& oldObj, Reco
     if (docWasModified) {
 
         // Prepare to write back the modified document
-        WriteUnitOfWork wunit(getOpCtx());
 
         RecordId newRecordId;
         CollectionUpdateArgs args;
+
         if (!request->isExplain()) {
             args.stmtId = request->getStmtId();
             args.update = logObj;
-            auto* const css = CollectionShardingState::get(getOpCtx(), collection()->ns());
-            auto metadata = css->getMetadataForOperation(getOpCtx());
             args.criteria = metadata->extractDocumentKey(newObj);
             uassert(16980,
                     "Multi-update operations require all documents to have an '_id' field",
@@ -323,8 +315,15 @@ BSONObj UpdateStage::transformAndUpdate(const Snapshotted<BSONObj>& oldObj, Reco
 
                 Snapshotted<RecordData> snap(oldObj.snapshotId(), oldRec);
 
+                if (isFCV42 && metadata->isSharded()) {
+                    assertUpdateToShardKeyFieldsIsValidAndDocStillBelongsToNode(metadata, oldObj);
+                }
+
+                WriteUnitOfWork wunit(getOpCtx());
                 StatusWith<RecordData> newRecStatus = collection()->updateDocumentWithDamages(
                     getOpCtx(), recordId, std::move(snap), source, _damages, &args);
+                invariant(oldObj.snapshotId() == getOpCtx()->recoveryUnit()->getSnapshotId());
+                wunit.commit();
 
                 newObj = uassertStatusOK(std::move(newRecStatus)).releaseToBson();
             }
@@ -339,7 +338,12 @@ BSONObj UpdateStage::transformAndUpdate(const Snapshotted<BSONObj>& oldObj, Reco
                                   << BSONObjMaxUserSize,
                     newObj.objsize() <= BSONObjMaxUserSize);
 
+            if (isFCV42 && metadata->isSharded()) {
+                assertUpdateToShardKeyFieldsIsValidAndDocStillBelongsToNode(metadata, oldObj);
+            }
+
             if (!request->isExplain()) {
+                WriteUnitOfWork wunit(getOpCtx());
                 newRecordId = collection()->updateDocument(getOpCtx(),
                                                            recordId,
                                                            oldObj,
@@ -347,11 +351,10 @@ BSONObj UpdateStage::transformAndUpdate(const Snapshotted<BSONObj>& oldObj, Reco
                                                            driver->modsAffectIndices(),
                                                            _params.opDebug,
                                                            &args);
+                invariant(oldObj.snapshotId() == getOpCtx()->recoveryUnit()->getSnapshotId());
+                wunit.commit();
             }
         }
-
-        invariant(oldObj.snapshotId() == getOpCtx()->recoveryUnit()->getSnapshotId());
-        wunit.commit();
 
         // If the document moved, we might see it again in a collection scan (maybe it's
         // a document after our current document).
@@ -390,18 +393,30 @@ BSONObj UpdateStage::applyUpdateOpsForInsert(OperationContext* opCtx,
     // Some mods may only work in that context (e.g. $setOnInsert).
     driver->setLogOp(false);
 
+    auto* const css = CollectionShardingState::get(opCtx, ns);
+    auto metadata = css->getCurrentMetadata();
+
+    const auto isFCV42 = serverGlobalParams.featureCompatibility.isVersionInitialized() &&
+        serverGlobalParams.featureCompatibility.getVersion() ==
+            ServerGlobalParams::FeatureCompatibility::Version::kFullyUpgradedTo42;
+
     FieldRefSet immutablePaths;
-    if (!isInternalRequest) {
-        auto immutablePathsVector = getImmutableFields(opCtx, ns);
-        if (immutablePathsVector) {
-            immutablePaths.fillFrom(
-                transitional_tools_do_not_use::unspool_vector(*immutablePathsVector));
-        }
+    if (!isFCV42 && metadata->isSharded()) {
+        auto& immutablePathsVector = metadata->getKeyPatternFields();
+        immutablePaths.fillFrom(
+            transitional_tools_do_not_use::unspool_vector(immutablePathsVector));
     }
     immutablePaths.keepShortest(&idFieldRef);
 
     if (cq) {
-        uassertStatusOK(driver->populateDocumentWithQueryFields(*cq, immutablePaths, *doc));
+        FieldRefSet requiredPaths;
+        if (metadata->isSharded()) {
+            const auto& shardKeyPathsVector = metadata->getKeyPatternFields();
+            requiredPaths.fillFrom(
+                transitional_tools_do_not_use::unspool_vector(shardKeyPathsVector));
+        }
+        requiredPaths.keepShortest(&idFieldRef);
+        uassertStatusOK(driver->populateDocumentWithQueryFields(*cq, requiredPaths, *doc));
         if (driver->isDocReplacement())
             stats->fastmodinsert = true;
     } else {
@@ -432,13 +447,20 @@ BSONObj UpdateStage::applyUpdateOpsForInsert(OperationContext* opCtx,
     }
 
     // Validate that the object replacement or modifiers resulted in a document
-    // that contains all the immutable keys and can be stored if it isn't coming
+    // that contains all the required keys and can be stored if it isn't coming
     // from a migration or via replication.
     if (!isInternalRequest) {
         if (enforceOkForStorage) {
             storage_validation::storageValid(*doc);
         }
-        checkImmutablePathsPresent(*doc, immutablePaths);
+        FieldRefSet requiredPaths;
+        if (metadata->isSharded()) {
+            const auto& shardKeyPathsVector = metadata->getKeyPatternFields();
+            requiredPaths.fillFrom(
+                transitional_tools_do_not_use::unspool_vector(shardKeyPathsVector));
+        }
+        requiredPaths.keepShortest(&idFieldRef);
+        assertRequiredPathsPresent(*doc, requiredPaths);
     }
 
     BSONObj newObj = doc->getObject();
@@ -865,6 +887,43 @@ PlanStage::StageState UpdateStage::prepareToRetryWSM(WorkingSetID idToRetry, Wor
     _idRetrying = idToRetry;
     *out = WorkingSet::INVALID_ID;
     return NEED_YIELD;
+}
+
+void UpdateStage::assertUpdateToShardKeyFieldsIsValidAndDocStillBelongsToNode(
+    ScopedCollectionMetadata metadata, const Snapshotted<BSONObj>& oldObj) {
+    auto newObj = _doc.getObject();
+    auto oldShardKey = metadata->extractDocumentKey(oldObj.value());
+    auto newShardKey = metadata->extractDocumentKey(newObj);
+
+    // If the shard key fields remain unchanged by this update or if this document is an orphan and
+    // so does not belong to this shard, we can skip the rest of the checks.
+    if ((newShardKey.woCompare(oldShardKey) == 0) || !metadata->keyBelongsToMe(oldShardKey)) {
+        return;
+    }
+
+    // Assert that the updated doc has all shard key fields and none are arrays or array
+    // descendants.
+    FieldRefSet shardKeyPaths;
+    const auto& shardKeyPathsVector = metadata->getKeyPatternFields();
+    shardKeyPaths.fillFrom(transitional_tools_do_not_use::unspool_vector(shardKeyPathsVector));
+    assertRequiredPathsPresent(_doc, shardKeyPaths);
+
+    // We do not allow updates to the shard key when 'multi' is true.
+    uassert(ErrorCodes::InvalidOptions,
+            str::stream() << "Multi-update operations are not allowed when updating the"
+                          << " shard key field.",
+            !_params.request->isMulti());
+
+    // An update to a shard key value must either be a retryable write or run in a transaction.
+    uassert(ErrorCodes::IllegalOperation,
+            str::stream() << "Must run update to shard key field "
+                          << " in a multi-statement transaction or"
+                             " with retryWrites: true.",
+            getOpCtx()->getTxnNumber());
+
+    uassert(WouldChangeOwningShardInfo(oldObj.value(), newObj),
+            str::stream() << "This update would cause the doc to change owning shards",
+            metadata->keyBelongsToMe(newShardKey));
 }
 
 }  // namespace mongo

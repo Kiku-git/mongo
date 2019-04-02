@@ -176,7 +176,7 @@ protected:
         auto coll = std::make_unique<CollectionMock>(nss);
 
         // Register the UUID to that collection in the UUIDCatalog.
-        UUIDCatalog::get(opCtx).registerUUIDCatalogEntry(uuid, coll.get());
+        UUIDCatalog::get(opCtx).registerUUIDCatalogEntry(uuid, std::move(coll));
         return std::move(coll);
     }
 
@@ -1387,15 +1387,12 @@ TEST_F(RollbackImplTest, RollbackCallsClearOpTimes) {
     ASSERT(txnMetrics->getOldestActiveOpTime());
     ASSERT_EQ(*txnMetrics->getOldestActiveOpTime(), repl::OpTime(Timestamp(1, 2), 0));
     ASSERT_EQ(txnMetrics->getTotalActiveOpTimes(), 2U);
-    ASSERT(txnMetrics->getOldestNonMajorityCommittedOpTime());
-    ASSERT_EQ(*txnMetrics->getOldestNonMajorityCommittedOpTime(), repl::OpTime(Timestamp(1, 2), 0));
 
     // Call runRollback to make sure these variables get cleared.
     ASSERT_OK(_rollback->runRollback(_opCtx.get()));
 
     ASSERT_FALSE(txnMetrics->getOldestActiveOpTime());
     ASSERT_EQ(txnMetrics->getTotalActiveOpTimes(), 0U);
-    ASSERT_FALSE(txnMetrics->getOldestNonMajorityCommittedOpTime());
 }
 
 /**

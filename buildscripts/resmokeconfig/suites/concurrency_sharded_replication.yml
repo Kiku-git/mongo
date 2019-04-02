@@ -102,6 +102,9 @@ selector:
   # TODO Unblacklist (SERVER-35538).
   - jstests/concurrency/fsm_workloads/database_versioning.js
 
+  # TODO Unblacklist (SERVER-38852).
+  - jstests/concurrency/fsm_workloads/agg_out_interrupt_cleanup.js
+
   # serverStatus does not include transaction metrics on mongos.
   - jstests/concurrency/fsm_workloads/multi_statement_transaction_atomicity_isolation_metrics_test.js
 
@@ -109,12 +112,8 @@ selector:
   # router tries to commit, it may not know the full participant list.
   - jstests/concurrency/fsm_workloads/multi_statement_transaction_all_commands_same_session.js
 
-  # TODO SERVER-38190: Killing an operation committing a prepared txn can crash.
   # TODO SERVER-38297: Killing session on a secondary applying a prepare oplog entry can crash.
-  # TODO SERVER-38299: Killing an operation preparing a transaction can crash.
   - jstests/concurrency/fsm_workloads/multi_statement_transaction_kill_sessions_atomicity_isolation.js
-  - jstests/concurrency/fsm_workloads/snapshot_read_kill_op_only.js
-  - jstests/concurrency/fsm_workloads/snapshot_read_kill_operations.js
 
   exclude_with_any_tags:
   - requires_replication

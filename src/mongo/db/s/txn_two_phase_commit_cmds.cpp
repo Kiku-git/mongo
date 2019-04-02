@@ -31,7 +31,6 @@
 
 #include "mongo/platform/basic.h"
 
-#include "mongo/client/remote_command_targeter.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/txn_two_phase_commit_cmds_gen.h"
@@ -39,10 +38,7 @@
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/db/s/transaction_coordinator_service.h"
 #include "mongo/db/transaction_participant.h"
-#include "mongo/executor/task_executor.h"
-#include "mongo/executor/task_executor_pool.h"
 #include "mongo/rpc/get_status_from_command_result.h"
-#include "mongo/transport/service_entry_point.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
@@ -151,7 +147,13 @@ public:
             return NamespaceString(request().getDbName(), "");
         }
 
-        void doCheckAuthorization(OperationContext* opCtx) const override {}
+        void doCheckAuthorization(OperationContext* opCtx) const override {
+            uassert(ErrorCodes::Unauthorized,
+                    "Unauthorized",
+                    AuthorizationSession::get(opCtx->getClient())
+                        ->isAuthorizedForPrivilege(Privilege{ResourcePattern::forClusterResource(),
+                                                             ActionType::internal}));
+        }
     };
 
     bool adminOnly() const override {
@@ -205,7 +207,7 @@ public:
                 for (const auto& participant : cmd.getParticipants()) {
                     const auto& shardId = participant.getShardId();
                     uassert(ErrorCodes::InvalidOptions,
-                            str::stream() << "participant list contained duplicate shardId "
+                            str::stream() << "Participant list contained duplicate shardId "
                                           << shardId,
                             std::find(participantList.begin(), participantList.end(), shardId) ==
                                 participantList.end());
@@ -215,16 +217,14 @@ public:
                 ss << "]";
                 LOG(3) << "Coordinator shard received request to coordinate commit with "
                           "participant list "
-                       << ss.str() << " for transaction " << opCtx->getTxnNumber() << " on session "
-                       << opCtx->getLogicalSessionId()->toBSON();
+                       << ss.str() << " for " << opCtx->getLogicalSessionId()->getId() << ':'
+                       << opCtx->getTxnNumber();
 
                 commitDecisionFuture = tcs->coordinateCommit(
                     opCtx, *opCtx->getLogicalSessionId(), *opCtx->getTxnNumber(), participantList);
             } else {
                 LOG(3) << "Coordinator shard received request to recover commit decision for "
-                          "transaction "
-                       << opCtx->getTxnNumber() << " on session "
-                       << opCtx->getLogicalSessionId()->toBSON();
+                       << opCtx->getLogicalSessionId()->getId() << ':' << opCtx->getTxnNumber();
 
                 commitDecisionFuture = tcs->recoverCommit(
                     opCtx, *opCtx->getLogicalSessionId(), *opCtx->getTxnNumber());
@@ -257,9 +257,8 @@ public:
             // coordinateCommit request was a byzantine message.
 
             LOG(3) << "Coordinator shard going to attempt to recover decision from local "
-                      "participant for transaction "
-                   << opCtx->getTxnNumber() << " on session "
-                   << opCtx->getLogicalSessionId()->toBSON();
+                      "participant for "
+                   << opCtx->getLogicalSessionId()->getId() << ':' << opCtx->getTxnNumber();
 
             // Recover the decision from the local participant by sending abortTransaction to this
             // node and inverting the response (i.e., a success response is converted to
@@ -275,50 +274,32 @@ public:
                                         << "autocommit"
                                         << false);
 
-            BSONObj abortResponseObj;
+            const auto abortStatus = [&] {
+                txn::AsyncWorkScheduler aws(opCtx->getServiceContext());
+                auto awsShutdownGuard = makeGuard([&aws] {
+                    aws.shutdown({ErrorCodes::Interrupted, "Request interrupted due to timeout"});
+                });
+                auto future =
+                    aws.scheduleRemoteCommand(txn::getLocalShardId(opCtx->getServiceContext()),
+                                              ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+                                              abortRequestObj);
+                const auto& responseStatus = future.get(opCtx);
+                uassertStatusOK(responseStatus.status);
 
-            const auto executor = Grid::get(opCtx)->getExecutorPool()->getFixedExecutor();
-            auto cbHandle = uassertStatusOK(executor->scheduleWork([
-                serviceContext = opCtx->getServiceContext(),
-                &abortResponseObj,
-                abortRequestObj = abortRequestObj.getOwned()
-            ](const executor::TaskExecutor::CallbackArgs& cbArgs) {
-                ThreadClient threadClient(serviceContext);
-                auto uniqueOpCtx = Client::getCurrent()->makeOperationContext();
-                auto opCtx = uniqueOpCtx.get();
-
-                AuthorizationSession::get(opCtx->getClient())->grantInternalAuthorization();
-
-                auto requestOpMsg =
-                    OpMsgRequest::fromDBAndBody(NamespaceString::kAdminDb, abortRequestObj)
-                        .serialize();
-                const auto replyOpMsg = OpMsg::parseOwned(serviceContext->getServiceEntryPoint()
-                                                              ->handleRequest(opCtx, requestOpMsg)
-                                                              .response);
-
-                invariant(replyOpMsg.sequences.empty());
-                abortResponseObj = replyOpMsg.body.getOwned();
-            }));
-            executor->wait(cbHandle, opCtx);
-
-            const auto abortStatus = getStatusFromCommandResult(abortResponseObj);
-
-            // Since the abortTransaction was sent without writeConcern, there should not be a
-            // writeConcern error.
-            invariant(getWriteConcernStatusFromCommandResult(abortResponseObj).isOK());
+                return getStatusFromCommandResult(responseStatus.data);
+            }();
 
             LOG(3) << "coordinateCommitTransaction got response " << abortStatus << " for "
                    << abortRequestObj << " used to recover decision from local participant";
 
             // If the abortTransaction succeeded, return that the transaction aborted.
-            uassert(ErrorCodes::NoSuchTransaction, "transaction aborted", !abortStatus.isOK());
+            if (abortStatus.isOK())
+                uasserted(ErrorCodes::NoSuchTransaction, "Transaction aborted");
 
-            // If the abortTransaction returned that the transaction committed, return
-            // ok, otherwise return whatever the abortTransaction errored with (which may be
-            // NoSuchTransaction).
-            uassert(abortStatus.code(),
-                    abortStatus.reason(),
-                    abortStatus.code() == ErrorCodes::TransactionCommitted);
+            // If the abortTransaction returned that the transaction committed, return OK, otherwise
+            // return whatever the abortTransaction errored with (which may be NoSuchTransaction).
+            if (abortStatus != ErrorCodes::TransactionCommitted)
+                uassertStatusOK(abortStatus);
         }
 
     private:

@@ -1713,7 +1713,7 @@ OpMsgRequest makeOMR(BSONObj obj) {
     return request;
 }
 
-// Positive: demonstrate a command wit concatenate with db
+// Positive: demonstrate a command with concatenate with db
 TEST(IDLCommand, TestConcatentateWithDb) {
     IDLParserErrorContext ctxt("root");
 
@@ -1833,6 +1833,171 @@ TEST(IDLCommand, TestConcatentateWithDbNegative) {
                       AssertionException);
     }
 }
+
+// Positive: demonstrate a command with concatenate with db or uuid - test NSS
+TEST(IDLCommand, TestConcatentateWithDbOrUUID_TestNSS) {
+    IDLParserErrorContext ctxt("root");
+
+    auto testDoc = BSON(BasicConcatenateWithDbOrUUIDCommand::kCommandName << "coll1"
+                                                                          << "field1"
+                                                                          << 3
+                                                                          << "field2"
+                                                                          << "five"
+                                                                          << "$db"
+                                                                          << "db");
+
+    auto testStruct = BasicConcatenateWithDbOrUUIDCommand::parse(ctxt, makeOMR(testDoc));
+    ASSERT_EQUALS(testStruct.getField1(), 3);
+    ASSERT_EQUALS(testStruct.getField2(), "five");
+    ASSERT_EQUALS(testStruct.getNamespaceOrUUID().nss().get(), NamespaceString("db.coll1"));
+
+    assert_same_types<decltype(testStruct.getNamespaceOrUUID()), const NamespaceStringOrUUID&>();
+
+    // Positive: Test we can roundtrip from the just parsed document
+    {
+        BSONObjBuilder builder;
+        OpMsgRequest reply = testStruct.serialize(BSONObj());
+
+        ASSERT_BSONOBJ_EQ(testDoc, reply.body);
+    }
+
+    // Positive: Test we can serialize from nothing the same document except for $db
+    {
+        auto testDocWithoutDb = BSON(BasicConcatenateWithDbOrUUIDCommand::kCommandName << "coll1"
+                                                                                       << "field1"
+                                                                                       << 3
+                                                                                       << "field2"
+                                                                                       << "five");
+
+        BSONObjBuilder builder;
+        BasicConcatenateWithDbOrUUIDCommand one_new(NamespaceString("db.coll1"));
+        one_new.setField1(3);
+        one_new.setField2("five");
+        one_new.serialize(BSONObj(), &builder);
+
+        auto serializedDoc = builder.obj();
+        ASSERT_BSONOBJ_EQ(testDocWithoutDb, serializedDoc);
+    }
+
+    // Positive: Test we can serialize from nothing the same document
+    {
+        BSONObjBuilder builder;
+        BasicConcatenateWithDbOrUUIDCommand one_new(NamespaceString("db.coll1"));
+        one_new.setField1(3);
+        one_new.setField2("five");
+        OpMsgRequest reply = one_new.serialize(BSONObj());
+
+        ASSERT_BSONOBJ_EQ(testDoc, reply.body);
+    }
+}
+
+
+// Positive: demonstrate a command with concatenate with db or uuid - test UUID
+TEST(IDLCommand, TestConcatentateWithDbOrUUID_TestUUID) {
+    IDLParserErrorContext ctxt("root");
+
+    UUID uuid = UUID::gen();
+
+    auto testDoc =
+        BSON(BasicConcatenateWithDbOrUUIDCommand::kCommandName << uuid << "field1" << 3 << "field2"
+                                                               << "five"
+                                                               << "$db"
+                                                               << "db");
+
+    auto testStruct = BasicConcatenateWithDbOrUUIDCommand::parse(ctxt, makeOMR(testDoc));
+    ASSERT_EQUALS(testStruct.getField1(), 3);
+    ASSERT_EQUALS(testStruct.getField2(), "five");
+    ASSERT_EQUALS(testStruct.getNamespaceOrUUID().uuid().get(), uuid);
+
+    assert_same_types<decltype(testStruct.getNamespaceOrUUID()), const NamespaceStringOrUUID&>();
+
+    // Positive: Test we can roundtrip from the just parsed document
+    {
+        BSONObjBuilder builder;
+        OpMsgRequest reply = testStruct.serialize(BSONObj());
+
+        ASSERT_BSONOBJ_EQ(testDoc, reply.body);
+    }
+
+    // Positive: Test we can serialize from nothing the same document except for $db
+    {
+        auto testDocWithoutDb = BSON(
+            BasicConcatenateWithDbOrUUIDCommand::kCommandName << uuid << "field1" << 3 << "field2"
+                                                              << "five");
+
+        BSONObjBuilder builder;
+        BasicConcatenateWithDbOrUUIDCommand one_new(NamespaceStringOrUUID("db", uuid));
+        one_new.setField1(3);
+        one_new.setField2("five");
+        one_new.serialize(BSONObj(), &builder);
+
+        auto serializedDoc = builder.obj();
+        ASSERT_BSONOBJ_EQ(testDocWithoutDb, serializedDoc);
+    }
+
+    // Positive: Test we can serialize from nothing the same document
+    {
+        BSONObjBuilder builder;
+        BasicConcatenateWithDbOrUUIDCommand one_new(NamespaceStringOrUUID("db", uuid));
+        one_new.setField1(3);
+        one_new.setField2("five");
+        OpMsgRequest reply = one_new.serialize(BSONObj());
+
+        ASSERT_BSONOBJ_EQ(testDoc, reply.body);
+    }
+}
+
+
+TEST(IDLCommand, TestConcatentateWithDbOrUUIDNegative) {
+    IDLParserErrorContext ctxt("root");
+
+    // Negative - duplicate namespace field
+    {
+        auto testDoc =
+            BSON("BasicConcatenateWithDbOrUUIDCommand" << 1 << "field1" << 3
+                                                       << "BasicConcatenateWithDbOrUUIDCommand"
+                                                       << 1
+                                                       << "field2"
+                                                       << "five");
+        ASSERT_THROWS(BasicConcatenateWithDbOrUUIDCommand::parse(ctxt, makeOMR(testDoc)),
+                      AssertionException);
+    }
+
+    // Negative -  namespace field wrong order
+    {
+        auto testDoc = BSON("field1" << 3 << "BasicConcatenateWithDbOrUUIDCommand" << 1 << "field2"
+                                     << "five");
+        ASSERT_THROWS(BasicConcatenateWithDbOrUUIDCommand::parse(ctxt, makeOMR(testDoc)),
+                      AssertionException);
+    }
+
+    // Negative -  namespace missing
+    {
+        auto testDoc = BSON("field1" << 3 << "field2"
+                                     << "five");
+        ASSERT_THROWS(BasicConcatenateWithDbOrUUIDCommand::parse(ctxt, makeOMR(testDoc)),
+                      AssertionException);
+    }
+
+    // Negative - wrong type
+    {
+        auto testDoc = BSON("BasicConcatenateWithDbOrUUIDCommand" << 1 << "field1" << 3 << "field2"
+                                                                  << "five");
+        ASSERT_THROWS(BasicConcatenateWithDbOrUUIDCommand::parse(ctxt, makeOMR(testDoc)),
+                      AssertionException);
+    }
+
+    // Negative - bad ns with embedded null
+    {
+        StringData sd1("db\0foo", 6);
+        auto testDoc =
+            BSON("BasicConcatenateWithDbOrUUIDCommand" << sd1 << "field1" << 3 << "field2"
+                                                       << "five");
+        ASSERT_THROWS(BasicConcatenateWithDbOrUUIDCommand::parse(ctxt, makeOMR(testDoc)),
+                      AssertionException);
+    }
+}
+
 
 // Positive: demonstrate a command with concatenate with db
 TEST(IDLCommand, TestIgnore) {
@@ -2384,20 +2549,37 @@ TEST(IDLCommand, TestKnownFieldDuplicate) {
     ASSERT_EQUALS(28, testStruct.getField1());
     ASSERT_EQUALS(42, testStruct.getMaxTimeMS());
 
-    auto expectedDoc = BSON("KnownFieldCommand"
-                            << "coll1"
+    // OpMsg request serializes original '$db' out because it is part of the OP_MSG request
+    auto expectedOpMsgDoc = BSON("KnownFieldCommand"
+                                 << "coll1"
 
-                            << "field1"
-                            << 28
-                            << "maxTimeMS"
-                            << 42
-                            << "$db"
-                            << "db"
+                                 << "field1"
+                                 << 28
+                                 << "maxTimeMS"
+                                 << 42
+                                 << "$db"
+                                 << "db"
 
-                            << "$client"
-                            << "foo");
+                                 << "$client"
+                                 << "foo");
 
-    ASSERT_BSONOBJ_EQ(expectedDoc, testStruct.serialize(testPassthrough).body);
+    ASSERT_BSONOBJ_EQ(expectedOpMsgDoc, testStruct.serialize(testPassthrough).body);
+
+    // BSON serialize does not round-trip '$db' because it can passed in passthrough data
+    auto expectedBSONDoc = BSON("KnownFieldCommand"
+                                << "coll1"
+
+                                << "field1"
+                                << 28
+                                << "maxTimeMS"
+                                << 42
+                                << "$db"
+                                << "foo"
+
+                                << "$client"
+                                << "foo");
+
+    ASSERT_BSONOBJ_EQ(expectedBSONDoc, testStruct.toBSON(testPassthrough));
 }
 
 

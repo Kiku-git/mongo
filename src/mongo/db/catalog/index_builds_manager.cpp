@@ -37,6 +37,7 @@
 #include "mongo/db/catalog/collection_catalog_entry.h"
 #include "mongo/db/catalog/database_catalog_entry.h"
 #include "mongo/db/catalog/index_catalog.h"
+#include "mongo/db/catalog/index_timestamp_helper.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/storage/write_unit_of_work.h"
@@ -68,6 +69,8 @@ std::string toSummary(const std::map<UUID, std::shared_ptr<MultiIndexBlock>>& bu
 
 }  // namespace
 
+IndexBuildsManager::SetupOptions::SetupOptions() = default;
+
 IndexBuildsManager::~IndexBuildsManager() {
     invariant(_builders.empty(),
               str::stream() << "Index builds still active: " << toSummary(_builders));
@@ -78,16 +81,23 @@ Status IndexBuildsManager::setUpIndexBuild(OperationContext* opCtx,
                                            const std::vector<BSONObj>& specs,
                                            const UUID& buildUUID,
                                            OnInitFn onInit,
-                                           bool forRecovery) {
+                                           SetupOptions options) {
     _registerIndexBuild(buildUUID);
 
     const auto& nss = collection->ns();
-    invariant(opCtx->lockState()->isCollectionLockedForMode(nss.ns(), MODE_X),
+    invariant(opCtx->lockState()->isCollectionLockedForMode(nss, MODE_X),
               str::stream() << "Unable to set up index build " << buildUUID << ": collection "
                             << nss.ns()
                             << " is not locked in exclusive mode.");
 
     auto builder = _getBuilder(buildUUID);
+
+    // Ignore uniqueness constraint violations when relaxed (on secondaries). Secondaries can
+    // complete index builds in the middle of batches, which creates the potential for finding
+    // duplicate key violations where there otherwise would be none at consistent states.
+    if (options.indexConstraints == IndexConstraints::kRelax) {
+        builder->ignoreUniqueConstraint();
+    }
 
     auto initResult = writeConflictRetry(opCtx,
                                          "IndexBuildsManager::setUpIndexBuild",
@@ -100,7 +110,7 @@ Status IndexBuildsManager::setUpIndexBuild(OperationContext* opCtx,
         return initResult.getStatus();
     }
 
-    if (forRecovery) {
+    if (options.forRecovery) {
         log() << "Index build initialized: " << buildUUID << ": " << nss
               << ": indexes: " << initResult.getValue().size();
     } else {
@@ -194,10 +204,12 @@ StatusWith<std::pair<long long, long long>> IndexBuildsManager::startBuildingInd
     return std::make_pair(numRecords, dataSize);
 }
 
-Status IndexBuildsManager::drainBackgroundWrites(OperationContext* opCtx, const UUID& buildUUID) {
+Status IndexBuildsManager::drainBackgroundWrites(OperationContext* opCtx,
+                                                 const UUID& buildUUID,
+                                                 RecoveryUnit::ReadSource readSource) {
     auto builder = _getBuilder(buildUUID);
 
-    return builder->drainBackgroundWrites(opCtx);
+    return builder->drainBackgroundWrites(opCtx, readSource);
 }
 
 Status IndexBuildsManager::finishBuildingPhase(const UUID& buildUUID) {
@@ -224,20 +236,25 @@ Status IndexBuildsManager::commitIndexBuild(OperationContext* opCtx,
                                             MultiIndexBlock::OnCommitFn onCommitFn) {
     auto builder = _getBuilder(buildUUID);
 
-    return writeConflictRetry(opCtx,
-                              "IndexBuildsManager::commitIndexBuild",
-                              nss.ns(),
-                              [builder, opCtx, collection, &onCreateEachFn, &onCommitFn] {
-                                  WriteUnitOfWork wunit(opCtx);
-                                  auto status = builder->commit(
-                                      opCtx, collection, onCreateEachFn, onCommitFn);
-                                  if (!status.isOK()) {
-                                      return status;
-                                  }
+    return writeConflictRetry(
+        opCtx,
+        "IndexBuildsManager::commitIndexBuild",
+        nss.ns(),
+        [builder, opCtx, collection, nss, &onCreateEachFn, &onCommitFn] {
+            WriteUnitOfWork wunit(opCtx);
+            auto status = builder->commit(opCtx, collection, onCreateEachFn, onCommitFn);
+            if (!status.isOK()) {
+                return status;
+            }
 
-                                  wunit.commit();
-                                  return Status::OK();
-                              });
+            // Eventually, we will obtain the timestamp for completing the index build from the
+            // commitIndexBuild oplog entry.
+            // The current logic for timestamping index completion is consistent with the
+            // IndexBuilder. See SERVER-38986 and SERVER-34896.
+            IndexTimestampHelper::setGhostCommitTimestampForCatalogWrite(opCtx, nss);
+            wunit.commit();
+            return Status::OK();
+        });
 }
 
 bool IndexBuildsManager::abortIndexBuild(const UUID& buildUUID, const std::string& reason) {
@@ -251,7 +268,9 @@ bool IndexBuildsManager::abortIndexBuild(const UUID& buildUUID, const std::strin
     return true;
 }
 
-bool IndexBuildsManager::interruptIndexBuild(const UUID& buildUUID, const std::string& reason) {
+bool IndexBuildsManager::interruptIndexBuild(OperationContext* opCtx,
+                                             const UUID& buildUUID,
+                                             const std::string& reason) {
     stdx::unique_lock<stdx::mutex> lk(_mutex);
 
     auto builderIt = _builders.find(buildUUID);
@@ -259,7 +278,9 @@ bool IndexBuildsManager::interruptIndexBuild(const UUID& buildUUID, const std::s
         return false;
     }
 
-    // TODO: Not yet implemented.
+    log() << "Index build interrupted: " << buildUUID << ": " << reason;
+    builderIt->second->abortWithoutCleanup(opCtx);
+
     return true;
 }
 

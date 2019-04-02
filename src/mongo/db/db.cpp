@@ -120,7 +120,6 @@
 #include "mongo/db/s/sharding_initialization_mongod.h"
 #include "mongo/db/s/sharding_state_recovery.h"
 #include "mongo/db/server_options.h"
-#include "mongo/db/server_parameters.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_entry_point_mongod.h"
 #include "mongo/db/session_killer.h"
@@ -133,6 +132,7 @@
 #include "mongo/db/storage/storage_engine_lock_file.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/system_index.h"
+#include "mongo/db/transaction_participant.h"
 #include "mongo/db/ttl.h"
 #include "mongo/db/wire_version.h"
 #include "mongo/executor/network_connection_hook.h"
@@ -176,6 +176,8 @@
 #include "mongo/util/text.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/version.h"
+
+#include "mongo/db/storage/flow_control.h"
 
 #ifdef MONGO_CONFIG_SSL
 #include "mongo/util/net/ssl_options.h"
@@ -324,6 +326,9 @@ ExitCode _initAndListen(int listenPort) {
     auto runner = makePeriodicRunner(serviceContext);
     runner->startup();
     serviceContext->setPeriodicRunner(std::move(runner));
+    FlowControl::set(serviceContext,
+                     stdx::make_unique<FlowControl>(
+                         serviceContext, repl::ReplicationCoordinator::get(serviceContext)));
 
     initializeStorageEngine(serviceContext, StorageEngineInitFlags::kNone);
 
@@ -415,23 +420,11 @@ ExitCode _initAndListen(int listenPort) {
                                                        repl::StorageInterface::get(serviceContext));
     }
 
-    auto swNonLocalDatabases = repairDatabasesAndCheckVersion(startupOpCtx.get());
-    if (!swNonLocalDatabases.isOK()) {
-        // SERVER-31611 introduced a return value to `repairDatabasesAndCheckVersion`. Previously,
-        // a failing condition would fassert. SERVER-31611 covers a case where the binary (3.6) is
-        // refusing to start up because it refuses acknowledgement of FCV 3.2 and requires the
-        // user to start up with an older binary. Thus shutting down the server must leave the
-        // datafiles in a state that the older binary can start up. This requires going through a
-        // clean shutdown.
-        //
-        // The invariant is *not* a statement that `repairDatabasesAndCheckVersion` must return
-        // `MustDowngrade`. Instead, it is meant as a guardrail to protect future developers from
-        // accidentally buying into this behavior. New errors that are returned from the method
-        // may or may not want to go through a clean shutdown, and they likely won't want the
-        // program to return an exit code of `EXIT_NEED_DOWNGRADE`.
-        severe(LogComponent::kControl) << "** IMPORTANT: "
-                                       << swNonLocalDatabases.getStatus().reason();
-        invariant(swNonLocalDatabases == ErrorCodes::MustDowngrade);
+    bool nonLocalDatabases;
+    try {
+        nonLocalDatabases = repairDatabasesAndCheckVersion(startupOpCtx.get());
+    } catch (const ExceptionFor<ErrorCodes::MustDowngrade>& error) {
+        severe(LogComponent::kControl) << "** IMPORTANT: " << error.toStatus().reason();
         exitCleanly(EXIT_NEED_DOWNGRADE);
     }
 
@@ -439,8 +432,7 @@ ExitCode _initAndListen(int listenPort) {
     // we are part of a replica set and are started up with no data files, we do not set the
     // featureCompatibilityVersion until a primary is chosen. For this case, we expect the in-memory
     // featureCompatibilityVersion parameter to still be uninitialized until after startup.
-    if (canCallFCVSetIfCleanStartup &&
-        (!replSettings.usingReplSets() || swNonLocalDatabases.getValue())) {
+    if (canCallFCVSetIfCleanStartup && (!replSettings.usingReplSets() || nonLocalDatabases)) {
         invariant(serverGlobalParams.featureCompatibility.isVersionInitialized());
     }
 
@@ -531,9 +523,16 @@ ExitCode _initAndListen(int listenPort) {
 
         startFreeMonitoring(serviceContext);
 
+        auto replCoord = repl::ReplicationCoordinator::get(startupOpCtx.get());
+        invariant(replCoord);
+        if (replCoord->isReplEnabled()) {
+            storageEngine->setOldestActiveTransactionTimestampCallback(
+                TransactionParticipant::getOldestActiveTimestamp);
+        }
+
         if (serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
             // Note: For replica sets, ShardingStateRecovery happens on transition to primary.
-            if (!repl::ReplicationCoordinator::get(startupOpCtx.get())->isReplEnabled()) {
+            if (!replCoord->isReplEnabled()) {
                 if (ShardingState::get(startupOpCtx.get())->enabled()) {
                     uassertStatusOK(ShardingStateRecovery::recover(startupOpCtx.get()));
                 }
@@ -562,7 +561,7 @@ ExitCode _initAndListen(int listenPort) {
                                       stdx::make_unique<LogicalTimeValidator>(keyManager));
         }
 
-        repl::ReplicationCoordinator::get(startupOpCtx.get())->startup(startupOpCtx.get());
+        replCoord->startup(startupOpCtx.get());
         if (getReplSetMemberInStandaloneMode(serviceContext)) {
             log() << startupWarningsLog;
             log() << "** WARNING: mongod started without --replSet yet document(s) are present in "
@@ -856,7 +855,7 @@ MONGO_INITIALIZER_GENERAL(setSSLManagerType, MONGO_NO_PREREQUISITES, ("SSLManage
 
 // NOTE: This function may be called at any time after registerShutdownTask is called below. It
 // must not depend on the prior execution of mongo initializers or the existence of threads.
-void shutdownTask() {
+void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
     // This client initiation pattern is only to be used here, with plans to eliminate this pattern
     // down the line.
     if (!haveClient())
@@ -864,6 +863,29 @@ void shutdownTask() {
 
     auto const client = Client::getCurrent();
     auto const serviceContext = client->getServiceContext();
+
+    // If we don't have shutdownArgs, we're shutting down from a signal, or other clean shutdown
+    // path.
+    //
+    // In that case, do a default step down, still shutting down if stepDown fails.
+    if (auto replCoord = repl::ReplicationCoordinator::get(serviceContext);
+        replCoord && !shutdownArgs.isUserInitiated) {
+        replCoord->enterTerminalShutdown();
+        ServiceContext::UniqueOperationContext uniqueOpCtx;
+        OperationContext* opCtx = client->getOperationContext();
+        if (!opCtx) {
+            uniqueOpCtx = client->makeOperationContext();
+            opCtx = uniqueOpCtx.get();
+        }
+
+        try {
+            replCoord->stepDown(opCtx, false /* force */, Seconds(10), Seconds(120));
+        } catch (const ExceptionFor<ErrorCodes::NotMaster>&) {
+            // ignore not master errors
+        } catch (const DBException& e) {
+            log() << "Failed to stepDown in non-command initiated shutdown path " << e.toString();
+        }
+    }
 
     // Terminate the balancer thread so it doesn't leak memory.
     if (auto balancer = Balancer::get(serviceContext)) {
@@ -893,6 +915,7 @@ void shutdownTask() {
             uniqueOpCtx = client->makeOperationContext();
             opCtx = uniqueOpCtx.get();
         }
+        opCtx->setIsExecutingShutdown();
 
         // This can wait a long time while we drain the secondary's apply queue, especially if
         // it is building an index.
@@ -904,29 +927,21 @@ void shutdownTask() {
         // destroy all stashed transaction resources in order to release locks, and finally wait
         // until the lock request is granted.
         repl::ReplicationStateTransitionLockGuard rstl(
-            opCtx, repl::ReplicationStateTransitionLockGuard::EnqueueOnly());
+            opCtx, MODE_X, repl::ReplicationStateTransitionLockGuard::EnqueueOnly());
 
         // Kill all operations. After this point, the opCtx will have been marked as killed and will
         // not be usable other than to kill all transactions directly below.
         serviceContext->setKillAllOperations();
 
-        {
-            // Make this scope uninterruptible so that we can still abort all transactions even
-            // though the opCtx has been killed. While we don't currently check for an interrupt
-            // before checking out a session, we want to make sure that this completes.
-            UninterruptibleLockGuard noInterrupt(opCtx->lockState());
+        // Destroy all stashed transaction resources, in order to release locks.
+        killSessionsLocalShutdownAllTransactions(opCtx);
 
-            // Destroy all stashed transaction resources, in order to release locks.
-            killSessionsLocalShutdownAllTransactions(opCtx);
-
-            rstl.waitForLockUntil(Date_t::max());
-        }
-
-        // Interrupts all index builds, leaving the state intact to be recovered when the server
-        // restarts. This should be done after replication oplog application finishes, so foreground
-        // index builds begun by replication on secondaries do not invariant.
-        IndexBuildsCoordinator::get(serviceContext)->shutdown();
+        rstl.waitForLockUntil(Date_t::max());
     }
+
+    // Shuts down the thread pool and waits for index builds to finish.
+    // Depends on setKillAllOperations() above to interrupt the index build operations.
+    IndexBuildsCoordinator::get(serviceContext)->shutdown();
 
     ReplicaSetMonitor::shutdown();
 

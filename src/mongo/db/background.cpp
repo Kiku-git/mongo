@@ -34,7 +34,6 @@
 #include <iostream>
 #include <string>
 
-#include "mongo/base/disallow_copying.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/thread.h"
@@ -50,7 +49,8 @@ using std::shared_ptr;
 namespace {
 
 class BgInfo {
-    MONGO_DISALLOW_COPYING(BgInfo);
+    BgInfo(const BgInfo&) = delete;
+    BgInfo& operator=(const BgInfo&) = delete;
 
 public:
     BgInfo() : _opsInProgCount(0) {}
@@ -134,6 +134,17 @@ int BackgroundOperation::numInProgForDb(StringData db) {
 bool BackgroundOperation::inProgForNs(StringData ns) {
     stdx::lock_guard<stdx::mutex> lk(m);
     return nsInProg.find(ns) != nsInProg.end();
+}
+
+void BackgroundOperation::assertNoBgOpInProg() {
+    for (auto& db : dbsInProg) {
+        uassert(ErrorCodes::BackgroundOperationInProgressForDatabase,
+                mongoutils::str::stream()
+                    << "cannot perform operation: a background operation is currently running for "
+                       "database "
+                    << db.first,
+                !inProgForDb(db.first));
+    }
 }
 
 void BackgroundOperation::assertNoBgOpInProgForDb(StringData db) {

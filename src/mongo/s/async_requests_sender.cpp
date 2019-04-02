@@ -34,7 +34,6 @@
 #include "mongo/s/async_requests_sender.h"
 
 #include "mongo/client/remote_command_targeter.h"
-#include "mongo/db/server_parameters.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/s/client/shard_registry.h"
@@ -89,8 +88,6 @@ AsyncRequestsSender::~AsyncRequestsSender() {
     } catch (const ExceptionFor<ErrorCodes::InterruptedAtShutdown>&) {
         // Ignore interrupted at shutdown.  No need to cleanup if we're going into process-wide
         // shutdown.
-        //
-        // TODO: Figure out how to do actual NonInterruptibility in SERVER-39427
     }
 }
 
@@ -113,7 +110,7 @@ AsyncRequestsSender::Response AsyncRequestsSender::next() {
                 continue;
             }
         } else {
-            _opCtx->runWithoutInterruption([&] { _makeProgress(); });
+            _opCtx->runWithoutInterruptionExceptAtGlobalShutdown([&] { _makeProgress(); });
         }
     }
     return *readyResponse;

@@ -63,7 +63,6 @@
 #include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/server_options.h"
-#include "mongo/db/server_parameters.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/snapshot_window_options.h"
 #include "mongo/db/storage/journal_listener.h"
@@ -96,19 +95,6 @@
 #endif
 
 namespace mongo {
-
-// Close idle wiredtiger sessions in the session cache after this many seconds.
-// The default is 5 mins. Have a shorter default in the debug build to aid testing.
-MONGO_EXPORT_SERVER_PARAMETER(wiredTigerSessionCloseIdleTimeSecs,
-                              std::int32_t,
-                              kDebugBuild ? 5 : 300)
-    ->withValidator([](const auto& potentialNewValue) {
-        if (potentialNewValue < 0) {
-            return Status(ErrorCodes::BadValue,
-                          "wiredTigerSessionCloseIdleTimeSecs must be greater than or equal to 0s");
-        }
-        return Status::OK();
-    });
 
 bool WiredTigerFileVersion::shouldDowngrade(bool readOnly,
                                             bool repairMode,
@@ -204,7 +190,7 @@ public:
                 _condvar.wait_for(lock, stdx::chrono::seconds(kDebugBuild ? 1 : 10));
             }
 
-            _sessionCache->closeExpiredIdleSessions(wiredTigerSessionCloseIdleTimeSecs.load() *
+            _sessionCache->closeExpiredIdleSessions(gWiredTigerSessionCloseIdleTimeSecs.load() *
                                                     1000);
         }
         LOG(1) << "stopping " << name() << " thread";
@@ -274,6 +260,20 @@ private:
     AtomicWord<bool> _shuttingDown{false};
 };
 
+std::string toString(const StorageEngine::OldestActiveTransactionTimestampResult& r) {
+    if (r.isOK()) {
+        if (r.getValue()) {
+            // Timestamp.
+            return r.getValue().value().toString();
+        } else {
+            // boost::none.
+            return "null";
+        }
+    } else {
+        return r.getStatus().toString();
+    }
+}
+
 class WiredTigerKVEngine::WiredTigerCheckpointThread : public BackgroundJob {
 public:
     explicit WiredTigerCheckpointThread(WiredTigerKVEngine* wiredTigerKVEngine,
@@ -299,28 +299,31 @@ public:
                                       wiredTigerGlobalOptions.checkpointDelaySecs)));
             }
 
+            // Might have been awakened by another thread shutting us down.
+            if (_shuttingDown.load()) {
+                break;
+            }
+
             const Timestamp stableTimestamp = _wiredTigerKVEngine->getStableTimestamp();
             const Timestamp initialDataTimestamp = _wiredTigerKVEngine->getInitialDataTimestamp();
 
             // The amount of oplog to keep is primarily dictated by a user setting. However, in
             // unexpected cases, durable, recover to a timestamp storage engines may need to play
             // forward from an oplog entry that would otherwise be truncated by the user
-            // setting. Furthermore with prepared transactions, oplog entries can refer to
-            // previous oplog entries.
+            // setting. Furthermore, the entries in prepared or large transactions can refer to
+            // previous entries in the same transaction.
             //
-            // Live (replication) rollback will replay oplogs from exactly the stable
-            // timestamp. With prepared transactions, it may require some additional entries prior
-            // to the stable timestamp. These requirements are summarized in
-            // `getOplogNeededForRollback`. Truncating the oplog at this point is sufficient for
-            // in-memory configurations, but could cause an unrecoverable scenario if the node
-            // crashed and has to play from the last stable checkpoint.
+            // Live (replication) rollback will replay oplogs from exactly the stable timestamp.
+            // With prepared or large transactions, it may require some additional entries prior to
+            // the stable timestamp. These requirements are summarized in getOplogNeededForRollback.
+            // Truncating the oplog at this point is sufficient for in-memory configurations, but
+            // could cause an unrecoverable scenario if the node crashed and has to play from the
+            // last stable checkpoint.
             //
             // By recording the oplog needed for rollback "now", then taking a stable checkpoint,
             // we can safely assume that the oplog needed for crash recovery has caught up to the
             // recorded value. After the checkpoint, this value will be published such that actors
             // which truncate the oplog can read an updated value.
-            const Timestamp oplogNeededForRollback =
-                _wiredTigerKVEngine->getOplogNeededForRollback();
             try {
                 // Three cases:
                 //
@@ -345,21 +348,22 @@ public:
                         << stableTimestamp.toString()
                         << " InitialDataTimestamp: " << initialDataTimestamp.toString();
                 } else {
-                    // 'stableTimestamp' is the smallest possible value at which WT will take a
-                    // stable checkpoint. A newer stable timestamp may be used by WT if one is
-                    // concurrently set.
-                    LOG_FOR_RECOVERY(2) << "Performing stable checkpoint. StableTimestamp: "
-                                        << stableTimestamp;
+                    auto oplogNeededForRollback = _wiredTigerKVEngine->getOplogNeededForRollback();
+
+                    LOG_FOR_RECOVERY(2)
+                        << "Performing stable checkpoint. StableTimestamp: " << stableTimestamp
+                        << ", OplogNeededForRollback: " << toString(oplogNeededForRollback);
 
                     UniqueWiredTigerSession session = _sessionCache->getSession();
                     WT_SESSION* s = session->getSession();
                     invariantWTOK(s->checkpoint(s, "use_timestamp=true"));
 
-                    // Now that the checkpoint is durable, publish the oplog needed to recover
-                    // from it.
-                    {
+                    if (oplogNeededForRollback.isOK()) {
+                        // Now that the checkpoint is durable, publish the oplog needed to recover
+                        // from it.
                         stdx::lock_guard<stdx::mutex> lk(_oplogNeededForCrashRecoveryMutex);
-                        _oplogNeededForCrashRecovery.store(oplogNeededForRollback.asULL());
+                        _oplogNeededForCrashRecovery.store(
+                            oplogNeededForRollback.getValue().asULL());
                     }
                 }
             } catch (const WriteConflictException&) {
@@ -524,10 +528,6 @@ StatusWith<std::vector<std::string>> getDataFilesFromBackupCursor(WT_CURSOR* cur
     return files;
 }
 
-constexpr bool takeUnstableCheckpointOnShutdownDefault = false;
-MONGO_EXPORT_STARTUP_SERVER_PARAMETER(takeUnstableCheckpointOnShutdown,
-                                      bool,
-                                      takeUnstableCheckpointOnShutdownDefault);
 }  // namespace
 
 StringData WiredTigerKVEngine::kTableUriPrefix = "table:"_sd;
@@ -657,11 +657,14 @@ WiredTigerKVEngine::WiredTigerKVEngine(const std::string& canonicalName,
         _journalFlusher->go();
     }
 
+    // Until the Replication layer installs a real callback, prevent truncating the oplog.
+    setOldestActiveTransactionTimestampCallback(
+        [](Timestamp) { return StatusWith(boost::make_optional(Timestamp::min())); });
+
     if (!_readOnly && !_ephemeral) {
         if (!_recoveryTimestamp.isNull()) {
             setInitialDataTimestamp(_recoveryTimestamp);
-            // The `maximumTruncationTimestamp` is not persisted, so choose a conservative value.
-            setStableTimestamp(_recoveryTimestamp, Timestamp::min(), false);
+            setStableTimestamp(_recoveryTimestamp, false);
         }
 
         _checkpointThread =
@@ -831,7 +834,7 @@ void WiredTigerKVEngine::cleanShutdown() {
         invariantWTOK(_conn->reconfigure(_conn, _fileVersion.getDowngradeString().c_str()));
     }
 
-    if (takeUnstableCheckpointOnShutdown) {
+    if (gTakeUnstableCheckpointOnShutdown) {
         closeConfig += "use_timestamp=false,";
     }
 
@@ -974,6 +977,9 @@ Status WiredTigerKVEngine::beginBackup(OperationContext* opCtx) {
         return Status::OK();
     }
 
+    // Persist the sizeStorer information to disk before opening the backup cursor.
+    syncSizeInfo(true);
+
     // This cursor will be freed by the backupSession being closed as the session is uncached
     auto session = stdx::make_unique<WiredTigerSession>(_conn);
     WT_CURSOR* c = NULL;
@@ -998,6 +1004,11 @@ StatusWith<std::vector<std::string>> WiredTigerKVEngine::beginNonBlockingBackup(
     stdx::lock_guard<stdx::mutex> lock(_oplogPinnedByBackupMutex);
     _checkpointThread->assignOplogNeededForCrashRecoveryTo(&_oplogPinnedByBackup);
     auto pinOplogGuard = makeGuard([&] { _oplogPinnedByBackup = boost::none; });
+
+    // Persist the sizeStorer information to disk before opening the backup cursor. We aren't
+    // guaranteed to have the most up-to-date size information after the backup as writes can still
+    // occur during a nonblocking backup.
+    syncSizeInfo(true);
 
     // This cursor will be freed by the backupSession being closed as the session is uncached
     auto sessionRaii = stdx::make_unique<WiredTigerSession>(_conn);
@@ -1063,6 +1074,12 @@ void WiredTigerKVEngine::syncSizeInfo(bool sync) const {
         // ignore, we'll try again later.
     }
 }
+
+void WiredTigerKVEngine::setOldestActiveTransactionTimestampCallback(
+    StorageEngine::OldestActiveTransactionTimestampCallback callback) {
+    stdx::lock_guard<stdx::mutex> lk(_oldestActiveTransactionTimestampCallbackMutex);
+    _oldestActiveTransactionTimestampCallback = std::move(callback);
+};
 
 RecoveryUnit* WiredTigerKVEngine::newRecoveryUnit() {
     return new WiredTigerRecoveryUnit(_sessionCache.get());
@@ -1543,12 +1560,11 @@ bool WiredTigerKVEngine::initRsOplogBackgroundThread(StringData ns) {
 namespace {
 
 MONGO_FAIL_POINT_DEFINE(WTPreserveSnapshotHistoryIndefinitely);
+MONGO_FAIL_POINT_DEFINE(WTSetOldestTSToStableTS);
 
 }  // namespace
 
-void WiredTigerKVEngine::setStableTimestamp(Timestamp stableTimestamp,
-                                            boost::optional<Timestamp> maximumTruncationTimestamp,
-                                            bool force) {
+void WiredTigerKVEngine::setStableTimestamp(Timestamp stableTimestamp, bool force) {
     if (stableTimestamp.isNull()) {
         return;
     }
@@ -1596,26 +1612,9 @@ void WiredTigerKVEngine::setStableTimestamp(Timestamp stableTimestamp,
     invariant(static_cast<std::size_t>(size) < sizeof(stableTSConfigString));
     invariantWTOK(_conn->set_timestamp(_conn, stableTSConfigString));
 
+    // After publishing a stable timestamp to WT, we can record the updated stable timestamp value
+    // for the necessary oplog to keep.
     _stableTimestamp.store(stableTimestamp.asULL());
-
-    // After publishing a stable timestamp to WT, we can publish the updated value for the
-    // necessary oplog to keep. Calls to this method require the min(stableTimestamp,
-    // maximumTruncationTimestamp) to be monotonically increasing. This allows us to safely record
-    // and publish a single value without additional concurrency control.
-    if (maximumTruncationTimestamp) {
-        // Until we discover otherwise, assume callers expect to obey the contract for proper
-        // oplog truncation.
-        DEV invariant(_oplogNeededForRollback.load() <=
-                      std::min(maximumTruncationTimestamp->asULL(), stableTimestamp.asULL()));
-        _oplogNeededForRollback.store(
-            std::min(maximumTruncationTimestamp->asULL(), stableTimestamp.asULL()));
-    } else {
-        // If there is no maximumTruncationTimestamp at this stable timestamp, WT is free to
-        // truncate the oplog to any value behind the last stable timestamp, once it is
-        // checkpointed.
-        _oplogNeededForRollback.store(stableTimestamp.asULL());
-    }
-
     if (_checkpointThread && !_checkpointThread->hasTriggeredFirstStableCheckpoint()) {
         _checkpointThread->triggerFirstStableCheckpoint(
             prevStable, Timestamp(_initialDataTimestamp.load()), stableTimestamp);
@@ -1633,6 +1632,13 @@ void WiredTigerKVEngine::setStableTimestamp(Timestamp stableTimestamp,
 
 void WiredTigerKVEngine::setOldestTimestampFromStable() {
     Timestamp stableTimestamp(_stableTimestamp.load());
+
+    // Set the oldest timestamp to the stable timestamp to ensure that there is no lag window
+    // between the two.
+    if (MONGO_FAIL_POINT(WTSetOldestTSToStableTS)) {
+        setOldestTimestamp(stableTimestamp, false);
+        return;
+    }
 
     // Calculate what the oldest_timestamp should be from the stable_timestamp. The oldest
     // timestamp should lag behind stable by 'targetSnapshotHistoryWindowInSeconds' to create a
@@ -1837,11 +1843,6 @@ boost::optional<Timestamp> WiredTigerKVEngine::getRecoveryTimestamp() const {
 }
 
 boost::optional<Timestamp> WiredTigerKVEngine::getLastStableRecoveryTimestamp() const {
-    if (!supportsRecoverToStableTimestamp()) {
-        severe() << "WiredTiger is configured to not support recover to a stable timestamp";
-        fassertFailed(50770);
-    }
-
     if (_ephemeral) {
         Timestamp stable(_stableTimestamp.load());
         Timestamp initialData(_initialDataTimestamp.load());
@@ -1863,8 +1864,29 @@ boost::optional<Timestamp> WiredTigerKVEngine::getLastStableRecoveryTimestamp() 
     return boost::none;
 }
 
-Timestamp WiredTigerKVEngine::getOplogNeededForRollback() const {
-    return Timestamp(_oplogNeededForRollback.load());
+StatusWith<Timestamp> WiredTigerKVEngine::getOplogNeededForRollback() const {
+    // Get the current stable timestamp and use it throughout this function, ignoring updates from
+    // another thread.
+    auto stableTimestamp = _stableTimestamp.load();
+
+    // Only one thread can set or execute this callback.
+    stdx::lock_guard<stdx::mutex> lk(_oldestActiveTransactionTimestampCallbackMutex);
+    boost::optional<Timestamp> oldestActiveTransactionTimestamp;
+    if (_oldestActiveTransactionTimestampCallback) {
+        auto status = _oldestActiveTransactionTimestampCallback(Timestamp(stableTimestamp));
+        if (status.isOK()) {
+            oldestActiveTransactionTimestamp.swap(status.getValue());
+        } else {
+            LOG(1) << "getting oldest active transaction timestamp: " << status.getStatus();
+            return status.getStatus();
+        }
+    }
+
+    if (oldestActiveTransactionTimestamp) {
+        return std::min(oldestActiveTransactionTimestamp.value(), Timestamp(stableTimestamp));
+    } else {
+        return Timestamp(stableTimestamp);
+    }
 }
 
 boost::optional<Timestamp> WiredTigerKVEngine::getOplogNeededForCrashRecovery() const {
@@ -1876,16 +1898,37 @@ boost::optional<Timestamp> WiredTigerKVEngine::getOplogNeededForCrashRecovery() 
 }
 
 Timestamp WiredTigerKVEngine::getPinnedOplog() const {
-    stdx::lock_guard<stdx::mutex> lock(_oplogPinnedByBackupMutex);
-    if (_oplogPinnedByBackup) {
-        // All the oplog since `_oplogPinnedByBackup` should remain intact during the backup.
-        return _oplogPinnedByBackup.get();
+    {
+        stdx::lock_guard<stdx::mutex> lock(_oplogPinnedByBackupMutex);
+        if (!storageGlobalParams.allowOplogTruncation) {
+            // If oplog truncation is not allowed, then return the min timestamp so that no history
+            // is
+            // ever allowed to be deleted.
+            return Timestamp::min();
+        }
+        if (_oplogPinnedByBackup) {
+            // All the oplog since `_oplogPinnedByBackup` should remain intact during the backup.
+            return _oplogPinnedByBackup.get();
+        }
     }
+
+    auto oplogNeededForCrashRecovery = getOplogNeededForCrashRecovery();
     if (!_keepDataHistory) {
         // We use rollbackViaRefetch, so we only need to pin oplog for crash recovery.
-        return getOplogNeededForCrashRecovery().value_or(Timestamp::max());
+        return oplogNeededForCrashRecovery.value_or(Timestamp::max());
     }
-    return getOplogNeededForCrashRecovery().value_or(getOplogNeededForRollback());
+
+    if (oplogNeededForCrashRecovery) {
+        return oplogNeededForCrashRecovery.value();
+    }
+
+    auto status = getOplogNeededForRollback();
+    if (status.isOK()) {
+        return status.getValue();
+    }
+
+    // If getOplogNeededForRollback fails, don't truncate any oplog right now.
+    return Timestamp::min();
 }
 
 bool WiredTigerKVEngine::supportsReadConcernSnapshot() const {

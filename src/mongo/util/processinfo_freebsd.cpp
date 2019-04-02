@@ -47,8 +47,6 @@
 #include "mongo/util/scopeguard.h"
 #include "processinfo.h"
 
-using namespace std;
-
 namespace mongo {
 
 ProcessInfo::ProcessInfo(ProcessId pid) : _pid(pid) {}
@@ -81,9 +79,9 @@ int getSysctlByNameWithDefault<uintptr_t>(const char* sysctlName,
 }
 
 template <>
-int getSysctlByNameWithDefault<string>(const char* sysctlName,
-                                       const string& defaultValue,
-                                       string* result) {
+int getSysctlByNameWithDefault<std::string>(const char* sysctlName,
+                                            const std::string& defaultValue,
+                                            std::string* result) {
     char value[256] = {0};
     size_t len = sizeof(value);
     if (sysctlbyname(sysctlName, &value, &len, NULL, 0) == -1) {
@@ -130,12 +128,12 @@ void ProcessInfo::SystemInfo::collectSystemInfo() {
     osType = "BSD";
     osName = "FreeBSD";
 
-    int status = getSysctlByNameWithDefault("kern.version", string("unknown"), &osVersion);
+    int status = getSysctlByNameWithDefault("kern.version", std::string("unknown"), &osVersion);
     if (status != 0)
         log() << "Unable to collect OS Version. (errno: " << status << " msg: " << strerror(status)
               << ")";
 
-    status = getSysctlByNameWithDefault("hw.machine_arch", string("unknown"), &cpuArch);
+    status = getSysctlByNameWithDefault("hw.machine_arch", std::string("unknown"), &cpuArch);
     if (status != 0)
         log() << "Unable to collect Machine Architecture. (errno: " << status
               << " msg: " << strerror(status) << ")";
@@ -145,6 +143,7 @@ void ProcessInfo::SystemInfo::collectSystemInfo() {
     uintptr_t defaultNum = 1;
     status = getSysctlByNameWithDefault("hw.physmem", defaultNum, &numBuffer);
     memSize = numBuffer;
+    memLimit = memSize;
     if (status != 0)
         log() << "Unable to collect Physical Memory. (errno: " << status
               << " msg: " << strerror(status) << ")";
@@ -179,7 +178,7 @@ bool ProcessInfo::blockInMemory(const void* start) {
     return x & 0x1;
 }
 
-bool ProcessInfo::pagesInMemory(const void* start, size_t numPages, vector<char>* out) {
+bool ProcessInfo::pagesInMemory(const void* start, size_t numPages, std::vector<char>* out) {
     out->resize(numPages);
     // int mincore(const void *addr, size_t len, char *vec);
     if (mincore(alignToStartOfPage(start), numPages * getPageSize(), &(out->front()))) {

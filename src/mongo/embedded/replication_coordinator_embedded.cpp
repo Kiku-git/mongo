@@ -49,6 +49,8 @@ ReplicationCoordinatorEmbedded::~ReplicationCoordinatorEmbedded() = default;
 
 void ReplicationCoordinatorEmbedded::startup(OperationContext* opCtx) {}
 
+void ReplicationCoordinatorEmbedded::enterTerminalShutdown() {}
+
 void ReplicationCoordinatorEmbedded::shutdown(OperationContext* opCtx) {}
 
 const ReplSettings& ReplicationCoordinatorEmbedded::getSettings() const {
@@ -149,6 +151,10 @@ MemberState ReplicationCoordinatorEmbedded::getMemberState() const {
     UASSERT_NOT_IMPLEMENTED;
 }
 
+std::vector<repl::MemberData> ReplicationCoordinatorEmbedded::getMemberData() const {
+    UASSERT_NOT_IMPLEMENTED;
+}
+
 Status ReplicationCoordinatorEmbedded::waitForMemberState(MemberState, Milliseconds) {
     UASSERT_NOT_IMPLEMENTED;
 }
@@ -190,19 +196,21 @@ void ReplicationCoordinatorEmbedded::setMyHeartbeatMessage(const std::string&) {
     UASSERT_NOT_IMPLEMENTED;
 }
 
-void ReplicationCoordinatorEmbedded::setMyLastAppliedOpTimeForward(const OpTime&, DataConsistency) {
+void ReplicationCoordinatorEmbedded::setMyLastAppliedOpTimeAndWallTimeForward(
+    const OpTimeAndWallTime&, DataConsistency) {
     UASSERT_NOT_IMPLEMENTED;
 }
 
-void ReplicationCoordinatorEmbedded::setMyLastDurableOpTimeForward(const OpTime&) {
+void ReplicationCoordinatorEmbedded::setMyLastDurableOpTimeAndWallTimeForward(
+    const OpTimeAndWallTime&) {
     UASSERT_NOT_IMPLEMENTED;
 }
 
-void ReplicationCoordinatorEmbedded::setMyLastAppliedOpTime(const OpTime&) {
+void ReplicationCoordinatorEmbedded::setMyLastAppliedOpTimeAndWallTime(const OpTimeAndWallTime&) {
     UASSERT_NOT_IMPLEMENTED;
 }
 
-void ReplicationCoordinatorEmbedded::setMyLastDurableOpTime(const OpTime&) {
+void ReplicationCoordinatorEmbedded::setMyLastDurableOpTimeAndWallTime(const OpTimeAndWallTime&) {
     UASSERT_NOT_IMPLEMENTED;
 }
 
@@ -210,7 +218,15 @@ void ReplicationCoordinatorEmbedded::resetMyLastOpTimes() {
     UASSERT_NOT_IMPLEMENTED;
 }
 
+OpTimeAndWallTime ReplicationCoordinatorEmbedded::getMyLastAppliedOpTimeAndWallTime() const {
+    UASSERT_NOT_IMPLEMENTED;
+}
+
 OpTime ReplicationCoordinatorEmbedded::getMyLastAppliedOpTime() const {
+    UASSERT_NOT_IMPLEMENTED;
+}
+
+OpTimeAndWallTime ReplicationCoordinatorEmbedded::getMyLastDurableOpTimeAndWallTime() const {
     UASSERT_NOT_IMPLEMENTED;
 }
 
@@ -238,8 +254,8 @@ Status ReplicationCoordinatorEmbedded::waitUntilOpTimeForReadUntil(OperationCont
     UASSERT_NOT_IMPLEMENTED;
 }
 
-Status ReplicationCoordinatorEmbedded::awaitOpTimeCommitted(OperationContext* opCtx,
-                                                            OpTime opTime) {
+Status ReplicationCoordinatorEmbedded::awaitTimestampCommitted(OperationContext* opCtx,
+                                                               Timestamp ts) {
     UASSERT_NOT_IMPLEMENTED;
 }
 
@@ -384,7 +400,7 @@ bool ReplicationCoordinatorEmbedded::shouldChangeSyncSource(
     UASSERT_NOT_IMPLEMENTED;
 }
 
-void ReplicationCoordinatorEmbedded::advanceCommitPoint(const OpTime&) {
+void ReplicationCoordinatorEmbedded::advanceCommitPoint(const OpTime&, bool fromSyncSource) {
     UASSERT_NOT_IMPLEMENTED;
 }
 

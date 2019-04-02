@@ -45,22 +45,25 @@
 #include "mongo/db/curop.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/index/index_descriptor.h"
-#include "mongo/db/index_builder.h"
+#include "mongo/db/index_builds_coordinator.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/ops/insert.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/s/database_sharding_state.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/views/view_catalog.h"
 #include "mongo/util/fail_point_service.h"
 #include "mongo/util/log.h"
 #include "mongo/util/scopeguard.h"
 
 namespace mongo {
-MONGO_FAIL_POINT_DEFINE(writeConfilctInRenameCollCopyToTmp);
 namespace {
+
+MONGO_FAIL_POINT_DEFINE(writeConfilctInRenameCollCopyToTmp);
 
 NamespaceString getNamespaceFromUUID(OperationContext* opCtx, const UUID& uuid) {
     Collection* source = UUIDCatalog::get(opCtx).lookupCollectionByUUID(uuid);
@@ -141,7 +144,8 @@ Status renameCollectionCommon(OperationContext* opCtx,
 
     // We stay in source context the whole time. This is mostly to set the CurOp namespace.
     boost::optional<OldClientContext> ctx;
-    ctx.emplace(opCtx, source.ns());
+    const bool shardVersionCheck = true;
+    ctx.emplace(opCtx, source.ns(), shardVersionCheck);
 
     auto replCoord = repl::ReplicationCoordinator::get(opCtx);
     bool userInitiatedWritesAndNotPrimary =
@@ -162,7 +166,7 @@ Status renameCollectionCommon(OperationContext* opCtx,
     }
     Collection* const sourceColl = sourceDB ? sourceDB->getCollection(opCtx, source) : nullptr;
     if (!sourceColl) {
-        if (sourceDB && sourceDB->getViewCatalog()->lookup(opCtx, source.ns()))
+        if (sourceDB && ViewCatalog::get(sourceDB)->lookup(opCtx, source.ns()))
             return Status(ErrorCodes::CommandNotSupportedOnView,
                           str::stream() << "cannot rename view: " << source);
         return Status(ErrorCodes::NamespaceNotFound, "source namespace does not exist");
@@ -199,6 +203,8 @@ Status renameCollectionCommon(OperationContext* opCtx,
     }
 
     BackgroundOperation::assertNoBgOpInProgForNs(source.ns());
+    IndexBuildsCoordinator::get(opCtx)->assertNoIndexBuildInProgForCollection(
+        sourceColl->uuid().get());
 
     auto targetDB = databaseHolder->openDb(opCtx, target.db());
 
@@ -236,7 +242,7 @@ Status renameCollectionCommon(OperationContext* opCtx,
                 return status;
             targetColl = nullptr;
         }
-    } else if (targetDB->getViewCatalog()->lookup(opCtx, target.ns())) {
+    } else if (ViewCatalog::get(targetDB)->lookup(opCtx, target.ns())) {
         return Status(ErrorCodes::NamespaceExists,
                       str::stream() << "a view already exists with that name: " << target);
     }
@@ -349,6 +355,10 @@ Status renameCollectionCommon(OperationContext* opCtx,
 
             // No logOp necessary because the entire renameCollection command is one logOp.
             repl::UnreplicatedWritesBlock uwb(opCtx);
+
+            BackgroundOperation::assertNoBgOpInProgForNs(targetColl->ns().ns());
+            IndexBuildsCoordinator::get(opCtx)->assertNoIndexBuildInProgForCollection(
+                targetColl->uuid().get());
 
             status = targetDB->dropCollection(opCtx, targetColl->ns().ns(), renameOpTime);
             if (!status.isOK()) {
@@ -624,6 +634,13 @@ Status renameCollectionForApplyOps(OperationContext* opCtx,
     // If the UUID we're targeting already exists, rename from there no matter what.
     if (!uiNss.isEmpty()) {
         sourceNss = uiNss;
+    }
+
+    // Check that the target namespace is in the correct form, "database.collection".
+    auto targetStatus = userAllowedWriteNS(targetNss);
+    if (!targetStatus.isOK()) {
+        return Status(targetStatus.code(),
+                      str::stream() << "error with target namespace: " << targetStatus.reason());
     }
 
     OptionalCollectionUUID targetUUID;

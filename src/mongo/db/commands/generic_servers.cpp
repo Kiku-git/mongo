@@ -122,7 +122,8 @@ public:
         bSys.appendDate("currentTime", jsTime());
         bSys.append("hostname", prettyHostName());
         bSys.append("cpuAddrSize", p.getAddrSize());
-        bSys.append("memSizeMB", static_cast<unsigned>(p.getMemSizeMB()));
+        bSys.append("memSizeMB", static_cast<unsigned>(p.getSystemMemSizeMB()));
+        bSys.append("memLimitMB", static_cast<unsigned>(p.getMemSizeMB()));
         bSys.append("numCores", p.getNumCores());
         bSys.append("cpuArch", p.getArch());
         bSys.append("numaEnabled", p.hasNumaEnabled());
@@ -330,6 +331,9 @@ void CmdShutdown::addRequiredPrivileges(const std::string& dbname,
 }
 
 void CmdShutdown::shutdownHelper(const BSONObj& cmdObj) {
+    ShutdownTaskArgs shutdownArgs;
+    shutdownArgs.isUserInitiated = true;
+
     MONGO_FAIL_POINT_BLOCK(crashOnShutdown, crashBlock) {
         const std::string crashHow = crashBlock.getData()["how"].str();
         if (crashHow == "fault") {
@@ -343,7 +347,7 @@ void CmdShutdown::shutdownHelper(const BSONObj& cmdObj) {
 #if defined(_WIN32)
     // Signal the ServiceMain thread to shutdown.
     if (ntservice::shouldStartService()) {
-        shutdownNoTerminate();
+        shutdownNoTerminate(shutdownArgs);
 
         // Client expects us to abruptly close the socket as part of exiting
         // so this function is not allowed to return.
@@ -353,7 +357,7 @@ void CmdShutdown::shutdownHelper(const BSONObj& cmdObj) {
     } else
 #endif
     {
-        exitCleanly(EXIT_CLEAN);  // this never returns
+        shutdown(EXIT_CLEAN, shutdownArgs);  // this never returns
     }
 }
 

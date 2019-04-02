@@ -93,7 +93,11 @@ PlanStage* buildStages(OperationContext* opCtx,
 
             auto descriptor = collection->getIndexCatalog()->findIndexByName(
                 opCtx, ixn->index.identifier.catalogName);
-            invariant(descriptor);
+            invariant(descriptor,
+                      str::stream() << "Namespace: " << collection->ns() << ", CanonicalQuery: "
+                                    << cq.toStringShort()
+                                    << ", IndexEntry: "
+                                    << ixn->index.toString());
 
             // We use the node's internal name, keyPattern and multikey details here. For $**
             // indexes, these may differ from the information recorded in the index's descriptor.
@@ -303,11 +307,11 @@ PlanStage* buildStages(OperationContext* opCtx,
             if (nullptr == childStage) {
                 return nullptr;
             }
-            return new ShardFilterStage(opCtx,
-                                        CollectionShardingState::get(opCtx, collection->ns())
-                                            ->getMetadataForOperation(opCtx),
-                                        ws,
-                                        childStage);
+            return new ShardFilterStage(
+                opCtx,
+                CollectionShardingState::get(opCtx, collection->ns())->getOrphansFilter(opCtx),
+                ws,
+                childStage);
         }
         case STAGE_DISTINCT_SCAN: {
             const DistinctNode* dn = static_cast<const DistinctNode*>(root);

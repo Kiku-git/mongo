@@ -32,7 +32,6 @@
 #include <boost/optional.hpp>
 #include <wiredtiger.h>
 
-#include "mongo/base/disallow_copying.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/storage/snapshot_manager.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_begin_transaction_block.h"
@@ -40,10 +39,14 @@
 
 namespace mongo {
 
+using IgnorePrepared = WiredTigerBeginTxnBlock::IgnorePrepared;
+using RoundUpPreparedTimestamps = WiredTigerBeginTxnBlock::RoundUpPreparedTimestamps;
+
 class WiredTigerOplogManager;
 
 class WiredTigerSnapshotManager final : public SnapshotManager {
-    MONGO_DISALLOW_COPYING(WiredTigerSnapshotManager);
+    WiredTigerSnapshotManager(const WiredTigerSnapshotManager&) = delete;
+    WiredTigerSnapshotManager& operator=(const WiredTigerSnapshotManager&) = delete;
 
 public:
     WiredTigerSnapshotManager() = default;
@@ -63,7 +66,9 @@ public:
      * Throws if there is currently no committed snapshot.
      */
     Timestamp beginTransactionOnCommittedSnapshot(
-        WT_SESSION* session, WiredTigerBeginTxnBlock::IgnorePrepared ignorePrepared) const;
+        WT_SESSION* session,
+        IgnorePrepared ignorePrepared,
+        RoundUpPreparedTimestamps roundUpPreparedTimestamps) const;
 
     /**
      * Starts a transaction on the last stable local timestamp, set by setLocalSnapshot.
@@ -71,7 +76,9 @@ public:
      * Throws if no local snapshot has been set.
      */
     Timestamp beginTransactionOnLocalSnapshot(
-        WT_SESSION* session, WiredTigerBeginTxnBlock::IgnorePrepared ignorePrepared) const;
+        WT_SESSION* session,
+        IgnorePrepared ignorePrepared,
+        RoundUpPreparedTimestamps roundUpPreparedTimestamps) const;
 
     /**
      * Returns lowest SnapshotName that could possibly be used by a future call to

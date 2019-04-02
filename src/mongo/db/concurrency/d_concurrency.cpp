@@ -36,9 +36,9 @@
 #include <string>
 #include <vector>
 
+#include "mongo/db/concurrency/flow_control_ticketholder.h"
 #include "mongo/db/concurrency/global_lock_acquisition_tracker.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/server_parameters.h"
 #include "mongo/db/service_context.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/stdx/mutex.h"
@@ -169,6 +169,13 @@ Lock::GlobalLock::GlobalLock(GlobalLock&& otherLock)
 }
 
 void Lock::GlobalLock::_enqueue(LockMode lockMode, Date_t deadline) {
+    if (lockMode == LockMode::MODE_IX) {
+        auto ticketholder = FlowControlTicketholder::get(_opCtx);
+        if (ticketholder) {
+            ticketholder->getTicket(_opCtx);
+        }
+    }
+
     try {
         if (_opCtx->lockState()->shouldConflictWithSecondaryBatchApplication()) {
             _pbwm.lock(MODE_IS);

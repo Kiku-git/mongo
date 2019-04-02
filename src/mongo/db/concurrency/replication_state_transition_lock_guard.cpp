@@ -37,14 +37,16 @@
 namespace mongo {
 namespace repl {
 
-ReplicationStateTransitionLockGuard::ReplicationStateTransitionLockGuard(OperationContext* opCtx)
-    : ReplicationStateTransitionLockGuard(opCtx, EnqueueOnly()) {
+ReplicationStateTransitionLockGuard::ReplicationStateTransitionLockGuard(OperationContext* opCtx,
+                                                                         LockMode mode)
+    : ReplicationStateTransitionLockGuard(opCtx, mode, EnqueueOnly()) {
     waitForLockUntil(Date_t::max());
 }
 
 ReplicationStateTransitionLockGuard::ReplicationStateTransitionLockGuard(OperationContext* opCtx,
+                                                                         LockMode mode,
                                                                          EnqueueOnly)
-    : _opCtx(opCtx) {
+    : _opCtx(opCtx), _mode(mode) {
     _enqueueLock();
 }
 
@@ -65,8 +67,8 @@ void ReplicationStateTransitionLockGuard::waitForLockUntil(mongo::Date_t deadlin
     }
 
     _result = LOCK_INVALID;
-    // Wait for the completion of the lock request for the RSTL in mode X.
-    _opCtx->lockState()->lockRSTLComplete(_opCtx, deadline);
+    // Wait for the completion of the lock request for the RSTL.
+    _opCtx->lockState()->lockRSTLComplete(_opCtx, _mode, deadline);
     _result = LOCK_OK;
 }
 
@@ -80,20 +82,16 @@ void ReplicationStateTransitionLockGuard::reacquire() {
 }
 
 void ReplicationStateTransitionLockGuard::_enqueueLock() {
-    // Enqueue a lock request for the RSTL in mode X.
-    _result = _opCtx->lockState()->lockRSTLBegin(_opCtx);
+    // Enqueue a lock request for the RSTL.
+    _result = _opCtx->lockState()->lockRSTLBegin(_opCtx, _mode);
 }
 
 void ReplicationStateTransitionLockGuard::_unlock() {
-    // waitForLockUntil() must be called after enqueue. It either times out or succeeds,
-    // so we should never see LOCK_WAITING here. This also means between the enqueue and
-    // waitForLockUntil(), no exception is accepted. We could call lockRSTLComplete() with
-    // timeout 0 here for pending locks to clean up the lock's state, but it's clearer to enforce
-    // the exception-free pattern.
-    invariant(_result != LOCK_WAITING);
-    if (isLocked()) {
-        _opCtx->lockState()->unlock(resourceIdReplicationStateTransitionLock);
-    }
+    // If ReplicationStateTransitionLockGuard is called in a WriteUnitOfWork, we won't accept
+    // any exceptions to be thrown between _enqueueLock and waitForLockUntil because that would
+    // delay cleaning up any failed RSTL lock attempt state from lock manager.
+    invariant(!(_result == LOCK_WAITING && _opCtx->lockState()->inAWriteUnitOfWork()));
+    _opCtx->lockState()->unlock(resourceIdReplicationStateTransitionLock);
     _result = LOCK_INVALID;
 }
 

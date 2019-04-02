@@ -41,6 +41,7 @@
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/index_builds_coordinator.h"
 #include "mongo/db/op_observer.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator.h"
@@ -65,8 +66,13 @@ Status _finishDropDatabase(OperationContext* opCtx,
                            const std::string& dbName,
                            Database* db,
                            std::size_t numCollections) {
+    invariant(opCtx->lockState()->isDbLockedForMode(dbName, MODE_X));
+
     // If DatabaseHolder::dropDb() fails, we should reset the drop-pending state on Database.
     auto dropPendingGuard = makeGuard([db, opCtx] { db->setDropPending(opCtx, false); });
+
+    BackgroundOperation::assertNoBgOpInProgForDb(dbName);
+    IndexBuildsCoordinator::get(opCtx)->assertNoBgOpInProgForDb(dbName);
 
     auto databaseHolder = DatabaseHolder::get(opCtx);
     databaseHolder->dropDb(opCtx, db);
@@ -144,7 +150,12 @@ Status dropDatabase(OperationContext* opCtx, const std::string& dbName) {
         auto dropPendingGuard = makeGuard([&db, opCtx] { db->setDropPending(opCtx, false); });
 
         std::vector<NamespaceString> collectionsToDrop;
-        for (Collection* collection : *db) {
+        for (auto collIt = db->begin(opCtx); collIt != db->end(opCtx); ++collIt) {
+            auto collection = *collIt;
+            if (!collection) {
+                break;
+            }
+
             const auto& nss = collection->ns();
             numCollections++;
 
@@ -174,6 +185,10 @@ Status dropDatabase(OperationContext* opCtx, const std::string& dbName) {
                 // getting replicated; be conservative and assume they are not.
                 invariant(!nss.isReplicated() || nss.coll().startsWith("tmp.mr"));
             }
+
+            BackgroundOperation::assertNoBgOpInProgForNs(nss.ns());
+            IndexBuildsCoordinator::get(opCtx)->assertNoIndexBuildInProgForCollection(
+                db->getCollection(opCtx, nss)->uuid().get());
 
             WriteUnitOfWork wunit(opCtx);
             // A primary processing this will assign a timestamp when the operation is written to

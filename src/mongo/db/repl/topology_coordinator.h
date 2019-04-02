@@ -32,7 +32,6 @@
 #include <iosfwd>
 #include <string>
 
-#include "mongo/base/disallow_copying.h"
 #include "mongo/db/repl/last_vote.h"
 #include "mongo/db/repl/repl_set_heartbeat_response.h"
 #include "mongo/db/repl/replication_coordinator.h"
@@ -65,7 +64,8 @@ const int kMaxHeartbeatRetries = 2;
  * Methods of this class should be non-blocking.
  */
 class TopologyCoordinator {
-    MONGO_DISALLOW_COPYING(TopologyCoordinator);
+    TopologyCoordinator(const TopologyCoordinator&) = delete;
+    TopologyCoordinator& operator=(const TopologyCoordinator&) = delete;
 
 public:
     /**
@@ -110,6 +110,11 @@ public:
      * Gets the MemberState of this member in the replica set.
      */
     MemberState getMemberState() const;
+
+    /**
+     * Returns the replica set's MemberData.
+     */
+    std::vector<MemberData> getMemberData() const;
 
     /**
      * Returns whether this node should be allowed to accept writes.
@@ -228,10 +233,13 @@ public:
     bool updateLastCommittedOpTime();
 
     /**
-     * Updates _lastCommittedOpTime to be "committedOpTime" if it is more recent than the
-     * current last committed OpTime.  Returns true if _lastCommittedOpTime is changed.
+     * Updates _lastCommittedOpTime to be 'committedOpTime' if it is more recent than the current
+     * last committed OpTime.  Returns true if _lastCommittedOpTime is changed. We ignore
+     * 'committedOpTime' if it has a different term than our lastApplied, unless
+     * 'fromSyncSource'=true, which guarantees we are on the same branch of history as
+     * 'committedOpTime', so we update our commit point to min(committedOpTime, lastApplied).
      */
-    bool advanceLastCommittedOpTime(const OpTime& committedOpTime);
+    bool advanceLastCommittedOpTime(OpTime committedOpTime, bool fromSyncSource);
 
     /**
      * Returns the OpTime of the latest majority-committed op known to this server.
@@ -360,8 +368,8 @@ public:
         Date_t now, const std::string& ourSetName, const HostAndPort& target);
 
     /**
-     * Processes a heartbeat response from "target" that arrived around "now" with "lastOpCommitted"
-     * in the metadata, having spent "networkRoundTripTime" millis on the network.
+     * Processes a heartbeat response from "target" that arrived around "now", having spent
+     * "networkRoundTripTime" millis on the network.
      *
      * Updates internal topology coordinator state, and returns instructions about what action
      * to take next.
@@ -383,8 +391,7 @@ public:
         Date_t now,
         Milliseconds networkRoundTripTime,
         const HostAndPort& target,
-        const StatusWith<ReplSetHeartbeatResponse>& hbResponse,
-        OpTime lastOpCommitted);
+        const StatusWith<ReplSetHeartbeatResponse>& hbResponse);
 
     /**
      *  Returns whether or not at least 'numNodes' have reached the given opTime.
@@ -443,6 +450,7 @@ public:
      * Returns the last optime that this node has applied, whether or not it has been journaled.
      */
     OpTime getMyLastAppliedOpTime() const;
+    OpTimeAndWallTime getMyLastAppliedOpTimeAndWallTime() const;
 
     /*
      * Sets the last optime that this node has applied, whether or not it has been journaled. Fails
@@ -450,12 +458,15 @@ public:
      * backwards. The Date_t 'now' is used to track liveness; setting a node's applied optime
      * updates its liveness information.
      */
-    void setMyLastAppliedOpTime(OpTime opTime, Date_t now, bool isRollbackAllowed);
+    void setMyLastAppliedOpTimeAndWallTime(OpTimeAndWallTime opTimeAndWallTime,
+                                           Date_t now,
+                                           bool isRollbackAllowed);
 
     /*
      * Returns the last optime that this node has applied and journaled.
      */
     OpTime getMyLastDurableOpTime() const;
+    OpTimeAndWallTime getMyLastDurableOpTimeAndWallTime() const;
 
     /*
      * Sets the last optime that this node has applied and journaled. Fails with an invariant if
@@ -463,7 +474,9 @@ public:
      * 'now' is used to track liveness; setting a node's durable optime updates its liveness
      * information.
      */
-    void setMyLastDurableOpTime(OpTime opTime, Date_t now, bool isRollbackAllowed);
+    void setMyLastDurableOpTimeAndWallTime(OpTimeAndWallTime opTimeAndWallTime,
+                                           Date_t now,
+                                           bool isRollbackAllowed);
 
     /*
      * Sets the last optimes for a node, other than this node, based on the data from a

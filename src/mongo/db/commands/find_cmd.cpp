@@ -49,7 +49,6 @@
 #include "mongo/db/query/get_executor.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/collection_sharding_state.h"
-#include "mongo/db/server_parameters.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/stats/server_read_concern_metrics.h"
@@ -123,6 +122,10 @@ public:
         }
 
         bool supportsReadConcern(repl::ReadConcernLevel level) const final {
+            return true;
+        }
+
+        bool canIgnorePrepareConflicts() const override {
             return true;
         }
 
@@ -212,8 +215,8 @@ public:
             // execution tree with an EOFStage.
             Collection* const collection = ctx->getCollection();
 
-            // We have a parsed query. Time to get the execution plan for it.
-            auto exec = uassertStatusOK(getExecutorFind(opCtx, collection, nss, std::move(cq)));
+            // Get the execution plan for the query.
+            auto exec = uassertStatusOK(getExecutorFind(opCtx, collection, std::move(cq)));
 
             auto bodyBuilder = result->getBodyBuilder();
             // Got the execution tree. Explain it.
@@ -326,10 +329,6 @@ public:
                 // clusterTime, even across yields.
                 opCtx->recoveryUnit()->setTimestampReadSource(RecoveryUnit::ReadSource::kProvided,
                                                               targetClusterTime);
-
-                // The $_internalReadAtClusterTime option also causes any storage-layer cursors
-                // created during plan execution to block on prepared transactions.
-                opCtx->recoveryUnit()->setIgnorePrepared(false);
             }
 
             // Acquire locks. If the query is on a view, we release our locks and convert the query
@@ -395,7 +394,7 @@ public:
             }
 
             // Get the execution plan for the query.
-            auto exec = uassertStatusOK(getExecutorFind(opCtx, collection, nss, std::move(cq)));
+            auto exec = uassertStatusOK(getExecutorFind(opCtx, collection, std::move(cq)));
 
             {
                 stdx::lock_guard<Client> lk(*opCtx->getClient());

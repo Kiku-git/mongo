@@ -62,6 +62,7 @@ public:
         kDropIndexes,
         kCommitTransaction,
         kAbortTransaction,
+        kPrepareTransaction,
     };
 
     // Current oplog version, should be the value of the v field in all oplog entries.
@@ -115,6 +116,15 @@ public:
     bool isCommand() const;
 
     /**
+     * Returns if the oplog entry is part of a transaction that has not yet been prepared or
+     * committed.  The actual "prepare" or "commit" oplog entries do not have an inTxn field
+     * and so this method will always return false for them.
+     */
+    bool isInPendingTransaction() const {
+        return getInTxn() && *getInTxn();
+    }
+
+    /**
      * Returns if the oplog entry is for a CRUD operation.
      */
     static bool isCrudOpType(OpTypeEnum opType);
@@ -139,7 +149,7 @@ public:
     BSONObj getOperationToApply() const;
 
     /**
-     * Returns the type of command of the oplog entry. Must be called on a command op.
+     * Returns the type of command of the oplog entry. If it is not a command, returns kNotCommand.
      */
     CommandType getCommandType() const;
 

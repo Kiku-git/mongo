@@ -51,8 +51,6 @@
 #include "mongo/util/log.h"
 #include "mongo/util/processinfo.h"
 
-using namespace std;
-
 namespace mongo {
 
 ProcessInfo::ProcessInfo(ProcessId pid) : _pid(pid) {}
@@ -77,7 +75,7 @@ int ProcessInfo::getVirtualMemorySize() {
     mach_port_t task;
 
     if ((result = task_for_pid(mach_task_self(), _pid.toNative(), &task)) != KERN_SUCCESS) {
-        cout << "error getting task\n";
+        std::cout << "error getting task\n";
         return 0;
     }
 
@@ -88,7 +86,7 @@ int ProcessInfo::getVirtualMemorySize() {
 #endif
     mach_msg_type_number_t count = TASK_BASIC_INFO_COUNT;
     if ((result = task_info(task, TASK_BASIC_INFO, (task_info_t)&ti, &count)) != KERN_SUCCESS) {
-        cout << "error getting task_info: " << result << endl;
+        std::cout << "error getting task_info: " << result << std::endl;
         return 0;
     }
     return (int)((double)ti.virtual_size / (1024.0 * 1024));
@@ -100,7 +98,7 @@ int ProcessInfo::getResidentSize() {
     mach_port_t task;
 
     if ((result = task_for_pid(mach_task_self(), _pid.toNative(), &task)) != KERN_SUCCESS) {
-        cout << "error getting task\n";
+        std::cout << "error getting task\n";
         return 0;
     }
 
@@ -112,7 +110,7 @@ int ProcessInfo::getResidentSize() {
 #endif
     mach_msg_type_number_t count = TASK_BASIC_INFO_COUNT;
     if ((result = task_info(task, TASK_BASIC_INFO, (task_info_t)&ti, &count)) != KERN_SUCCESS) {
-        cout << "error getting task_info: " << result << endl;
+        std::cout << "error getting task_info: " << result << std::endl;
         return 0;
     }
     return (int)(ti.resident_size / (1024 * 1024));
@@ -128,7 +126,7 @@ void ProcessInfo::getExtraInfo(BSONObjBuilder& info) {
 
     if (KERN_SUCCESS !=
         task_info(mach_task_self(), TASK_EVENTS_INFO, (integer_t*)&taskInfo, &taskInfoCount)) {
-        cout << "error getting extra task_info" << endl;
+        std::cout << "error getting extra task_info" << std::endl;
         return;
     }
 
@@ -141,7 +139,7 @@ void ProcessInfo::getExtraInfo(BSONObjBuilder& info) {
 typedef long long NumberVal;
 template <typename Variant>
 Variant getSysctlByName(const char* sysctlName) {
-    string value;
+    std::string value;
     size_t len;
     int status;
     // NB: sysctlbyname is called once to determine the buffer length, and once to copy
@@ -183,33 +181,34 @@ long long getSysctlByName<NumberVal>(const char* sysctlName) {
 void ProcessInfo::SystemInfo::collectSystemInfo() {
     osType = "Darwin";
     osName = "Mac OS X";
-    osVersion = getSysctlByName<string>("kern.osrelease");
+    osVersion = getSysctlByName<std::string>("kern.osrelease");
     addrSize = (getSysctlByName<NumberVal>("hw.cpu64bit_capable") ? 64 : 32);
     memSize = getSysctlByName<NumberVal>("hw.memsize");
+    memLimit = memSize;
     numCores = getSysctlByName<NumberVal>("hw.ncpu");  // includes hyperthreading cores
     pageSize = static_cast<unsigned long long>(sysconf(_SC_PAGESIZE));
-    cpuArch = getSysctlByName<string>("hw.machine");
+    cpuArch = getSysctlByName<std::string>("hw.machine");
     hasNuma = checkNumaEnabled();
 
     BSONObjBuilder bExtra;
-    bExtra.append("versionString", getSysctlByName<string>("kern.version"));
+    bExtra.append("versionString", getSysctlByName<std::string>("kern.version"));
     bExtra.append("alwaysFullSync",
                   static_cast<int>(getSysctlByName<NumberVal>("vfs.generic.always_do_fullfsync")));
     bExtra.append(
         "nfsAsync",
         static_cast<int>(getSysctlByName<NumberVal>("vfs.generic.nfs.client.allow_async")));
-    bExtra.append("model", getSysctlByName<string>("hw.model"));
+    bExtra.append("model", getSysctlByName<std::string>("hw.model"));
     bExtra.append("physicalCores",
                   static_cast<int>(getSysctlByName<NumberVal>("machdep.cpu.core_count")));
     bExtra.append(
         "cpuFrequencyMHz",
         static_cast<int>((getSysctlByName<NumberVal>("hw.cpufrequency") / (1000 * 1000))));
-    bExtra.append("cpuString", getSysctlByName<string>("machdep.cpu.brand_string"));
+    bExtra.append("cpuString", getSysctlByName<std::string>("machdep.cpu.brand_string"));
     bExtra.append("cpuFeatures",
-                  getSysctlByName<string>("machdep.cpu.features") + string(" ") +
-                      getSysctlByName<string>("machdep.cpu.extfeatures"));
+                  getSysctlByName<std::string>("machdep.cpu.features") + std::string(" ") +
+                      getSysctlByName<std::string>("machdep.cpu.extfeatures"));
     bExtra.append("pageSize", static_cast<int>(getSysctlByName<NumberVal>("hw.pagesize")));
-    bExtra.append("scheduler", getSysctlByName<string>("kern.sched"));
+    bExtra.append("scheduler", getSysctlByName<std::string>("kern.sched"));
     _extraStats = bExtra.obj();
 }
 
@@ -230,7 +229,7 @@ bool ProcessInfo::blockInMemory(const void* start) {
     return x & 0x1;
 }
 
-bool ProcessInfo::pagesInMemory(const void* start, size_t numPages, vector<char>* out) {
+bool ProcessInfo::pagesInMemory(const void* start, size_t numPages, std::vector<char>* out) {
     out->resize(numPages);
     if (mincore(alignToStartOfPage(start), numPages * getPageSize(), &out->front())) {
         log() << "mincore failed: " << errnoWithDescription();

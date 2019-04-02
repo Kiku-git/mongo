@@ -43,7 +43,6 @@
 #include "mongo/config.h"
 #include "mongo/db/auth/sasl_command_constants.h"
 #include "mongo/db/server_options.h"
-#include "mongo/db/server_parameters.h"
 #include "mongo/rpc/protocol.h"
 #include "mongo/shell/shell_utils.h"
 #include "mongo/transport/message_compressor_registry.h"
@@ -153,10 +152,8 @@ Status storeMongoShellOptions(const moe::Environment& params,
     }
 
     if (params.count("net.compression.compressors")) {
-        auto compressors = params["net.compression.compressors"].as<string>();
-        if (compressors != "disabled") {
-            shellGlobalParams.networkMessageCompressors = std::move(compressors);
-        }
+        shellGlobalParams.networkMessageCompressors =
+            params["net.compression.compressors"].as<string>();
     }
 
     if (params.count("nodb")) {

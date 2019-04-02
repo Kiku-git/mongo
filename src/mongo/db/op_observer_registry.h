@@ -45,7 +45,8 @@ namespace mongo {
  * handler with the recovery unit.
  */
 class OpObserverRegistry final : public OpObserver {
-    MONGO_DISALLOW_COPYING(OpObserverRegistry);
+    OpObserverRegistry(const OpObserverRegistry&) = delete;
+    OpObserverRegistry& operator=(const OpObserverRegistry&) = delete;
 
 public:
     OpObserverRegistry() = default;
@@ -277,11 +278,11 @@ public:
     }
 
     void onTransactionPrepare(OperationContext* opCtx,
-                              const OplogSlot& prepareOpTime,
+                              const std::vector<OplogSlot>& reservedSlots,
                               std::vector<repl::ReplOperation>& statements) override {
         ReservedTimes times{opCtx};
         for (auto& observer : _observers) {
-            observer->onTransactionPrepare(opCtx, prepareOpTime, statements);
+            observer->onTransactionPrepare(opCtx, reservedSlots, statements);
         }
     }
 

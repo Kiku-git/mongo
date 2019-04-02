@@ -70,7 +70,8 @@ static ThreadPoolTestCaseMap& threadPoolTestCaseRegistry() {
 }
 
 class TptRegistrationAgent {
-    MONGO_DISALLOW_COPYING(TptRegistrationAgent);
+    TptRegistrationAgent(const TptRegistrationAgent&) = delete;
+    TptRegistrationAgent& operator=(const TptRegistrationAgent&) = delete;
 
 public:
     TptRegistrationAgent(const std::string& name, ThreadPoolTestCaseFactory makeTest) {
@@ -85,7 +86,8 @@ public:
 
 template <typename T>
 class TptDeathRegistrationAgent {
-    MONGO_DISALLOW_COPYING(TptDeathRegistrationAgent);
+    TptDeathRegistrationAgent(const TptDeathRegistrationAgent&) = delete;
+    TptDeathRegistrationAgent& operator=(const TptDeathRegistrationAgent&) = delete;
 
 public:
     TptDeathRegistrationAgent(const std::string& name, ThreadPoolTestCaseFactory makeTest) {
@@ -151,11 +153,15 @@ COMMON_THREAD_POOL_DEATH_TEST(DieOnDoubleStartUp, "it has already started") {
     pool.startup();
 }
 
-COMMON_THREAD_POOL_DEATH_TEST(DieWhenExceptionBubblesUp, "Exception escaped task in") {
+namespace {
+constexpr auto kExceptionMessage = "No good very bad exception";
+}
+
+COMMON_THREAD_POOL_DEATH_TEST(DieWhenExceptionBubblesUp, kExceptionMessage) {
     auto& pool = getThreadPool();
     pool.startup();
     ASSERT_OK(pool.schedule([] {
-        uassertStatusOK(Status({ErrorCodes::BadValue, "No good very bad exception"}));
+        uassertStatusOK(Status({ErrorCodes::BadValue, kExceptionMessage}));
     }));
     pool.shutdown();
     pool.join();

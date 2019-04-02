@@ -39,7 +39,6 @@
 
 #include "mongo/base/error_codes.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/server_parameters.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/platform/stack_locator.h"
 #include "mongo/scripting/jsexception.h"
@@ -81,8 +80,10 @@ const double kInterruptGCThreshold = 0.8;
 
 /**
  * The number of bytes to allocate after which garbage collection is run
+ * The default is quite low and doesn't seem to directly correlate with
+ * malloc'd bytes. We bound JS heap usage by JSHeapLimit independent of this GC limit.
  */
-const int kMaxBytesBeforeGC = 8 * 1024 * 1024;
+const int kMaxBytesBeforeGC = 0xffffffff;
 
 /**
  * The size, in bytes, of each "stack chunk". 8192 is the recommended amount
@@ -328,6 +329,10 @@ MozJSImplScope::MozRuntime::MozRuntime(const MozJSScriptEngine* engine) {
         }
 
         uassert(ErrorCodes::JSInterpreterFailure,
+                "UseInternalJobQueues",
+                js::UseInternalJobQueues(_context.get(), true));
+
+        uassert(ErrorCodes::JSInterpreterFailure,
                 "InitSelfHostedCode",
                 JS::InitSelfHostedCode(_context.get()));
 
@@ -369,8 +374,6 @@ MozJSImplScope::MozRuntime::MozRuntime(const MozJSScriptEngine* engine) {
 
         // The memory limit is in megabytes
         JS_SetGCParametersBasedOnAvailableMemory(_context.get(), engine->getJSHeapLimitMB());
-        // TODO SERVER-39152 apply the mozilla patch to stop overriding JSGC_MAX_BYTES
-        JS_SetGCParameter(_context.get(), JSGC_MAX_BYTES, 0xffffffff);
     }
 }
 
@@ -422,11 +425,6 @@ MozJSImplScope::MozJSImplScope(MozJSScriptEngine* engine)
       _timestampProto(_context),
       _uriProto(_context) {
     kCurrentScope = this;
-
-    // The default is quite low and doesn't seem to directly correlate with
-    // malloc'd bytes.  Set it to MAX_INT here and catching things in the
-    // jscustomallocator.cpp
-    JS_SetGCParameter(_context, JSGC_MAX_BYTES, 0xffffffff);
 
     JS_AddInterruptCallback(_context, _interruptCallback);
     JS_SetGCCallback(_context, _gcCallback, this);
@@ -615,7 +613,10 @@ BSONObj MozJSImplScope::callThreadArgs(const BSONObj& args) {
     JS::RootedValue out(_context);
     JS::RootedObject thisv(_context);
 
-    _checkErrorState(JS::Call(_context, thisv, function, argv, &out), false, true);
+    if (!_checkErrorState(JS::Call(_context, thisv, function, argv, &out), false, true)) {
+        // Run all of the async JS functions
+        js::RunJobs(_context);
+    }
 
     JS::RootedObject rout(_context, JS_NewPlainObject(_context));
     ObjectWrapper wout(_context, rout);
@@ -693,13 +694,18 @@ int MozJSImplScope::invoke(ScriptingFunction func,
         }
 
         JS::RootedValue out(_context);
-        JS::RootedObject obj(_context, smrecv.toObjectOrNull());
+        {
+            auto guard = makeGuard([&] { _engine->getDeadlineMonitor().stopDeadline(this); });
 
-        bool success = JS::Call(_context, obj, funcValue, args, &out);
+            JS::RootedObject obj(_context, smrecv.toObjectOrNull());
 
-        _engine->getDeadlineMonitor().stopDeadline(this);
+            bool success = JS::Call(_context, obj, funcValue, args, &out);
 
-        _checkErrorState(success);
+            if (!_checkErrorState(success)) {
+                // Run all of the async JS functions
+                js::RunJobs(_context);
+            }
+        }
 
         if (!ignoreReturn) {
             // must validate the handle because TerminateExecution may have
@@ -742,13 +748,16 @@ bool MozJSImplScope::exec(StringData code,
         }
 
         JS::RootedValue out(_context);
+        {
+            auto guard = makeGuard([&] { _engine->getDeadlineMonitor().stopDeadline(this); });
 
-        success = JS_ExecuteScript(_context, script, &out);
+            success = JS_ExecuteScript(_context, script, &out);
 
-        _engine->getDeadlineMonitor().stopDeadline(this);
-
-        if (_checkErrorState(success, reportError, assertOnError))
-            return false;
+            if (_checkErrorState(success, reportError, assertOnError))
+                return false;
+            // Run all of the async JS functions
+            js::RunJobs(_context);
+        }
 
         ObjectWrapper(_context, _global).setValue(kExecResult, out);
 
@@ -871,25 +880,40 @@ bool MozJSImplScope::_checkErrorState(bool success, bool reportError, bool asser
 
     if (_status.isOK()) {
         JS::RootedValue excn(_context);
-        if (JS_GetPendingException(_context, &excn) && excn.isObject()) {
-
-            auto ss = ValueWriter(_context, excn).toString();
-            auto stackStr = ObjectWrapper(_context, excn).getString(InternedString::stack);
-            auto status = jsExceptionToStatus(_context, excn, ErrorCodes::JSInterpreterFailure, ss);
-            auto fnameStr = ObjectWrapper(_context, excn).getString(InternedString::fileName);
-            auto lineNum = ObjectWrapper(_context, excn).getNumberInt(InternedString::lineNumber);
-            auto colNum = ObjectWrapper(_context, excn).getNumberInt(InternedString::columnNumber);
-
-            if (stackStr.empty()) {
-                // The JavaScript Error objects resulting from C++ exceptions may not always have a
-                // non-empty "stack" property. We instead use the line and column numbers of where
-                // in the JavaScript code the C++ function was called from.
+        if (JS_GetPendingException(_context, &excn)) {
+            if (excn.isObject()) {
                 str::stream ss;
-                ss << "@" << fnameStr << ":" << lineNum << ":" << colNum << "\n";
-                stackStr = ss;
-            }
+                // exceptions originating from c++ don't get the "uncaught exception: " prefix
+                if (!JS_GetPrivate(excn.toObjectOrNull())) {
+                    ss << "uncaught exception: ";
+                }
+                ss << ValueWriter(_context, excn).toString();
+                auto stackStr = ObjectWrapper(_context, excn).getString(InternedString::stack);
+                auto status =
+                    jsExceptionToStatus(_context, excn, ErrorCodes::JSInterpreterFailure, ss);
+                auto fnameStr = ObjectWrapper(_context, excn).getString(InternedString::fileName);
+                auto lineNum =
+                    ObjectWrapper(_context, excn).getNumberInt(InternedString::lineNumber);
+                auto colNum =
+                    ObjectWrapper(_context, excn).getNumberInt(InternedString::columnNumber);
 
-            _status = Status(JSExceptionInfo(std::move(stackStr), status), ss);
+                if (stackStr.empty()) {
+                    // The JavaScript Error objects resulting from C++ exceptions may not always
+                    // have a
+                    // non-empty "stack" property. We instead use the line and column numbers of
+                    // where
+                    // in the JavaScript code the C++ function was called from.
+                    str::stream ss;
+                    ss << "@" << fnameStr << ":" << lineNum << ":" << colNum << "\n";
+                    stackStr = ss;
+                }
+                _status = Status(JSExceptionInfo(std::move(stackStr), status), ss);
+
+            } else {
+                str::stream ss;
+                ss << "uncaught exception: " << ValueWriter(_context, excn).toString();
+                _status = Status(ErrorCodes::UnknownError, ss);
+            }
         } else {
             _status = Status(ErrorCodes::UnknownError, "Unknown Failure from JSInterpreter");
         }

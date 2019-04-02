@@ -47,6 +47,8 @@ public:
 
     void startup(OperationContext* opCtx) override;
 
+    void enterTerminalShutdown() override;
+
     void shutdown(OperationContext* opCtx) override;
 
     // Returns the ServiceContext where this instance runs.
@@ -90,6 +92,8 @@ public:
 
     repl::MemberState getMemberState() const override;
 
+    std::vector<repl::MemberData> getMemberData() const override;
+
     Status waitForMemberState(repl::MemberState, Milliseconds) override;
 
     Seconds getSlaveDelaySecs() const override;
@@ -110,25 +114,32 @@ public:
         const CommitQuorumOptions& commitQuorum,
         const std::vector<HostAndPort>& commitReadyMembers) const override;
 
-    void setMyLastAppliedOpTime(const repl::OpTime&) override;
-    void setMyLastDurableOpTime(const repl::OpTime&) override;
+    void setMyLastAppliedOpTimeAndWallTime(
+        const repl::OpTimeAndWallTime& opTimeAndWallTime) override;
+    void setMyLastDurableOpTimeAndWallTime(
+        const repl::OpTimeAndWallTime& opTimeAndWallTime) override;
+    void setMyLastAppliedOpTimeAndWallTimeForward(const repl::OpTimeAndWallTime& opTimeAndWallTime,
+                                                  DataConsistency consistency) override;
+    void setMyLastDurableOpTimeAndWallTimeForward(
+        const repl::OpTimeAndWallTime& opTimeAndWallTime) override;
 
-    void setMyLastAppliedOpTimeForward(const repl::OpTime&, DataConsistency) override;
-    void setMyLastDurableOpTimeForward(const repl::OpTime&) override;
 
     void resetMyLastOpTimes() override;
 
     void setMyHeartbeatMessage(const std::string&) override;
 
     repl::OpTime getMyLastAppliedOpTime() const override;
+    repl::OpTimeAndWallTime getMyLastAppliedOpTimeAndWallTime() const override;
+
     repl::OpTime getMyLastDurableOpTime() const override;
+    repl::OpTimeAndWallTime getMyLastDurableOpTimeAndWallTime() const override;
 
     Status waitUntilOpTimeForReadUntil(OperationContext*,
                                        const repl::ReadConcernArgs&,
                                        boost::optional<Date_t>) override;
 
     Status waitUntilOpTimeForRead(OperationContext*, const repl::ReadConcernArgs&) override;
-    Status awaitOpTimeCommitted(OperationContext* opCtx, repl::OpTime opTime) override;
+    Status awaitTimestampCommitted(OperationContext* opCtx, Timestamp ts) override;
 
     OID getElectionId() override;
 
@@ -164,7 +175,7 @@ public:
 
     void processReplSetMetadata(const rpc::ReplSetMetadata&) override;
 
-    void advanceCommitPoint(const repl::OpTime& committedOpTime) override;
+    void advanceCommitPoint(const repl::OpTime& committedOpTime, bool fromSyncSource) override;
 
     void cancelAndRescheduleElectionTimeout() override;
 

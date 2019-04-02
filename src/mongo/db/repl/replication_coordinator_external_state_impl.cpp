@@ -66,6 +66,7 @@
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_applier_impl.h"
 #include "mongo/db/repl/oplog_buffer_blocking_queue.h"
+#include "mongo/db/repl/repl_server_parameters_gen.h"
 #include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/replication_process.h"
@@ -78,7 +79,6 @@
 #include "mongo/db/s/sharding_state_recovery.h"
 #include "mongo/db/s/transaction_coordinator_service.h"
 #include "mongo/db/server_options.h"
-#include "mongo/db/server_parameters.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session_catalog_mongod.h"
 #include "mongo/db/storage/storage_engine.h"
@@ -125,29 +125,6 @@ const char tsFieldName[] = "ts";
 
 MONGO_FAIL_POINT_DEFINE(dropPendingCollectionReaperHang);
 
-// Set this to specify the maximum number of times the oplog fetcher will consecutively restart the
-// oplog tailing query on non-cancellation errors during steady state replication.
-MONGO_EXPORT_SERVER_PARAMETER(oplogFetcherSteadyStateMaxFetcherRestarts, int, 1)
-    ->withValidator([](const int& potentialNewValue) {
-        if (potentialNewValue < 0) {
-            return Status(ErrorCodes::BadValue,
-                          "oplogFetcherSteadyStateMaxFetcherRestarts must be nonnegative");
-        }
-        return Status::OK();
-    });
-
-// Set this to specify the maximum number of times the oplog fetcher will consecutively restart the
-// oplog tailing query on non-cancellation errors during initial sync. By default we provide a
-// generous amount of restarts to avoid potentially restarting an entire initial sync from scratch.
-MONGO_EXPORT_SERVER_PARAMETER(oplogFetcherInitialSyncMaxFetcherRestarts, int, 10)
-    ->withValidator([](const int& potentialNewValue) {
-        if (potentialNewValue < 0) {
-            return Status(ErrorCodes::BadValue,
-                          "oplogFetcherInitialSyncMaxFetcherRestarts must be nonnegative");
-        }
-        return Status::OK();
-    });
-
 // The count of items in the buffer
 OplogBuffer::Counters bufferGauge;
 ServerStatusMetricField<Counter64> displayBufferCount("repl.buffer.count", &bufferGauge.count);
@@ -173,7 +150,7 @@ auto makeThreadPool(const std::string& poolName) {
     threadPoolOptions.poolName = poolName;
     threadPoolOptions.onCreateThread = [](const std::string& threadName) {
         Client::initThread(threadName.c_str());
-        AuthorizationSession::get(cc())->grantInternalAuthorization();
+        AuthorizationSession::get(cc())->grantInternalAuthorization(&cc());
     };
     return stdx::make_unique<ThreadPool>(threadPoolOptions);
 }
@@ -206,7 +183,6 @@ void scheduleWork(executor::TaskExecutor* executor, executor::TaskExecutor::Call
     }
     fassert(40460, cbh);
 }
-
 }  // namespace
 
 ReplicationCoordinatorExternalStateImpl::ReplicationCoordinatorExternalStateImpl(
@@ -393,8 +369,10 @@ void ReplicationCoordinatorExternalStateImpl::shutdown(OperationContext* opCtx) 
     // _taskExecutor pointer never changes.
     _taskExecutor->join();
 
+    auto loadLastOpTimeAndWallTimeResult = loadLastOpTimeAndWallTime(opCtx);
     if (_replicationProcess->getConsistencyMarkers()->getOplogTruncateAfterPoint(opCtx).isNull() &&
-        loadLastOpTime(opCtx) ==
+        loadLastOpTimeAndWallTimeResult.isOK() &&
+        loadLastOpTimeAndWallTimeResult.getValue().opTime ==
             _replicationProcess->getConsistencyMarkers()->getAppliedThrough(opCtx)) {
         // Clear the appliedThrough marker to indicate we are consistent with the top of the
         // oplog. We record this update at the 'lastAppliedOpTime'. If there are any outstanding
@@ -505,7 +483,10 @@ OpTime ReplicationCoordinatorExternalStateImpl::onTransitionToPrimary(OperationC
                  << "new primary"));
         wuow.commit();
     });
-    const auto opTimeToReturn = fassert(28665, loadLastOpTime(opCtx));
+    const auto loadLastOpTimeAndWallTimeResult = loadLastOpTimeAndWallTime(opCtx);
+    fassert(28665, loadLastOpTimeAndWallTimeResult);
+    auto opTimeToReturn = loadLastOpTimeAndWallTimeResult.getValue().opTime;
+
 
     _shardingOnTransitionToPrimaryHook(opCtx);
 
@@ -646,7 +627,7 @@ bool ReplicationCoordinatorExternalStateImpl::oplogExists(OperationContext* opCt
     return oplog.getCollection() != nullptr;
 }
 
-StatusWith<OpTime> ReplicationCoordinatorExternalStateImpl::loadLastOpTime(
+StatusWith<OpTimeAndWallTime> ReplicationCoordinatorExternalStateImpl::loadLastOpTimeAndWallTime(
     OperationContext* opCtx) {
     // TODO: handle WriteConflictExceptions below
     try {
@@ -662,30 +643,41 @@ StatusWith<OpTime> ReplicationCoordinatorExternalStateImpl::loadLastOpTime(
                     return Helpers::getLast(
                         opCtx, NamespaceString::kRsOplogNamespace.ns().c_str(), oplogEntry);
                 })) {
-            return StatusWith<OpTime>(ErrorCodes::NoMatchingDocument,
-                                      str::stream() << "Did not find any entries in "
-                                                    << NamespaceString::kRsOplogNamespace.ns());
+            return StatusWith<OpTimeAndWallTime>(ErrorCodes::NoMatchingDocument,
+                                                 str::stream()
+                                                     << "Did not find any entries in "
+                                                     << NamespaceString::kRsOplogNamespace.ns());
         }
         BSONElement tsElement = oplogEntry[tsFieldName];
         if (tsElement.eoo()) {
-            return StatusWith<OpTime>(ErrorCodes::NoSuchKey,
-                                      str::stream() << "Most recent entry in "
-                                                    << NamespaceString::kRsOplogNamespace.ns()
-                                                    << " missing \""
-                                                    << tsFieldName
-                                                    << "\" field");
+            return StatusWith<OpTimeAndWallTime>(
+                ErrorCodes::NoSuchKey,
+                str::stream() << "Most recent entry in " << NamespaceString::kRsOplogNamespace.ns()
+                              << " missing \""
+                              << tsFieldName
+                              << "\" field");
         }
         if (tsElement.type() != bsonTimestamp) {
-            return StatusWith<OpTime>(ErrorCodes::TypeMismatch,
-                                      str::stream() << "Expected type of \"" << tsFieldName
-                                                    << "\" in most recent "
-                                                    << NamespaceString::kRsOplogNamespace.ns()
-                                                    << " entry to have type Timestamp, but found "
-                                                    << typeName(tsElement.type()));
+            return StatusWith<OpTimeAndWallTime>(
+                ErrorCodes::TypeMismatch,
+                str::stream() << "Expected type of \"" << tsFieldName << "\" in most recent "
+                              << NamespaceString::kRsOplogNamespace.ns()
+                              << " entry to have type Timestamp, but found "
+                              << typeName(tsElement.type()));
         }
-        return OpTime::parseFromOplogEntry(oplogEntry);
+
+        auto opTimeStatus = OpTime::parseFromOplogEntry(oplogEntry);
+        if (!opTimeStatus.isOK()) {
+            return opTimeStatus.getStatus();
+        }
+        auto wallTimeStatus = OpTime::parseWallTimeFromOplogEntry(oplogEntry);
+        if (!wallTimeStatus.isOK()) {
+            return wallTimeStatus.getStatus();
+        }
+        OpTimeAndWallTime parseResult = {opTimeStatus.getValue(), wallTimeStatus.getValue()};
+        return parseResult;
     } catch (const DBException& ex) {
-        return StatusWith<OpTime>(ex.toStatus());
+        return StatusWith<OpTimeAndWallTime>(ex.toStatus());
     }
 }
 
@@ -936,11 +928,11 @@ std::size_t ReplicationCoordinatorExternalStateImpl::getOplogFetcherInitialSyncM
 }
 
 JournalListener::Token ReplicationCoordinatorExternalStateImpl::getToken() {
-    return repl::ReplicationCoordinator::get(_service)->getMyLastAppliedOpTime();
+    return repl::ReplicationCoordinator::get(_service)->getMyLastAppliedOpTimeAndWallTime();
 }
 
 void ReplicationCoordinatorExternalStateImpl::onDurable(const JournalListener::Token& token) {
-    repl::ReplicationCoordinator::get(_service)->setMyLastDurableOpTimeForward(token);
+    repl::ReplicationCoordinator::get(_service)->setMyLastDurableOpTimeAndWallTimeForward(token);
 }
 
 void ReplicationCoordinatorExternalStateImpl::startNoopWriter(OpTime opTime) {

@@ -164,7 +164,12 @@ Status ensureAllCollectionsHaveUUIDs(OperationContext* opCtx,
         auto db = databaseHolder->openDb(opCtx, dbName);
         invariant(db);
 
-        for (Collection* coll : *db) {
+        for (auto collIt = db->begin(opCtx); collIt != db->end(opCtx); ++collIt) {
+            auto coll = *collIt;
+            if (!coll) {
+                break;
+            }
+
             // We expect all collections to have UUIDs in MongoDB 4.2
             if (!coll->uuid()) {
                 return downgradeError;
@@ -299,10 +304,11 @@ void setReplSetMemberInStandaloneMode(OperationContext* opCtx) {
 }  // namespace
 
 /**
- * Return an error status if the wrong mongod version was used for these datafiles. The boolean
- * represents whether there are non-local databases.
+ * Return whether there are non-local databases. If there was an error becauses the wrong mongod
+ * version was used for these datafiles, a DBException with status ErrorCodes::MustDowngrade is
+ * thrown.
  */
-StatusWith<bool> repairDatabasesAndCheckVersion(OperationContext* opCtx) {
+bool repairDatabasesAndCheckVersion(OperationContext* opCtx) {
     auto const storageEngine = opCtx->getServiceContext()->getStorageEngine();
     Lock::GlobalWrite lk(opCtx);
 
@@ -355,10 +361,7 @@ StatusWith<bool> repairDatabasesAndCheckVersion(OperationContext* opCtx) {
 
         // All collections must have UUIDs before restoring the FCV document to a version that
         // requires UUIDs.
-        Status uuidsStatus = ensureAllCollectionsHaveUUIDs(opCtx, dbNames);
-        if (!uuidsStatus.isOK()) {
-            return uuidsStatus;
-        }
+        uassertStatusOK(ensureAllCollectionsHaveUUIDs(opCtx, dbNames));
         repairVerifiedAllCollectionsHaveUUIDs = true;
 
         // Attempt to restore the featureCompatibilityVersion document if it is missing.
@@ -372,19 +375,13 @@ StatusWith<bool> repairDatabasesAndCheckVersion(OperationContext* opCtx) {
                               versionColl,
                               BSON("_id" << FeatureCompatibilityVersionParser::kParameterName),
                               featureCompatibilityVersion)) {
-            auto status = restoreMissingFeatureCompatibilityVersionDocument(opCtx, dbNames);
-            if (!status.isOK()) {
-                return status;
-            }
+            uassertStatusOK(restoreMissingFeatureCompatibilityVersionDocument(opCtx, dbNames));
         }
     }
 
     // All collections must have UUIDs.
     if (!repairVerifiedAllCollectionsHaveUUIDs) {
-        Status uuidsStatus = ensureAllCollectionsHaveUUIDs(opCtx, dbNames);
-        if (!uuidsStatus.isOK()) {
-            return uuidsStatus;
-        }
+        uassertStatusOK(ensureAllCollectionsHaveUUIDs(opCtx, dbNames));
     }
 
     if (!storageGlobalParams.readOnly) {
@@ -483,20 +480,20 @@ StatusWith<bool> repairDatabasesAndCheckVersion(OperationContext* opCtx) {
                         featureCompatibilityVersion)) {
                     auto swVersion =
                         FeatureCompatibilityVersionParser::parse(featureCompatibilityVersion);
-                    if (!swVersion.isOK()) {
-                        // Note this error path captures all cases of an FCV document existing,
-                        // but with any value other than "4.0" or "4.2". This includes unexpected
-                        // cases with no path forward such as the FCV value not being a string.
-                        return {ErrorCodes::MustDowngrade,
-                                str::stream()
-                                    << "UPGRADE PROBLEM: Found an invalid "
-                                       "featureCompatibilityVersion document (ERROR: "
-                                    << swVersion.getStatus()
-                                    << "). If the current featureCompatibilityVersion is below "
-                                       "4.0, see the documentation on upgrading at "
-                                    << feature_compatibility_version_documentation::kUpgradeLink
-                                    << "."};
-                    }
+                    // Note this error path captures all cases of an FCV document existing,
+                    // but with any value other than "4.0" or "4.2". This includes unexpected
+                    // cases with no path forward such as the FCV value not being a string.
+                    uassert(ErrorCodes::MustDowngrade,
+                            str::stream()
+                                << "UPGRADE PROBLEM: Found an invalid "
+                                   "featureCompatibilityVersion document (ERROR: "
+                                << swVersion.getStatus()
+                                << "). If the current featureCompatibilityVersion is below "
+                                   "4.0, see the documentation on upgrading at "
+                                << feature_compatibility_version_documentation::kUpgradeLink
+                                << ".",
+                            swVersion.isOK());
+
                     fcvDocumentExists = true;
                     auto version = swVersion.getValue();
                     serverGlobalParams.featureCompatibility.setVersion(version);

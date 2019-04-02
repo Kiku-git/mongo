@@ -23,7 +23,7 @@ TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
     // coordinator fails over before writing the participant list and then checks that the
     // transaction is aborted on all participants, and the participants will only abort on reaching
     // the transaction timeout.
-    TestData.transactionLifetimeLimitSeconds = 15;
+    TestData.transactionLifetimeLimitSeconds = 30;
 
     let lsid = {id: UUID()};
     let txnNumber = 0;
@@ -109,6 +109,8 @@ TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
                 st.s.adminCommand({moveChunk: ns, find: {_id: 0}, to: participant1.shardName}));
             assert.commandWorked(
                 st.s.adminCommand({moveChunk: ns, find: {_id: 10}, to: participant2.shardName}));
+
+            flushRoutersAndRefreshShardMetadata(st, {ns});
 
             // Start a new transaction by inserting a document onto each shard.
             assert.commandWorked(st.s.getDB(dbName).runCommand({
@@ -214,12 +216,18 @@ TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
         //
 
         failpointDataArr.forEach(function(failpointData) {
-            if (overrideCoordinatorToBeConfigServer &&
-                failpointData.failpoint == "hangWhileTargetingLocalHost") {
-                // If the coordinator is overridden to be the config server, it will never target
-                // itself, so don't test the target local path.
-                return;
+            if (overrideCoordinatorToBeConfigServer) {
+                if (failpointData.failpoint == "hangWhileTargetingLocalHost") {
+                    // If the coordinator is overridden to be the config server, it will never
+                    // target itself, so don't test the target local path.
+                    return;
+                } else if (failpointData.failpoint == "hangBeforeDeletingCoordinatorDoc") {
+                    // If the coordinator is overridden to be the config server, it will never
+                    // delete the coordinator document, so skip this test.
+                    return;
+                }
             }
+
             testCommitProtocol(true /* make a participant abort */,
                                failpointData,
                                true /* expect abort decision */);
@@ -237,7 +245,12 @@ TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
                     // If the coordinator is overridden to be the config server, it will never
                     // target itself, so don't test the target local path.
                     return;
+                } else if (failpointData.failpoint == "hangBeforeDeletingCoordinatorDoc") {
+                    // If the coordinator is overridden to be the config server, it will never
+                    // delete the coordinator document, so skip this test.
+                    return;
                 }
+
                 // Note: If the coordinator fails over before making the participant list durable,
                 // the transaction will abort even if all participants could have committed. This is
                 // a property of the coordinator only, and would be true even if a participant's

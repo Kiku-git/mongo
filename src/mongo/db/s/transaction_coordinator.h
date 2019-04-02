@@ -31,16 +31,23 @@
 
 #include <vector>
 
-#include "mongo/db/s/transaction_coordinator_driver.h"
+#include "mongo/db/s/transaction_coordinator_util.h"
 #include "mongo/logger/logstream_builder.h"
+#include "mongo/util/fail_point_service.h"
 
 namespace mongo {
 
 /**
- * Class responsible for coordinating two-phase commit across shards.
+ * State machine, which implements the two-phase commit protocol for a specific transaction,
+ * identified by lsid + txnNumber.
+ *
+ * The lifetime of a coordinator starts with a construction and ends with the `onCompletion()`
+ * future getting signaled. It is illegal to destroy a coordinator without waiting for
+ * `onCompletion()`.
  */
 class TransactionCoordinator {
-    MONGO_DISALLOW_COPYING(TransactionCoordinator);
+    TransactionCoordinator(const TransactionCoordinator&) = delete;
+    TransactionCoordinator& operator=(const TransactionCoordinator&) = delete;
 
 public:
     /**
@@ -58,34 +65,6 @@ public:
                            boost::optional<Date_t> coordinateCommitDeadline);
 
     ~TransactionCoordinator();
-
-    /**
-     * Represents a decision made by the coordinator, including commit timestamp to be sent with
-     * commitTransaction in the case of a decision to commit.
-     */
-    struct CoordinatorCommitDecision {
-        txn::CommitDecision decision;
-        boost::optional<Timestamp> commitTimestamp;
-
-        /**
-         * Parses a CoordinatorCommitDecision from the object.
-         */
-        static StatusWith<CoordinatorCommitDecision> fromBSON(const BSONObj& obj);
-
-        /**
-         * Returns an instance of CoordinatorCommitDecision from an object.
-         *
-         * Throws if the object cannot be deserialized.
-         */
-        static CoordinatorCommitDecision fromBSONThrowing(const BSONObj& obj) {
-            return uassertStatusOK(fromBSON(obj));
-        };
-
-        /**
-         * Returns the BSON representation of this object.
-         */
-        BSONObj toBSON() const;
-    };
 
     /**
      * The state of the coordinator.
@@ -114,7 +93,7 @@ public:
     /**
      * To be used to continue coordinating a transaction on step up.
      */
-    void continueCommit(const TransactionCoordinatorDocument& doc);
+    void continueCommit(const txn::TransactionCoordinatorDocument& doc);
 
     /**
      * Gets a Future that will contain the decision that the coordinator reaches. Note that this
@@ -125,11 +104,9 @@ public:
     SharedSemiFuture<txn::CommitDecision> getDecision();
 
     /**
-     * Returns a future that will be signaled when the transaction has completely finished
-     * committing or aborting (i.e. when commit/abort acknowledgements have been received from all
-     * participants, or the coordinator commit process is aborted locally for some reason).
-     *
-     * Unlike runCommit, this will not kick off the commit process if it has not already begun.
+     * Returns a future which can be listened on for when all the asynchronous activity spawned by
+     * this coordinator has completed. It will always eventually be set and once set it is safe to
+     * dispose of the TransactionCoordinator object.
      */
     Future<void> onCompletion();
 
@@ -158,7 +135,8 @@ private:
      * 3. If the decision is to commit, calculates the commit Timestamp.
      * 4. Writes the decision and waits for the decision to become majority-committed.
      */
-    Future<CoordinatorCommitDecision> _runPhaseOne(const std::vector<ShardId>& participantShards);
+    Future<txn::CoordinatorCommitDecision> _runPhaseOne(
+        const std::vector<ShardId>& participantShards);
 
     /**
      * Expects the decision to already be majority-committed.
@@ -169,19 +147,19 @@ private:
      *    majority-committed.
      */
     Future<void> _runPhaseTwo(const std::vector<ShardId>& participantShards,
-                              const CoordinatorCommitDecision& decision);
+                              const txn::CoordinatorCommitDecision& decision);
 
     /**
     * Asynchronously sends the commit decision to all participants (commit or abort), resolving the
     * returned future when all participants have acknowledged the decision.
     */
     Future<void> _sendDecisionToParticipants(const std::vector<ShardId>& participantShards,
-                                             CoordinatorCommitDecision coordinatorDecision);
+                                             txn::CoordinatorCommitDecision coordinatorDecision);
 
     /**
      * Helper for handling errors that occur during either phase of commit coordination.
      */
-    void _handleCompletionStatus(Status s);
+    void _handleCompletionError(Status s);
 
     /**
      * Notifies all callers of onCompletion that the commit process has completed by fulfilling
@@ -209,10 +187,6 @@ private:
     // coordinator was not created with an expiration task.
     std::unique_ptr<txn::AsyncWorkScheduler> _deadlineScheduler;
 
-    // Context object used to perform and track the state of asynchronous operations on behalf of
-    // this coordinator.
-    TransactionCoordinatorDriver _driver;
-
     // Protects the state below
     mutable stdx::mutex _mutex;
 
@@ -232,10 +206,11 @@ private:
     std::vector<Promise<void>> _completionPromises;
 };
 
-logger::LogstreamBuilder& operator<<(logger::LogstreamBuilder& stream,
-                                     const TransactionCoordinator::CoordinatorState& state);
+// TODO (SERVER-37886): Remove this failpoint once failover can be tested on coordinators that have
+// a local participant
+MONGO_FAIL_POINT_DECLARE(doNotForgetCoordinator);
 
 logger::LogstreamBuilder& operator<<(logger::LogstreamBuilder& stream,
-                                     const txn::CommitDecision& decision);
+                                     const TransactionCoordinator::CoordinatorState& state);
 
 }  // namespace mongo

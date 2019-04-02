@@ -49,6 +49,7 @@ using mongo::ErrorCodes;
 using mongo::Status;
 
 namespace moe = mongo::optionenvironment;
+constexpr auto OptionParserTest = moe::OptionSection::OptionParserUsageType::OptionParserTest;
 
 #define TEST_CONFIG_PATH(x) "src/mongo/util/options_parser/test_config_files/" x
 
@@ -77,8 +78,8 @@ private:
 TEST(Registration, EmptySingleName) {
     moe::OptionSection testOpts;
     try {
-        testOpts.addOptionChaining("dup", "", moe::Switch, "dup");
-        testOpts.addOptionChaining("new", "", moe::Switch, "dup");
+        testOpts.addOptionChaining("dup", "", moe::Switch, "dup", {}, {}, OptionParserTest);
+        testOpts.addOptionChaining("new", "", moe::Switch, "dup", {}, {}, OptionParserTest);
     } catch (::mongo::DBException& e) {
         ::mongo::StringBuilder sb;
         sb << "Was not able to register two options with empty single name: " << e.what();
@@ -95,9 +96,9 @@ TEST(Registration, EmptySingleName) {
 
     moe::OptionSection testOptsValid;
     try {
-        testOptsValid.addOptionChaining("dup", "", moe::Switch, "dup")
+        testOptsValid.addOptionChaining("dup", "", moe::Switch, "dup", {}, {}, OptionParserTest)
             .setSources(moe::SourceYAMLConfig);
-        testOptsValid.addOptionChaining("new", "", moe::Switch, "dup")
+        testOptsValid.addOptionChaining("new", "", moe::Switch, "dup", {}, {}, OptionParserTest)
             .setSources(moe::SourceYAMLConfig);
     } catch (::mongo::DBException& e) {
         ::mongo::StringBuilder sb;
@@ -113,8 +114,8 @@ TEST(Registration, EmptySingleName) {
 TEST(Registration, DuplicateSingleName) {
     moe::OptionSection testOpts;
     try {
-        testOpts.addOptionChaining("dup", "dup", moe::Switch, "dup");
-        testOpts.addOptionChaining("new", "dup", moe::Switch, "dup");
+        testOpts.addOptionChaining("dup", "dup", moe::Switch, "dup", {}, {}, OptionParserTest);
+        testOpts.addOptionChaining("new", "dup", moe::Switch, "dup", {}, {}, OptionParserTest);
         FAIL("Was able to register duplicate single name");
     } catch (::mongo::DBException&) {
     }
@@ -122,29 +123,29 @@ TEST(Registration, DuplicateSingleName) {
 
 TEST(Registration, DuplicateSeingleNameAcrossSections) {
     moe::OptionSection group1;
-    group1.addOptionChaining("one", "", moe::Switch, "Uno");
+    group1.addOptionChaining("one", "", moe::Switch, "Uno", {}, {}, OptionParserTest);
 
     moe::OptionSection group2;
-    group2.addOptionChaining("one", "", moe::Switch, "Dos");
+    group2.addOptionChaining("one", "", moe::Switch, "Dos", {}, {}, OptionParserTest);
 
     moe::OptionSection root;
     ASSERT_OK(root.addSection(group1));
     ASSERT_NOT_OK(root.addSection(group2));
 
-    ASSERT_THROWS(root.addOptionChaining("one", "", moe::Switch, "Tres"),
+    ASSERT_THROWS(root.addOptionChaining("one", "", moe::Switch, "Tres", {}, {}, OptionParserTest),
                   mongo::AssertionException);
-    root.addOptionChaining("two", "", moe::Switch, "Quatro");
+    root.addOptionChaining("two", "", moe::Switch, "Quatro", {}, {}, OptionParserTest);
 
     moe::OptionSection group3;
-    group3.addOptionChaining("two", "", moe::Switch, "Cinco");
+    group3.addOptionChaining("two", "", moe::Switch, "Cinco", {}, {}, OptionParserTest);
     ASSERT_NOT_OK(root.addSection(group3));
 }
 
 TEST(Registration, DuplicateDottedName) {
     moe::OptionSection testOpts;
     try {
-        testOpts.addOptionChaining("dup", "dup", moe::Switch, "dup");
-        testOpts.addOptionChaining("dup", "new", moe::Switch, "dup");
+        testOpts.addOptionChaining("dup", "dup", moe::Switch, "dup", {}, {}, OptionParserTest);
+        testOpts.addOptionChaining("dup", "new", moe::Switch, "dup", {}, {}, OptionParserTest);
         FAIL("Was able to register duplicate single name");
     } catch (::mongo::DBException&) {
     }
@@ -153,9 +154,13 @@ TEST(Registration, DuplicateDottedName) {
 TEST(Registration, DuplicatePositional) {
     moe::OptionSection testOpts;
     try {
-        testOpts.addOptionChaining("positional", "positional", moe::Int, "Positional")
+        testOpts
+            .addOptionChaining(
+                "positional", "positional", moe::Int, "Positional", {}, {}, OptionParserTest)
             .positional(1, 1);
-        testOpts.addOptionChaining("positional", "positional", moe::Int, "Positional")
+        testOpts
+            .addOptionChaining(
+                "positional", "positional", moe::Int, "Positional", {}, {}, OptionParserTest)
             .positional(1, 1);
         FAIL("Was able to register duplicate positional option");
     } catch (::mongo::DBException&) {
@@ -165,31 +170,41 @@ TEST(Registration, DuplicatePositional) {
 TEST(Registration, BadRangesPositional) {
     moe::OptionSection testOpts;
     try {
-        testOpts.addOptionChaining("positional1", "positional1", moe::String, "Positional")
+        testOpts
+            .addOptionChaining(
+                "positional1", "positional1", moe::String, "Positional", {}, {}, OptionParserTest)
             .positional(-1, 1);
         FAIL("Was able to register positional with negative start for range");
     } catch (::mongo::DBException&) {
     }
     try {
-        testOpts.addOptionChaining("positional1", "positional1", moe::String, "Positional")
+        testOpts
+            .addOptionChaining(
+                "positional1", "positional1", moe::String, "Positional", {}, {}, OptionParserTest)
             .positional(2, 1);
         FAIL("Was able to register positional with start of range larger than end");
     } catch (::mongo::DBException&) {
     }
     try {
-        testOpts.addOptionChaining("positional1", "positional1", moe::String, "Positional")
+        testOpts
+            .addOptionChaining(
+                "positional1", "positional1", moe::String, "Positional", {}, {}, OptionParserTest)
             .positional(1, -2);
         FAIL("Was able to register positional with bad end of range");
     } catch (::mongo::DBException&) {
     }
     try {
-        testOpts.addOptionChaining("positional1", "positional1", moe::String, "Positional")
+        testOpts
+            .addOptionChaining(
+                "positional1", "positional1", moe::String, "Positional", {}, {}, OptionParserTest)
             .positional(0, 1);
         FAIL("Was able to register positional with bad start of range");
     } catch (::mongo::DBException&) {
     }
     try {
-        testOpts.addOptionChaining("positional1", "positional1", moe::String, "Positional")
+        testOpts
+            .addOptionChaining(
+                "positional1", "positional1", moe::String, "Positional", {}, {}, OptionParserTest)
             .positional(1, 2);
         FAIL("Was able to register multi valued positional with non StringVector type");
     } catch (::mongo::DBException&) {
@@ -199,7 +214,7 @@ TEST(Registration, BadRangesPositional) {
 TEST(Registration, DefaultValueWrongType) {
     moe::OptionSection testOpts;
     try {
-        testOpts.addOptionChaining("port", "port", moe::Int, "Port")
+        testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest)
             .setDefault(moe::Value("String"));
         FAIL("Was able to register default value with wrong type");
     } catch (::mongo::DBException&) {
@@ -209,7 +224,7 @@ TEST(Registration, DefaultValueWrongType) {
 TEST(Registration, ImplicitValueWrongType) {
     moe::OptionSection testOpts;
     try {
-        testOpts.addOptionChaining("port", "port", moe::Int, "Port")
+        testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest)
             .setImplicit(moe::Value("String"));
         FAIL("Was able to register implicit value with wrong type");
     } catch (::mongo::DBException&) {
@@ -219,7 +234,14 @@ TEST(Registration, ImplicitValueWrongType) {
 TEST(Registration, ComposableNotVectorOrMap) {
     moe::OptionSection testOpts;
     try {
-        testOpts.addOptionChaining("setParameter", "setParameter", moe::String, "Multiple Values")
+        testOpts
+            .addOptionChaining("setParameter",
+                               "setParameter",
+                               moe::String,
+                               "Multiple Values",
+                               {},
+                               {},
+                               OptionParserTest)
             .composing();
         FAIL("Was able to register composable option with wrong type");
     } catch (::mongo::DBException&) {
@@ -232,7 +254,13 @@ TEST(Registration, ComposableWithImplicit) {
         std::vector<std::string> implicitVal;
         implicitVal.push_back("implicit");
         testOpts
-            .addOptionChaining("setParameter", "setParameter", moe::StringVector, "Multiple Values")
+            .addOptionChaining("setParameter",
+                               "setParameter",
+                               moe::StringVector,
+                               "Multiple Values",
+                               {},
+                               {},
+                               OptionParserTest)
             .setImplicit(moe::Value(implicitVal))
             .composing();
         FAIL("Was able to register composable option with implicit value");
@@ -243,7 +271,13 @@ TEST(Registration, ComposableWithImplicit) {
         std::vector<std::string> implicitVal;
         implicitVal.push_back("implicit");
         testOpts
-            .addOptionChaining("setParameter", "setParameter", moe::StringVector, "Multiple Values")
+            .addOptionChaining("setParameter",
+                               "setParameter",
+                               moe::StringVector,
+                               "Multiple Values",
+                               {},
+                               {},
+                               OptionParserTest)
             .composing()
             .setImplicit(moe::Value(implicitVal));
         FAIL("Was able to set implicit value on composable option");
@@ -257,7 +291,13 @@ TEST(Registration, ComposableWithDefault) {
         std::vector<std::string> defaultVal;
         defaultVal.push_back("default");
         testOpts
-            .addOptionChaining("setParameter", "setParameter", moe::StringVector, "Multiple Values")
+            .addOptionChaining("setParameter",
+                               "setParameter",
+                               moe::StringVector,
+                               "Multiple Values",
+                               {},
+                               {},
+                               OptionParserTest)
             .setDefault(moe::Value(defaultVal))
             .composing();
         FAIL("Was able to register composable option with default value");
@@ -268,30 +308,16 @@ TEST(Registration, ComposableWithDefault) {
         std::vector<std::string> defaultVal;
         defaultVal.push_back("default");
         testOpts
-            .addOptionChaining("setParameter", "setParameter", moe::StringVector, "Multiple Values")
+            .addOptionChaining("setParameter",
+                               "setParameter",
+                               moe::StringVector,
+                               "Multiple Values",
+                               {},
+                               {},
+                               OptionParserTest)
             .composing()
             .setDefault(moe::Value(defaultVal));
         FAIL("Was able to set default value on composable option");
-    } catch (::mongo::DBException&) {
-    }
-}
-
-TEST(Registration, NumericRangeConstraint) {
-    moe::OptionSection testOpts;
-    try {
-        std::vector<std::string> defaultVal;
-        defaultVal.push_back("default");
-        testOpts.addOptionChaining("port", "port", moe::String, "Port").validRange(1000, 65535);
-        FAIL("Was able to register non numeric option with constraint on range");
-    } catch (::mongo::DBException&) {
-    }
-}
-
-TEST(Registration, StringFormatConstraint) {
-    moe::OptionSection testOpts;
-    try {
-        testOpts.addOptionChaining("port", "port", moe::Int, "Port").format("[0-9]*", "[0-9]*");
-        FAIL("Was able to register non string option with constraint on format");
     } catch (::mongo::DBException&) {
     }
 }
@@ -311,14 +337,16 @@ TEST(Registration, MergeSubSections) {
 
     {
         moe::OptionSection opts("Options");
-        opts.addOptionChaining("option1", "option1", moe::String, "A string option");
+        opts.addOptionChaining(
+            "option1", "option1", moe::String, "A string option", {}, {}, OptionParserTest);
         ASSERT_OK(root.addSection(opts));
         ASSERT_EQ(root.countSubSections(), 1UL);
     }
 
     {
         moe::OptionSection moreOpts("Options");
-        moreOpts.addOptionChaining("option2", "option2", moe::Int, "An integer option");
+        moreOpts.addOptionChaining(
+            "option2", "option2", moe::Int, "An integer option", {}, {}, OptionParserTest);
         ASSERT_OK(root.addSection(moreOpts));
         ASSERT_EQ(root.countSubSections(), 1UL);
     }
@@ -335,8 +363,9 @@ TEST(Parsing, Good) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("help", "help", moe::Switch, "Display help");
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port");
+    testOpts.addOptionChaining(
+        "help", "help", moe::Switch, "Display help", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -361,7 +390,7 @@ TEST(Parsing, SubSection) {
     moe::OptionSection testOpts;
     moe::OptionSection subSection("Section Name");
 
-    subSection.addOptionChaining("port", "port", moe::Int, "Port");
+    subSection.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest);
     ASSERT_OK(testOpts.addSection(subSection));
 
     std::vector<std::string> argv;
@@ -383,7 +412,8 @@ TEST(Parsing, StringVector) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("multival", "multival", moe::StringVector, "Multiple Values");
+    testOpts.addOptionChaining(
+        "multival", "multival", moe::StringVector, "Multiple Values", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -410,7 +440,8 @@ TEST(Parsing, StringMap) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("multival", "multival", moe::StringMap, "Multiple Values");
+    testOpts.addOptionChaining(
+        "multival", "multival", moe::StringMap, "Multiple Values", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -444,7 +475,8 @@ TEST(Parsing, StringMapDuplicateKey) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("multival", "multival", moe::StringMap, "Multiple Values");
+    testOpts.addOptionChaining(
+        "multival", "multival", moe::StringMap, "Multiple Values", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -463,7 +495,9 @@ TEST(Parsing, Positional) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("positional", "positional", moe::String, "Positional")
+    testOpts
+        .addOptionChaining(
+            "positional", "positional", moe::String, "Positional", {}, {}, OptionParserTest)
         .positional(1, 1);
 
     std::vector<std::string> argv;
@@ -484,7 +518,9 @@ TEST(Parsing, PositionalTooMany) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("positional", "positional", moe::String, "Positional")
+    testOpts
+        .addOptionChaining(
+            "positional", "positional", moe::String, "Positional", {}, {}, OptionParserTest)
         .positional(1, 1);
 
     std::vector<std::string> argv;
@@ -502,9 +538,11 @@ TEST(Parsing, PositionalAndFlag) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("positional", "positional", moe::String, "Positional")
+    testOpts
+        .addOptionChaining(
+            "positional", "positional", moe::String, "Positional", {}, {}, OptionParserTest)
         .positional(1, 1);
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port");
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -530,7 +568,9 @@ TEST(Parsing, PositionalMultiple) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("positional", "positional", moe::StringVector, "Positional")
+    testOpts
+        .addOptionChaining(
+            "positional", "positional", moe::StringVector, "Positional", {}, {}, OptionParserTest)
         .positional(1, 2);
 
     std::vector<std::string> argv;
@@ -555,7 +595,9 @@ TEST(Parsing, PositionalMultipleExtra) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("positional", "positional", moe::StringVector, "Positional")
+    testOpts
+        .addOptionChaining(
+            "positional", "positional", moe::StringVector, "Positional", {}, {}, OptionParserTest)
         .positional(1, 2);
 
     std::vector<std::string> argv;
@@ -573,7 +615,9 @@ TEST(Parsing, PositionalMultipleUnlimited) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("positional", "positional", moe::StringVector, "Positional")
+    testOpts
+        .addOptionChaining(
+            "positional", "positional", moe::StringVector, "Positional", {}, {}, OptionParserTest)
         .positional(1, -1);
 
     std::vector<std::string> argv;
@@ -607,9 +651,11 @@ TEST(Parsing, PositionalMultipleAndFlag) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("positional", "positional", moe::StringVector, "Positional")
+    testOpts
+        .addOptionChaining(
+            "positional", "positional", moe::StringVector, "Positional", {}, {}, OptionParserTest)
         .positional(1, 2);
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port");
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -639,8 +685,9 @@ TEST(Parsing, NeedArg) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("help", "help", moe::Switch, "Display help");
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port");
+    testOpts.addOptionChaining(
+        "help", "help", moe::Switch, "Display help", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -655,8 +702,9 @@ TEST(Parsing, BadArg) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("help", "help", moe::Switch, "Display help");
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port");
+    testOpts.addOptionChaining(
+        "help", "help", moe::Switch, "Display help", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -672,8 +720,9 @@ TEST(Parsing, ExtraArg) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("help", "help", moe::Switch, "Display help");
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port");
+    testOpts.addOptionChaining(
+        "help", "help", moe::Switch, "Display help", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -689,8 +738,10 @@ TEST(Parsing, DefaultValue) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("help", "help", moe::Switch, "Display help");
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port").setDefault(moe::Value(5));
+    testOpts.addOptionChaining(
+        "help", "help", moe::Switch, "Display help", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest)
+        .setDefault(moe::Value(5));
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -709,8 +760,10 @@ TEST(Parsing, DefaultValueOverride) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("help", "help", moe::Switch, "Display help");
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port").setDefault(moe::Value(5));
+    testOpts.addOptionChaining(
+        "help", "help", moe::Switch, "Display help", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest)
+        .setDefault(moe::Value(5));
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -731,9 +784,12 @@ TEST(Parsing, DefaultValuesNotInBSON) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("help", "help", moe::Switch, "Display help");
-    testOpts.addOptionChaining("val1", "val1", moe::Int, "Val1").setDefault(moe::Value(5));
-    testOpts.addOptionChaining("val2", "val2", moe::Int, "Val2").setDefault(moe::Value(5));
+    testOpts.addOptionChaining(
+        "help", "help", moe::Switch, "Display help", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("val1", "val1", moe::Int, "Val1", {}, {}, OptionParserTest)
+        .setDefault(moe::Value(5));
+    testOpts.addOptionChaining("val2", "val2", moe::Int, "Val2", {}, {}, OptionParserTest)
+        .setDefault(moe::Value(5));
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -752,8 +808,9 @@ TEST(Parsing, ImplicitValue) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("help", "help", moe::Switch, "Display help");
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port")
+    testOpts.addOptionChaining(
+        "help", "help", moe::Switch, "Display help", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest)
         .setDefault(moe::Value(6))
         .setImplicit(moe::Value(7));
 
@@ -775,8 +832,9 @@ TEST(Parsing, ImplicitValueDefault) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("help", "help", moe::Switch, "Display help");
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port")
+    testOpts.addOptionChaining(
+        "help", "help", moe::Switch, "Display help", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest)
         .setDefault(moe::Value(6))
         .setImplicit(moe::Value(7));
 
@@ -797,8 +855,9 @@ TEST(Parsing, ImplicitValueOverride) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("help", "help", moe::Switch, "Display help");
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port")
+    testOpts.addOptionChaining(
+        "help", "help", moe::Switch, "Display help", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest)
         .setDefault(moe::Value(6))
         .setImplicit(moe::Value(7));
 
@@ -821,8 +880,9 @@ TEST(Parsing, ImplicitValueOverrideWithEqualsSign) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("help", "help", moe::Switch, "Display help");
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port")
+    testOpts.addOptionChaining(
+        "help", "help", moe::Switch, "Display help", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest)
         .setDefault(moe::Value(6))
         .setImplicit(moe::Value(7));
 
@@ -844,8 +904,9 @@ TEST(Parsing, ShortName) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("help", "help,h", moe::Switch, "Display help");
-    testOpts.addOptionChaining("port", "port,p", moe::Int, "Port");
+    testOpts.addOptionChaining(
+        "help", "help,h", moe::Switch, "Display help", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("port", "port,p", moe::Int, "Port", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -868,8 +929,8 @@ TEST(Style, NoSticky) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("opt", "opt,o", moe::Switch, "first opt");
-    testOpts.addOptionChaining("arg", "arg,a", moe::Switch, "first arg");
+    testOpts.addOptionChaining("opt", "opt,o", moe::Switch, "first opt", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("arg", "arg,a", moe::Switch, "first arg", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -884,7 +945,8 @@ TEST(Style, NoGuessing) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("help", "help", moe::Switch, "Display help");
+    testOpts.addOptionChaining(
+        "help", "help", moe::Switch, "Display help", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -899,7 +961,8 @@ TEST(Style, LongDisguises) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("help", "help", moe::Switch, "Display help");
+    testOpts.addOptionChaining(
+        "help", "help", moe::Switch, "Display help", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -923,13 +986,21 @@ TEST(Style, Verbosity) {
         "v",
         "verbose,v",
         moe::Switch,
-        "be more verbose (include multiple times for more verbosity e.g. -vvvvv)");
+        "be more verbose (include multiple times for more verbosity e.g. -vvvvv)",
+        {},
+        {},
+        OptionParserTest);
 
     /* support for -vv -vvvv etc. */
     for (std::string s = "vv"; s.length() <= 12; s.append("v")) {
         testOpts
-            .addOptionChaining(
-                s.c_str(), s.c_str(), moe::Switch, "higher verbosity levels (hidden)")
+            .addOptionChaining(s.c_str(),
+                               s.c_str(),
+                               moe::Switch,
+                               "higher verbosity levels (hidden)",
+                               {},
+                               {},
+                               OptionParserTest)
             .hidden();
     }
 
@@ -958,8 +1029,9 @@ TEST(INIConfigFile, Basic) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -982,7 +1054,8 @@ TEST(INIConfigFile, Empty) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -1000,8 +1073,9 @@ TEST(INIConfigFile, Override) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -1026,9 +1100,10 @@ TEST(INIConfigFile, Comments) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port");
-    testOpts.addOptionChaining("str", "str", moe::String, "String");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("str", "str", moe::String, "String", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -1059,12 +1134,18 @@ TEST(INIConfigFile, Switches) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("switch1", "switch1", moe::Switch, "switch1");
-    testOpts.addOptionChaining("switch2", "switch2", moe::Switch, "switch2");
-    testOpts.addOptionChaining("switch3", "switch3", moe::Switch, "switch3");
-    testOpts.addOptionChaining("switch4", "switch4", moe::Switch, "switch4");
-    testOpts.addOptionChaining("switch5", "switch5", moe::Switch, "switch5");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "switch1", "switch1", moe::Switch, "switch1", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "switch2", "switch2", moe::Switch, "switch2", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "switch3", "switch3", moe::Switch, "switch3", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "switch4", "switch4", moe::Switch, "switch4", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "switch5", "switch5", moe::Switch, "switch5", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -1097,11 +1178,13 @@ TEST(INIConfigFile, Monkeys) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("this", "this", moe::Switch, "This");
-    testOpts.addOptionChaining("that", "that", moe::Switch, "That");
-    testOpts.addOptionChaining("another", "another", moe::String, "Another");
-    testOpts.addOptionChaining("other", "other", moe::String, "Other");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("this", "this", moe::Switch, "This", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("that", "that", moe::Switch, "That", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "another", "another", moe::String, "Another", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("other", "other", moe::String, "Other", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -1132,8 +1215,10 @@ TEST(INIConfigFile, DefaultValueOverride) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port").setDefault(moe::Value(5));
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest)
+        .setDefault(moe::Value(5));
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -1156,8 +1241,10 @@ TEST(INIConfigFile, StringVector) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("multival", "multival", moe::StringVector, "Multiple Values");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "multival", "multival", moe::StringVector, "Multiple Values", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -1184,8 +1271,10 @@ TEST(INIConfigFile, StringMap) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("multival", "multival", moe::StringMap, "Multiple Values");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "multival", "multival", moe::StringMap, "Multiple Values", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -1220,8 +1309,10 @@ TEST(INIConfigFile, StringMapDuplicateKey) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("multival", "multival", moe::StringMap, "Multiple Values");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "multival", "multival", moe::StringMap, "Multiple Values", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -1241,8 +1332,9 @@ TEST(JSONConfigFile, Basic) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -1265,7 +1357,8 @@ TEST(JSONConfigFile, Empty) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -1283,7 +1376,8 @@ TEST(JSONConfigFile, EmptyObject) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -1301,8 +1395,9 @@ TEST(JSONConfigFile, Override) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -1328,7 +1423,8 @@ TEST(JSONConfigFile, UnregisteredOption) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -1346,8 +1442,9 @@ TEST(JSONConfigFile, DuplicateOption) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -1366,18 +1463,35 @@ TEST(JSONConfigFile, TypeChecking) {
     moe::Value value;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
     testOpts.addOptionChaining(
-        "stringVectorVal", "stringVectorVal", moe::StringVector, "StringVectorVal");
-    testOpts.addOptionChaining("boolVal", "boolVal", moe::Bool, "BoolVal");
-    testOpts.addOptionChaining("doubleVal", "doubleVal", moe::Double, "DoubleVal");
-    testOpts.addOptionChaining("intVal", "intVal", moe::Int, "IntVal");
-    testOpts.addOptionChaining("longVal", "longVal", moe::Long, "LongVal");
-    testOpts.addOptionChaining("stringVal", "stringVal", moe::String, "StringVal");
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("stringVectorVal",
+                               "stringVectorVal",
+                               moe::StringVector,
+                               "StringVectorVal",
+                               {},
+                               {},
+                               OptionParserTest);
     testOpts.addOptionChaining(
-        "unsignedLongLongVal", "unsignedLongLongVal", moe::UnsignedLongLong, "UnsignedLongLongVal");
-    testOpts.addOptionChaining("unsignedVal", "unsignedVal", moe::Unsigned, "UnsignedVal");
-    testOpts.addOptionChaining("switchVal", "switchVal", moe::Switch, "SwitchVal");
+        "boolVal", "boolVal", moe::Bool, "BoolVal", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "doubleVal", "doubleVal", moe::Double, "DoubleVal", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("intVal", "intVal", moe::Int, "IntVal", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "longVal", "longVal", moe::Long, "LongVal", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "stringVal", "stringVal", moe::String, "StringVal", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("unsignedLongLongVal",
+                               "unsignedLongLongVal",
+                               moe::UnsignedLongLong,
+                               "UnsignedLongLongVal",
+                               {},
+                               {},
+                               OptionParserTest);
+    testOpts.addOptionChaining(
+        "unsignedVal", "unsignedVal", moe::Unsigned, "UnsignedVal", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "switchVal", "switchVal", moe::Switch, "SwitchVal", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -1666,8 +1780,9 @@ TEST(JSONConfigFile, Nested) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("nested.port", "port", moe::Int, "Port");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("nested.port", "port", moe::Int, "Port", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -1690,8 +1805,9 @@ TEST(JSONConfigFile, Dotted) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("dotted.port", "port", moe::Int, "Port");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("dotted.port", "port", moe::Int, "Port", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -1714,9 +1830,12 @@ TEST(JSONConfigFile, DottedAndNested) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("dottednested.var1", "var1", moe::Int, "Var1");
-    testOpts.addOptionChaining("dottednested.var2", "var2", moe::Int, "Var2");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "dottednested.var1", "var1", moe::Int, "Var1", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "dottednested.var2", "var2", moe::Int, "Var2", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -1743,8 +1862,10 @@ TEST(JSONConfigFile, StringVector) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("multival", "multival", moe::StringVector, "Multiple Values");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "multival", "multival", moe::StringVector, "Multiple Values", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -1771,8 +1892,10 @@ TEST(JSONConfigFile, StringMap) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("multival", "multival", moe::StringMap, "Multiple Values");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "multival", "multival", moe::StringMap, "Multiple Values", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -1805,8 +1928,10 @@ TEST(JSONConfigFile, StringMapDuplicateKey) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("multival", "multival", moe::StringMap, "Multiple Values");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "multival", "multival", moe::StringMap, "Multiple Values", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -1824,8 +1949,10 @@ TEST(JSONConfigFile, StringVectorNonString) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("multival", "multival", moe::StringVector, "Multiple Values");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "multival", "multival", moe::StringVector, "Multiple Values", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -1855,8 +1982,10 @@ TEST(JSONConfigFile, DefaultValueOverride) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port").setDefault(moe::Value(5));
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest)
+        .setDefault(moe::Value(5));
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -1881,7 +2010,8 @@ TEST(Parsing, BadConfigFileOption) {
     moe::OptionSection testOpts;
 
     // TODO: Should the error be in here?
-    testOpts.addOptionChaining("config", "config", moe::Int, "Config file to parse");
+    testOpts.addOptionChaining(
+        "config", "config", moe::Int, "Config file to parse", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -1899,8 +2029,9 @@ TEST(Parsing, MapForScalarMismatch) {
     moe::Environment environment;
     moe::OptionSection testOpts;
 
-    testOpts.addOptionChaining("config", "config", moe::Int, "Config file to parse");
-    testOpts.addOptionChaining("str", "str", moe::String, "");
+    testOpts.addOptionChaining(
+        "config", "config", moe::Int, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("str", "str", moe::String, "", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -1918,8 +2049,9 @@ TEST(Parsing, ScalarForMapMismatch) {
     moe::Environment environment;
     moe::OptionSection testOpts;
 
-    testOpts.addOptionChaining("config", "config", moe::Int, "Config file to parse");
-    testOpts.addOptionChaining("strmap", "strmap", moe::StringMap, "");
+    testOpts.addOptionChaining(
+        "config", "config", moe::Int, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("strmap", "strmap", moe::StringMap, "", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -1937,8 +2069,9 @@ TEST(Parsing, ListForScalarMismatch) {
     moe::Environment environment;
     moe::OptionSection testOpts;
 
-    testOpts.addOptionChaining("config", "config", moe::Int, "Config file to parse");
-    testOpts.addOptionChaining("str", "str", moe::String, "");
+    testOpts.addOptionChaining(
+        "config", "config", moe::Int, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("str", "str", moe::String, "", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -1956,8 +2089,10 @@ TEST(Parsing, ScalarForListMismatch) {
     moe::Environment environment;
     moe::OptionSection testOpts;
 
-    testOpts.addOptionChaining("config", "config", moe::Int, "Config file to parse");
-    testOpts.addOptionChaining("strlist", "strlist", moe::StringVector, "");
+    testOpts.addOptionChaining(
+        "config", "config", moe::Int, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "strlist", "strlist", moe::StringVector, "", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -1975,8 +2110,9 @@ TEST(ConfigFromFilesystem, JSONGood) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -1997,8 +2133,9 @@ TEST(ConfigFromFilesystem, INIGood) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -2019,7 +2156,8 @@ TEST(ConfigFromFilesystem, Empty) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -2036,7 +2174,8 @@ TEST(ConfigFromFilesystem, Directory) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -2054,8 +2193,9 @@ TEST(ConfigFromFilesystem, NullByte) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -2073,8 +2213,10 @@ TEST(ConfigFromFilesystem, NullSubDir) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("storage.dbPath", "dbPath", moe::String, "path");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "storage.dbPath", "dbPath", moe::String, "path", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -2093,8 +2235,10 @@ TEST(ConfigFromFilesystem, NullTerminated) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("storage.dbPath", "dbPath", moe::String, "path");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "storage.dbPath", "dbPath", moe::String, "path", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -2111,8 +2255,16 @@ TEST(JSONConfigFile, ComposingStringVector) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("setParameter", "setParameter", moe::StringVector, "Multiple Values")
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts
+        .addOptionChaining("setParameter",
+                           "setParameter",
+                           moe::StringVector,
+                           "Multiple Values",
+                           {},
+                           {},
+                           OptionParserTest)
         .composing();
 
     std::vector<std::string> argv;
@@ -2149,8 +2301,16 @@ TEST(JSONConfigFile, ComposingStringMap) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("setParameter", "setParameter", moe::StringMap, "Multiple Values")
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts
+        .addOptionChaining("setParameter",
+                           "setParameter",
+                           moe::StringMap,
+                           "Multiple Values",
+                           {},
+                           {},
+                           OptionParserTest)
         .composing();
 
     std::vector<std::string> argv;
@@ -2189,8 +2349,16 @@ TEST(INIConfigFile, ComposingStringVector) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("setParameter", "setParameter", moe::StringVector, "Multiple Values")
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts
+        .addOptionChaining("setParameter",
+                           "setParameter",
+                           moe::StringVector,
+                           "Multiple Values",
+                           {},
+                           {},
+                           OptionParserTest)
         .composing();
 
     std::vector<std::string> argv;
@@ -2227,8 +2395,16 @@ TEST(INIConfigFile, ComposingStringMap) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("setParameter", "setParameter", moe::StringMap, "Multiple Values")
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts
+        .addOptionChaining("setParameter",
+                           "setParameter",
+                           moe::StringMap,
+                           "Multiple Values",
+                           {},
+                           {},
+                           OptionParserTest)
         .composing();
 
     std::vector<std::string> argv;
@@ -2266,8 +2442,16 @@ TEST(YAMLConfigFile, ComposingStringVector) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("setParameter", "setParameter", moe::StringVector, "Multiple Values")
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts
+        .addOptionChaining("setParameter",
+                           "setParameter",
+                           moe::StringVector,
+                           "Multiple Values",
+                           {},
+                           {},
+                           OptionParserTest)
         .composing();
 
     std::vector<std::string> argv;
@@ -2304,8 +2488,16 @@ TEST(YAMLConfigFile, ComposingStringMap) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("setParameter", "setParameter", moe::StringMap, "Multiple Values")
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts
+        .addOptionChaining("setParameter",
+                           "setParameter",
+                           moe::StringMap,
+                           "Multiple Values",
+                           {},
+                           {},
+                           OptionParserTest)
         .composing();
 
     std::vector<std::string> argv;
@@ -2347,7 +2539,7 @@ TEST(LegacyInterface, Good) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port");
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -2371,7 +2563,7 @@ TEST(LegacyInterface, NotSpecified) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port");
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -2386,7 +2578,7 @@ TEST(LegacyInterface, BadType) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port");
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -2412,13 +2604,14 @@ TEST(ChainingInterface, GoodReference) {
     // This test is to make sure our reference stays good even after we add more options.  This
     // would not be true if we were using a std::vector in our option section which may need to
     // be moved and resized.
-    moe::OptionDescription& optionRef =
-        testOpts.addOptionChaining("ref", "ref", moe::String, "Save this Reference");
+    moe::OptionDescription& optionRef = testOpts.addOptionChaining(
+        "ref", "ref", moe::String, "Save this Reference", {}, {}, OptionParserTest);
     int i;
     for (i = 0; i < 100; i++) {
         ::mongo::StringBuilder sb;
         sb << "filler" << i;
-        testOpts.addOptionChaining(sb.str(), sb.str(), moe::String, "Filler Option");
+        testOpts.addOptionChaining(
+            sb.str(), sb.str(), moe::String, "Filler Option", {}, {}, OptionParserTest);
     }
     moe::Value defaultVal(std::string("default"));
     moe::Value implicitVal(std::string("implicit"));
@@ -2453,7 +2646,8 @@ TEST(ChainingInterface, Basic) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("basic", "basic", moe::String, "Default Option");
+    testOpts.addOptionChaining(
+        "basic", "basic", moe::String, "Default Option", {}, {}, OptionParserTest);
 
     std::vector<moe::OptionDescription> options_vector;
     ASSERT_OK(testOpts.getAllOptions(&options_vector));
@@ -2482,7 +2676,10 @@ TEST(ChainingInterface, Hidden) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("hidden", "hidden", moe::String, "Hidden Option").hidden();
+    testOpts
+        .addOptionChaining(
+            "hidden", "hidden", moe::String, "Hidden Option", {}, {}, OptionParserTest)
+        .hidden();
 
     std::vector<moe::OptionDescription> options_vector;
     ASSERT_OK(testOpts.getAllOptions(&options_vector));
@@ -2513,7 +2710,14 @@ TEST(ChainingInterface, DefaultValue) {
     moe::Value defaultVal(std::string("default"));
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("default", "default", moe::String, "Option With Default Value")
+    testOpts
+        .addOptionChaining("default",
+                           "default",
+                           moe::String,
+                           "Option With Default Value",
+                           {},
+                           {},
+                           OptionParserTest)
         .setDefault(defaultVal);
 
     std::vector<moe::OptionDescription> options_vector;
@@ -2545,7 +2749,14 @@ TEST(ChainingInterface, ImplicitValue) {
     moe::Value implicitVal(std::string("implicit"));
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("implicit", "implicit", moe::String, "Option With Implicit Value")
+    testOpts
+        .addOptionChaining("implicit",
+                           "implicit",
+                           moe::String,
+                           "Option With Implicit Value",
+                           {},
+                           {},
+                           OptionParserTest)
         .setImplicit(implicitVal);
 
     std::vector<moe::OptionDescription> options_vector;
@@ -2575,7 +2786,14 @@ TEST(ChainingInterface, Composing) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("setParameter", "setParameter", moe::StringVector, "Multiple Values")
+    testOpts
+        .addOptionChaining("setParameter",
+                           "setParameter",
+                           moe::StringVector,
+                           "Multiple Values",
+                           {},
+                           {},
+                           OptionParserTest)
         .composing();
 
     std::vector<moe::OptionDescription> options_vector;
@@ -2605,7 +2823,9 @@ TEST(ChainingInterface, Positional) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("positional", "positional", moe::String, "Positional")
+    testOpts
+        .addOptionChaining(
+            "positional", "positional", moe::String, "Positional", {}, {}, OptionParserTest)
         .positional(1, 1);
 
     std::vector<std::string> argv;
@@ -2626,7 +2846,9 @@ TEST(ChainingInterface, PositionalTooMany) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("positional", "positional", moe::String, "Positional")
+    testOpts
+        .addOptionChaining(
+            "positional", "positional", moe::String, "Positional", {}, {}, OptionParserTest)
         .positional(1, 1);
 
     std::vector<std::string> argv;
@@ -2644,9 +2866,11 @@ TEST(ChainingInterface, PositionalAndFlag) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("positional", "positional", moe::String, "Positional")
+    testOpts
+        .addOptionChaining(
+            "positional", "positional", moe::String, "Positional", {}, {}, OptionParserTest)
         .positional(1, 1);
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port");
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -2672,7 +2896,9 @@ TEST(ChainingInterface, PositionalMultiple) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("positional", "positional", moe::StringVector, "Positional")
+    testOpts
+        .addOptionChaining(
+            "positional", "positional", moe::StringVector, "Positional", {}, {}, OptionParserTest)
         .positional(1, 2);
 
     std::vector<std::string> argv;
@@ -2697,7 +2923,9 @@ TEST(ChainingInterface, PositionalMultipleExtra) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("positional", "positional", moe::StringVector, "Positional")
+    testOpts
+        .addOptionChaining(
+            "positional", "positional", moe::StringVector, "Positional", {}, {}, OptionParserTest)
         .positional(1, 2);
 
     std::vector<std::string> argv;
@@ -2715,7 +2943,9 @@ TEST(ChainingInterface, PositionalMultipleUnlimited) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("positional", "positional", moe::StringVector, "Positional")
+    testOpts
+        .addOptionChaining(
+            "positional", "positional", moe::StringVector, "Positional", {}, {}, OptionParserTest)
         .positional(1, -1);
 
     std::vector<std::string> argv;
@@ -2749,9 +2979,11 @@ TEST(ChainingInterface, PositionalMultipleAndFlag) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("positional", "positional", moe::StringVector, "Positional")
+    testOpts
+        .addOptionChaining(
+            "positional", "positional", moe::StringVector, "Positional", {}, {}, OptionParserTest)
         .positional(1, 2);
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port");
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -2781,13 +3013,19 @@ TEST(ChainingInterface, PositionalSingleMultipleUnlimitedAndFlag) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("positional1", "positional1", moe::String, "Positional")
+    testOpts
+        .addOptionChaining(
+            "positional1", "positional1", moe::String, "Positional", {}, {}, OptionParserTest)
         .positional(1, 1);
-    testOpts.addOptionChaining("positional2", "positional2", moe::StringVector, "Positional")
+    testOpts
+        .addOptionChaining(
+            "positional2", "positional2", moe::StringVector, "Positional", {}, {}, OptionParserTest)
         .positional(2, 3);
-    testOpts.addOptionChaining("positional3", "positional3", moe::StringVector, "Positional")
+    testOpts
+        .addOptionChaining(
+            "positional3", "positional3", moe::StringVector, "Positional", {}, {}, OptionParserTest)
         .positional(4, -1);
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port");
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -2848,11 +3086,15 @@ TEST(ChainingInterface, PositionalHoleInRange) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("positional1", "positional1", moe::String, "Positional")
+    testOpts
+        .addOptionChaining(
+            "positional1", "positional1", moe::String, "Positional", {}, {}, OptionParserTest)
         .positional(1, 1);
-    testOpts.addOptionChaining("positional3", "positional2", moe::StringVector, "Positional")
+    testOpts
+        .addOptionChaining(
+            "positional3", "positional2", moe::StringVector, "Positional", {}, {}, OptionParserTest)
         .positional(3, -1);
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port");
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -2866,11 +3108,15 @@ TEST(ChainingInterface, PositionalOverlappingRange) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("positional1", "positional1", moe::String, "Positional")
+    testOpts
+        .addOptionChaining(
+            "positional1", "positional1", moe::String, "Positional", {}, {}, OptionParserTest)
         .positional(1, 1);
-    testOpts.addOptionChaining("positional3", "positional2", moe::StringVector, "Positional")
+    testOpts
+        .addOptionChaining(
+            "positional3", "positional2", moe::StringVector, "Positional", {}, {}, OptionParserTest)
         .positional(1, 2);
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port");
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -2884,11 +3130,15 @@ TEST(ChainingInterface, PositionalOverlappingRangeInfinite) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("positional1", "positional1", moe::String, "Positional")
+    testOpts
+        .addOptionChaining(
+            "positional1", "positional1", moe::String, "Positional", {}, {}, OptionParserTest)
         .positional(1, 1);
-    testOpts.addOptionChaining("positional3", "positional2", moe::StringVector, "Positional")
+    testOpts
+        .addOptionChaining(
+            "positional3", "positional2", moe::StringVector, "Positional", {}, {}, OptionParserTest)
         .positional(1, -1);
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port");
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -2902,11 +3152,15 @@ TEST(ChainingInterface, PositionalMultipleInfinite) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("positional1", "positional1", moe::String, "Positional")
+    testOpts
+        .addOptionChaining(
+            "positional1", "positional1", moe::String, "Positional", {}, {}, OptionParserTest)
         .positional(1, -1);
-    testOpts.addOptionChaining("positional3", "positional2", moe::StringVector, "Positional")
+    testOpts
+        .addOptionChaining(
+            "positional3", "positional2", moe::StringVector, "Positional", {}, {}, OptionParserTest)
         .positional(3, -1);
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port");
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -2924,8 +3178,11 @@ TEST(OptionSources, SourceCommandLine) {
     std::string parameter;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("parameter", "parameter", moe::String, "Parameter")
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts
+        .addOptionChaining(
+            "parameter", "parameter", moe::String, "Parameter", {}, {}, OptionParserTest)
         .setSources(moe::SourceCommandLine);
 
     argv.clear();
@@ -2966,8 +3223,11 @@ TEST(OptionSources, SourceINIConfig) {
     std::string parameter;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("parameter", "parameter", moe::String, "Parameter")
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts
+        .addOptionChaining(
+            "parameter", "parameter", moe::String, "Parameter", {}, {}, OptionParserTest)
         .setSources(moe::SourceINIConfig);
 
     argv.clear();
@@ -3008,8 +3268,11 @@ TEST(OptionSources, SourceYAMLConfig) {
     std::string parameter;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("parameter", "parameter", moe::String, "Parameter")
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts
+        .addOptionChaining(
+            "parameter", "parameter", moe::String, "Parameter", {}, {}, OptionParserTest)
         .setSources(moe::SourceYAMLConfig);
 
     argv.clear();
@@ -3050,8 +3313,11 @@ TEST(OptionSources, SourceAllConfig) {
     std::string parameter;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("parameter", "parameter", moe::String, "Parameter")
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts
+        .addOptionChaining(
+            "parameter", "parameter", moe::String, "Parameter", {}, {}, OptionParserTest)
         .setSources(moe::SourceAllConfig);
 
     argv.clear();
@@ -3095,8 +3361,11 @@ TEST(OptionSources, SourceAllLegacy) {
     std::string parameter;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("parameter", "parameter", moe::String, "Parameter")
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts
+        .addOptionChaining(
+            "parameter", "parameter", moe::String, "Parameter", {}, {}, OptionParserTest)
         .setSources(moe::SourceAllLegacy);
 
     argv.clear();
@@ -3140,8 +3409,11 @@ TEST(OptionSources, SourceAll) {
     std::string parameter;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("parameter", "parameter", moe::String, "Parameter")
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts
+        .addOptionChaining(
+            "parameter", "parameter", moe::String, "Parameter", {}, {}, OptionParserTest)
         .setSources(moe::SourceAll);
 
     argv.clear();
@@ -3179,64 +3451,6 @@ TEST(OptionSources, SourceAll) {
     ASSERT_EQUALS(parameter, "allowed");
 }
 
-TEST(Constraints, NumericRangeConstraint) {
-    OptionsParserTester parser;
-    moe::Environment environment;
-    moe::Value value;
-    std::vector<std::string> argv;
-    std::map<std::string, std::string> env_map;
-    int port;
-
-    moe::OptionSection testOpts;
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port").validRange(1000, 65535);
-
-    environment = moe::Environment();
-    argv.clear();
-    argv.push_back("binaryname");
-    argv.push_back("--port");
-    argv.push_back("999");
-
-    ASSERT_OK(parser.run(testOpts, argv, env_map, &environment));
-    ASSERT_NOT_OK(environment.validate());
-    ;
-
-    environment = moe::Environment();
-    argv.clear();
-    argv.push_back("binaryname");
-    argv.push_back("--port");
-    argv.push_back("65536");
-
-    ASSERT_OK(parser.run(testOpts, argv, env_map, &environment));
-    ASSERT_NOT_OK(environment.validate());
-    ;
-
-    environment = moe::Environment();
-    argv.clear();
-    argv.push_back("binaryname");
-    argv.push_back("--port");
-    argv.push_back("65535");
-
-    ASSERT_OK(parser.run(testOpts, argv, env_map, &environment));
-    ASSERT_OK(environment.validate());
-    ;
-    ASSERT_OK(environment.get(moe::Key("port"), &value));
-    ASSERT_OK(value.get(&port));
-    ASSERT_EQUALS(port, 65535);
-
-    environment = moe::Environment();
-    argv.clear();
-    argv.push_back("binaryname");
-    argv.push_back("--port");
-    argv.push_back("1000");
-
-    ASSERT_OK(parser.run(testOpts, argv, env_map, &environment));
-    ASSERT_OK(environment.validate());
-    ;
-    ASSERT_OK(environment.get(moe::Key("port"), &value));
-    ASSERT_OK(value.get(&port));
-    ASSERT_EQUALS(port, 1000);
-}
-
 TEST(Constraints, MutuallyExclusiveConstraint) {
     OptionsParserTester parser;
     moe::Environment environment;
@@ -3245,9 +3459,11 @@ TEST(Constraints, MutuallyExclusiveConstraint) {
     std::map<std::string, std::string> env_map;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("option1", "option1", moe::Switch, "Option1")
+    testOpts
+        .addOptionChaining("option1", "option1", moe::Switch, "Option1", {}, {}, OptionParserTest)
         .incompatibleWith("section.option2");
-    testOpts.addOptionChaining("section.option2", "option2", moe::Switch, "Option2");
+    testOpts.addOptionChaining(
+        "section.option2", "option2", moe::Switch, "Option2", {}, {}, OptionParserTest);
 
     environment = moe::Environment();
     argv.clear();
@@ -3288,9 +3504,11 @@ TEST(Constraints, RequiresOtherConstraint) {
     std::map<std::string, std::string> env_map;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("option1", "option1", moe::Switch, "Option1")
+    testOpts
+        .addOptionChaining("option1", "option1", moe::Switch, "Option1", {}, {}, OptionParserTest)
         .requires("section.option2");
-    testOpts.addOptionChaining("section.option2", "option2", moe::Switch, "Option2");
+    testOpts.addOptionChaining(
+        "section.option2", "option2", moe::Switch, "Option2", {}, {}, OptionParserTest);
 
     environment = moe::Environment();
     argv.clear();
@@ -3324,58 +3542,14 @@ TEST(Constraints, RequiresOtherConstraint) {
     ASSERT_OK(environment.get(moe::Key("section.option2"), &value));
 }
 
-TEST(Constraints, StringFormatConstraint) {
-    OptionsParserTester parser;
-    moe::Environment environment;
-    moe::Value value;
-    std::vector<std::string> argv;
-    std::map<std::string, std::string> env_map;
-
-    moe::OptionSection testOpts;
-    testOpts.addOptionChaining("option", "option", moe::String, "Option")
-        .format("[a-z][0-9]", "[character][number]");
-
-    environment = moe::Environment();
-    argv.clear();
-    argv.push_back("binaryname");
-    argv.push_back("--option");
-    argv.push_back("aa");
-
-    ASSERT_OK(parser.run(testOpts, argv, env_map, &environment));
-    ASSERT_NOT_OK(environment.validate());
-    ;
-
-    environment = moe::Environment();
-    argv.clear();
-    argv.push_back("binaryname");
-    argv.push_back("--option");
-    argv.push_back("11");
-
-    ASSERT_OK(parser.run(testOpts, argv, env_map, &environment));
-    ASSERT_NOT_OK(environment.validate());
-    ;
-
-    environment = moe::Environment();
-    argv.clear();
-    argv.push_back("binaryname");
-    argv.push_back("--option");
-    argv.push_back("a1");
-
-    ASSERT_OK(parser.run(testOpts, argv, env_map, &environment));
-    ASSERT_OK(environment.validate());
-    ASSERT_OK(environment.get(moe::Key("option"), &value));
-    std::string option;
-    ASSERT_OK(value.get(&option));
-    ASSERT_EQUALS(option, "a1");
-}
-
 TEST(YAMLConfigFile, Basic) {
     OptionsParserTester parser;
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -3398,7 +3572,8 @@ TEST(YAMLConfigFile, Empty) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -3416,8 +3591,9 @@ TEST(YAMLConfigFile, Override) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -3443,7 +3619,8 @@ TEST(YAMLConfigFile, UnregisteredOption) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -3461,8 +3638,9 @@ TEST(YAMLConfigFile, DuplicateOption) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -3481,18 +3659,35 @@ TEST(YAMLConfigFile, TypeChecking) {
     moe::Value value;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
     testOpts.addOptionChaining(
-        "stringVectorVal", "stringVectorVal", moe::StringVector, "StringVectorVal");
-    testOpts.addOptionChaining("boolVal", "boolVal", moe::Bool, "BoolVal");
-    testOpts.addOptionChaining("doubleVal", "doubleVal", moe::Double, "DoubleVal");
-    testOpts.addOptionChaining("intVal", "intVal", moe::Int, "IntVal");
-    testOpts.addOptionChaining("longVal", "longVal", moe::Long, "LongVal");
-    testOpts.addOptionChaining("stringVal", "stringVal", moe::String, "StringVal");
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("stringVectorVal",
+                               "stringVectorVal",
+                               moe::StringVector,
+                               "StringVectorVal",
+                               {},
+                               {},
+                               OptionParserTest);
     testOpts.addOptionChaining(
-        "unsignedLongLongVal", "unsignedLongLongVal", moe::UnsignedLongLong, "UnsignedLongLongVal");
-    testOpts.addOptionChaining("unsignedVal", "unsignedVal", moe::Unsigned, "UnsignedVal");
-    testOpts.addOptionChaining("switchVal", "switchVal", moe::Switch, "SwitchVal");
+        "boolVal", "boolVal", moe::Bool, "BoolVal", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "doubleVal", "doubleVal", moe::Double, "DoubleVal", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("intVal", "intVal", moe::Int, "IntVal", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "longVal", "longVal", moe::Long, "LongVal", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "stringVal", "stringVal", moe::String, "StringVal", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("unsignedLongLongVal",
+                               "unsignedLongLongVal",
+                               moe::UnsignedLongLong,
+                               "UnsignedLongLongVal",
+                               {},
+                               {},
+                               OptionParserTest);
+    testOpts.addOptionChaining(
+        "unsignedVal", "unsignedVal", moe::Unsigned, "UnsignedVal", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "switchVal", "switchVal", moe::Switch, "SwitchVal", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -3781,8 +3976,9 @@ TEST(YAMLConfigFile, Nested) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("nested.port", "port", moe::Int, "Port");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("nested.port", "port", moe::Int, "Port", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -3805,8 +4001,9 @@ TEST(YAMLConfigFile, Dotted) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("dotted.port", "port", moe::Int, "Port");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("dotted.port", "port", moe::Int, "Port", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -3829,9 +4026,12 @@ TEST(YAMLConfigFile, DottedAndNested) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("dottednested.var1", "var1", moe::Int, "Var1");
-    testOpts.addOptionChaining("dottednested.var2", "var2", moe::Int, "Var2");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "dottednested.var1", "var1", moe::Int, "Var1", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "dottednested.var2", "var2", moe::Int, "Var2", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -3861,8 +4061,10 @@ TEST(YAMLConfigFile, DeprecatedDottedNameDeprecatedOnly) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("dotted.canonical", "var1", moe::Int, "Var1", {"dotted.deprecated"});
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "dotted.canonical", "var1", moe::Int, "Var1", {"dotted.deprecated"}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -3884,24 +4086,36 @@ TEST(YAMLConfigFile, DeprecatedDottedNameDeprecatedOnly) {
 // Deprecated dotted name cannot be the same as the canonical name.
 TEST(YAMLConfigFile, DeprecatedDottedNameSameAsCanonicalDottedName) {
     moe::OptionSection testOpts;
-    ASSERT_THROWS(testOpts.addOptionChaining(
-                      "dotted.canonical", "var1", moe::Int, "Var1", {"dotted.canonical"}),
+    ASSERT_THROWS(testOpts.addOptionChaining("dotted.canonical",
+                                             "var1",
+                                             moe::Int,
+                                             "Var1",
+                                             {"dotted.canonical"},
+                                             {},
+                                             OptionParserTest),
                   ::mongo::DBException);
 }
 
 // Deprecated dotted name cannot be the empty string.
 TEST(YAMLConfigFile, DeprecatedDottedNameEmptyString) {
     moe::OptionSection testOpts;
-    ASSERT_THROWS(testOpts.addOptionChaining("dotted.canonical", "var1", moe::Int, "Var1", {""}),
+    ASSERT_THROWS(testOpts.addOptionChaining(
+                      "dotted.canonical", "var1", moe::Int, "Var1", {""}, {}, OptionParserTest),
                   ::mongo::DBException);
 }
 
 // Deprecated dotted name cannot be the same as another option's dotted name.
 TEST(YAMLConfigFile, DeprecatedDottedNameSameAsOtherOptionsDottedName) {
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("dotted.canonical1", "var1", moe::Int, "Var1");
-    ASSERT_THROWS(testOpts.addOptionChaining(
-                      "dotted.canonical2", "var2", moe::Int, "Var2", {"dotted.canonical1"}),
+    testOpts.addOptionChaining(
+        "dotted.canonical1", "var1", moe::Int, "Var1", {}, {}, OptionParserTest);
+    ASSERT_THROWS(testOpts.addOptionChaining("dotted.canonical2",
+                                             "var2",
+                                             moe::Int,
+                                             "Var2",
+                                             {"dotted.canonical1"},
+                                             {},
+                                             OptionParserTest),
                   ::mongo::DBException);
 }
 
@@ -3909,9 +4123,14 @@ TEST(YAMLConfigFile, DeprecatedDottedNameSameAsOtherOptionsDottedName) {
 TEST(YAMLConfigFile, DeprecatedDottedNameSameAsOtherOptionsDeprecatedDottedName) {
     moe::OptionSection testOpts;
     testOpts.addOptionChaining(
-        "dotted.canonical1", "var1", moe::Int, "Var1", {"dotted.deprecated"});
-    ASSERT_THROWS(testOpts.addOptionChaining(
-                      "dotted.canonical2", "var2", moe::Int, "Var2", {"dotted.deprecated"}),
+        "dotted.canonical1", "var1", moe::Int, "Var1", {"dotted.deprecated"}, {}, OptionParserTest);
+    ASSERT_THROWS(testOpts.addOptionChaining("dotted.canonical2",
+                                             "var2",
+                                             moe::Int,
+                                             "Var2",
+                                             {"dotted.deprecated"},
+                                             {},
+                                             OptionParserTest),
                   ::mongo::DBException);
 }
 
@@ -3922,8 +4141,10 @@ TEST(YAMLConfigFile, DeprecatedDottedNameCanonicalAndDeprecated) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("dotted.canonical", "var1", moe::Int, "Var1", {"dotted.deprecated"});
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "dotted.canonical", "var1", moe::Int, "Var1", {"dotted.deprecated"}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -3945,8 +4166,10 @@ TEST(YAMLConfigFile, DeprecatedDottedNameMultipleDeprecated) {
     deprecatedDottedNames.push_back("dotted.deprecated2");
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("dotted.canonical", "var1", moe::Int, "Var1", deprecatedDottedNames);
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "dotted.canonical", "var1", moe::Int, "Var1", deprecatedDottedNames, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -3995,8 +4218,10 @@ TEST(YAMLConfigFile, ListBrackets) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("multival", "multival", moe::StringVector, "Multiple Values");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "multival", "multival", moe::StringVector, "Multiple Values", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -4023,8 +4248,10 @@ TEST(YAMLConfigFile, ListDashes) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("multival", "multival", moe::StringVector, "Multiple Values");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "multival", "multival", moe::StringVector, "Multiple Values", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -4051,8 +4278,10 @@ TEST(YAMLConfigFile, DefaultValueOverride) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port").setDefault(moe::Value(5));
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest)
+        .setDefault(moe::Value(5));
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -4075,9 +4304,10 @@ TEST(YAMLConfigFile, Comments) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port");
-    testOpts.addOptionChaining("host", "host", moe::String, "Host");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("host", "host", moe::String, "Host", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -4106,8 +4336,9 @@ TEST(YAMLConfigFile, EmptyKey) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -4125,8 +4356,10 @@ TEST(YAMLConfigFile, StringVector) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("multival", "multival", moe::StringVector, "Multiple Values");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "multival", "multival", moe::StringVector, "Multiple Values", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -4153,8 +4386,10 @@ TEST(YAMLConfigFile, StringMap) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("multival", "multival", moe::StringMap, "Multiple Values");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "multival", "multival", moe::StringMap, "Multiple Values", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -4190,8 +4425,10 @@ TEST(YAMLConfigFile, StringMapDuplicateKey) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("multival", "multival", moe::StringMap, "Multiple Values");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "multival", "multival", moe::StringMap, "Multiple Values", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -4214,11 +4451,15 @@ TEST(OptionCount, Basic) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("basic", "basic", moe::String, "Basic Option");
-    testOpts.addOptionChaining("hidden", "hidden", moe::String, "Hidden Option").hidden();
+    testOpts.addOptionChaining(
+        "basic", "basic", moe::String, "Basic Option", {}, {}, OptionParserTest);
+    testOpts
+        .addOptionChaining(
+            "hidden", "hidden", moe::String, "Hidden Option", {}, {}, OptionParserTest)
+        .hidden();
 
     moe::OptionSection subSection("Section Name");
-    subSection.addOptionChaining("port", "port", moe::Int, "Port")
+    subSection.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest)
         .setSources(moe::SourceYAMLConfig);
     ASSERT_OK(testOpts.addSection(subSection));
 
@@ -4235,12 +4476,20 @@ TEST(NumericalBaseParsing, CommandLine) {
     std::map<std::string, std::string> env_map;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("doubleVal", "doubleVal", moe::Double, "DoubleVal");
-    testOpts.addOptionChaining("intVal", "intVal", moe::Int, "IntVal");
-    testOpts.addOptionChaining("longVal", "longVal", moe::Long, "LongVal");
     testOpts.addOptionChaining(
-        "unsignedLongLongVal", "unsignedLongLongVal", moe::UnsignedLongLong, "UnsignedLongLongVal");
-    testOpts.addOptionChaining("unsignedVal", "unsignedVal", moe::Unsigned, "UnsignedVal");
+        "doubleVal", "doubleVal", moe::Double, "DoubleVal", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("intVal", "intVal", moe::Int, "IntVal", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "longVal", "longVal", moe::Long, "LongVal", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("unsignedLongLongVal",
+                               "unsignedLongLongVal",
+                               moe::UnsignedLongLong,
+                               "UnsignedLongLongVal",
+                               {},
+                               {},
+                               OptionParserTest);
+    testOpts.addOptionChaining(
+        "unsignedVal", "unsignedVal", moe::Unsigned, "UnsignedVal", {}, {}, OptionParserTest);
 
     // Bad values
     argv = std::vector<std::string>();
@@ -4405,13 +4654,22 @@ TEST(NumericalBaseParsing, INIConfigFile) {
     std::map<std::string, std::string> env_map;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("doubleVal", "doubleVal", moe::Double, "DoubleVal");
-    testOpts.addOptionChaining("intVal", "intVal", moe::Int, "IntVal");
-    testOpts.addOptionChaining("longVal", "longVal", moe::Long, "LongVal");
     testOpts.addOptionChaining(
-        "unsignedLongLongVal", "unsignedLongLongVal", moe::UnsignedLongLong, "UnsignedLongLongVal");
-    testOpts.addOptionChaining("unsignedVal", "unsignedVal", moe::Unsigned, "UnsignedVal");
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "doubleVal", "doubleVal", moe::Double, "DoubleVal", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("intVal", "intVal", moe::Int, "IntVal", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "longVal", "longVal", moe::Long, "LongVal", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("unsignedLongLongVal",
+                               "unsignedLongLongVal",
+                               moe::UnsignedLongLong,
+                               "UnsignedLongLongVal",
+                               {},
+                               {},
+                               OptionParserTest);
+    testOpts.addOptionChaining(
+        "unsignedVal", "unsignedVal", moe::Unsigned, "UnsignedVal", {}, {}, OptionParserTest);
 
     // Bad values
     argv = std::vector<std::string>();
@@ -4555,13 +4813,22 @@ TEST(NumericalBaseParsing, YAMLConfigFile) {
     std::map<std::string, std::string> env_map;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("doubleVal", "doubleVal", moe::Double, "DoubleVal");
-    testOpts.addOptionChaining("intVal", "intVal", moe::Int, "IntVal");
-    testOpts.addOptionChaining("longVal", "longVal", moe::Long, "LongVal");
     testOpts.addOptionChaining(
-        "unsignedLongLongVal", "unsignedLongLongVal", moe::UnsignedLongLong, "UnsignedLongLongVal");
-    testOpts.addOptionChaining("unsignedVal", "unsignedVal", moe::Unsigned, "UnsignedVal");
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "doubleVal", "doubleVal", moe::Double, "DoubleVal", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("intVal", "intVal", moe::Int, "IntVal", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining(
+        "longVal", "longVal", moe::Long, "LongVal", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("unsignedLongLongVal",
+                               "unsignedLongLongVal",
+                               moe::UnsignedLongLong,
+                               "UnsignedLongLongVal",
+                               {},
+                               {},
+                               OptionParserTest);
+    testOpts.addOptionChaining(
+        "unsignedVal", "unsignedVal", moe::Unsigned, "UnsignedVal", {}, {}, OptionParserTest);
 
     // Bad values
     argv = std::vector<std::string>();
@@ -4699,16 +4966,21 @@ TEST(NumericalBaseParsing, YAMLConfigFile) {
 
 TEST(YAMLConfigFile, OutputConfig) {
     moe::OptionSection options;
-    options.addOptionChaining("cacheSize", "cacheSize", moe::Long, "");
-    options.addOptionChaining("command", "command", moe::StringVector, "");
-    options.addOptionChaining("config", "config", moe::String, "");
-    options.addOptionChaining("math.pi", "pi", moe::Double, "");
-    options.addOptionChaining("net.port", "port", moe::Int, "");
-    options.addOptionChaining("net.bindIp", "bind_ip", moe::String, "");
-    options.addOptionChaining("net.bindIpAll", "bind_ip_all", moe::Switch, "");
-    options.addOptionChaining("security.javascriptEnabled", "javascriptEnabled", moe::Bool, "");
-    options.addOptionChaining("setParameter", "setParameter", moe::StringMap, "");
-    options.addOptionChaining("systemLog.path", "logPath", moe::String, "");
+    options.addOptionChaining("cacheSize", "cacheSize", moe::Long, "", {}, {}, OptionParserTest);
+    options.addOptionChaining(
+        "command", "command", moe::StringVector, "", {}, {}, OptionParserTest);
+    options.addOptionChaining("config", "config", moe::String, "", {}, {}, OptionParserTest);
+    options.addOptionChaining("math.pi", "pi", moe::Double, "", {}, {}, OptionParserTest);
+    options.addOptionChaining("net.port", "port", moe::Int, "", {}, {}, OptionParserTest);
+    options.addOptionChaining("net.bindIp", "bind_ip", moe::String, "", {}, {}, OptionParserTest);
+    options.addOptionChaining(
+        "net.bindIpAll", "bind_ip_all", moe::Switch, "", {}, {}, OptionParserTest);
+    options.addOptionChaining(
+        "security.javascriptEnabled", "javascriptEnabled", moe::Bool, "", {}, {}, OptionParserTest);
+    options.addOptionChaining(
+        "setParameter", "setParameter", moe::StringMap, "", {}, {}, OptionParserTest);
+    options.addOptionChaining(
+        "systemLog.path", "logPath", moe::String, "", {}, {}, OptionParserTest);
 
     OptionsParserTester parser;
     parser.setConfig("config.yaml",
@@ -4772,8 +5044,9 @@ void TestFile(std::vector<unsigned char> contents, bool valid) {
     moe::Environment environment;
 
     moe::OptionSection testOpts;
-    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
-    testOpts.addOptionChaining("port", "port", moe::Int, "Port");
+    testOpts.addOptionChaining(
+        "config", "config", moe::String, "Config file to parse", {}, {}, OptionParserTest);
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port", {}, {}, OptionParserTest);
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -4796,7 +5069,13 @@ void TestFile(std::vector<unsigned char> contents, bool valid) {
 
 TEST(YAMLConfigFile, canonicalize) {
     moe::OptionSection opts;
-    opts.addOptionChaining("net.bindIpAll", "bind_ip_all", moe::Switch, "Bind all addresses")
+    opts.addOptionChaining("net.bindIpAll",
+                           "bind_ip_all",
+                           moe::Switch,
+                           "Bind all addresses",
+                           {},
+                           {},
+                           OptionParserTest)
         .incompatibleWith("net.bindIp")
         .canonicalize([](moe::Environment* env) {
             auto status = env->remove("net.bindIpAll");
@@ -4805,7 +5084,13 @@ TEST(YAMLConfigFile, canonicalize) {
             }
             return env->set("net.bindIp", moe::Value("0.0.0.0"));
         });
-    opts.addOptionChaining("net.bindIp", "bind_ip", moe::String, "Bind specific addresses")
+    opts.addOptionChaining("net.bindIp",
+                           "bind_ip",
+                           moe::String,
+                           "Bind specific addresses",
+                           {},
+                           {},
+                           OptionParserTest)
         .incompatibleWith("net.bindIpAll");
 
     moe::OptionsParser parser;

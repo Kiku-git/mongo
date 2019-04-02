@@ -58,7 +58,6 @@
 #include "mongo/s/query/async_results_merger.h"
 #include "mongo/s/query/cluster_client_cursor_impl.h"
 #include "mongo/s/query/cluster_cursor_manager.h"
-#include "mongo/s/query/cluster_query_knobs.h"
 #include "mongo/s/query/establish_cursors.h"
 #include "mongo/s/query/store_possible_cursor.h"
 #include "mongo/s/stale_exception.h"
@@ -453,10 +452,13 @@ CursorId ClusterFind::runQuery(OperationContext* opCtx,
             catalogCache->onStaleShardVersion(std::move(routingInfo));
 
             if (auto txnRouter = TransactionRouter::get(opCtx)) {
-                // A transaction can always continue on a stale version error during find because
-                // the operation must be idempotent. Reset the default global read timestamp so the
-                // retry's routing table reflects the chunk placement after the refresh (no-op if
-                // the transaction is not running with snapshot read concern).
+                if (!txnRouter->canContinueOnStaleShardOrDbError(kFindCmdName)) {
+                    throw;
+                }
+
+                // Reset the default global read timestamp so the retry's routing table reflects the
+                // chunk placement after the refresh (no-op if the transaction is not running with
+                // snapshot read concern).
                 txnRouter->onStaleShardOrDbError(opCtx, kFindCmdName, ex.toStatus());
                 txnRouter->setDefaultAtClusterTime(opCtx);
             }

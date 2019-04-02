@@ -32,7 +32,6 @@
 #include <boost/optional.hpp>
 #include <map>
 
-#include "mongo/base/disallow_copying.h"
 #include "mongo/db/commands/txn_cmds_gen.h"
 #include "mongo/db/logical_session_id.h"
 #include "mongo/db/operation_context.h"
@@ -72,6 +71,8 @@ public:
      * the transaction that created it.
      */
     struct Participant {
+        enum class ReadOnly { kUnset, kReadOnly, kNotReadOnly };
+
         Participant(bool isCoordinator,
                     StmtId stmtIdCreatedAt,
                     SharedTransactionOptions sharedOptions);
@@ -83,6 +84,10 @@ public:
 
         // True if the participant has been chosen as the coordinator for its transaction
         const bool isCoordinator{false};
+
+        // Is updated to kReadOnly or kNotReadOnly based on the readOnly field in the participant's
+        // responses to statements.
+        ReadOnly readOnly{ReadOnly::kUnset};
 
         // The highest statement id of the request during which this participant was created.
         const StmtId stmtIdCreatedAt{kUninitializedStmtId};
@@ -156,6 +161,12 @@ public:
     BSONObj attachTxnFieldsIfNeeded(const ShardId& shardId, const BSONObj& cmdObj);
 
     /**
+     * Processes the transaction metadata in the response from the participant if the response
+     * indicates the operation succeeded.
+     */
+    void processParticipantResponse(const ShardId& shardId, const BSONObj& responseObj);
+
+    /**
      * Returns true if the current transaction can retry on a stale version error from a contacted
      * shard. This is always true except for an error received by a write that is not the first
      * overall statement in the sharded transaction. This is because the entire command will be
@@ -222,8 +233,8 @@ public:
      * Commits the transaction. For transactions with multiple participants, this will initiate
      * the two phase commit procedure.
      */
-    Shard::CommandResponse commitTransaction(
-        OperationContext* opCtx, const boost::optional<TxnRecoveryToken>& recoveryToken);
+    BSONObj commitTransaction(OperationContext* opCtx,
+                              const boost::optional<TxnRecoveryToken>& recoveryToken);
 
     /**
      * Sends abort to all participants and returns the responses from all shards.
@@ -263,21 +274,35 @@ public:
     }
 
 private:
+    // The type of commit initiated for this transaction.
+    enum class CommitType {
+        kNotInitiated,
+        kDirectCommit,
+        kTwoPhaseCommit,
+        kRecoverWithToken,
+    };
+
     // Shortcut to obtain the id of the session under which this transaction router runs
     const LogicalSessionId& _sessionId() const;
 
     /**
      * Run basic commit for transactions that touched a single shard.
      */
-    Shard::CommandResponse _commitSingleShardTransaction(OperationContext* opCtx);
+    BSONObj _commitSingleShardTransaction(OperationContext* opCtx);
 
-    Shard::CommandResponse _commitWithRecoveryToken(OperationContext* opCtx,
-                                                    const TxnRecoveryToken& recoveryToken);
+    /**
+     * Skips explicit commit and instead waits for participants' read Timestamps to reach the level
+     * of durability specified by the writeConcern on 'opCtx'.
+     */
+    BSONObj _commitReadOnlyTransaction(OperationContext* opCtx);
+
+    BSONObj _commitWithRecoveryToken(OperationContext* opCtx,
+                                     const TxnRecoveryToken& recoveryToken);
 
     /**
      * Run two phase commit for transactions that touched multiple shards.
      */
-    Shard::CommandResponse _commitMultiShardTransaction(OperationContext* opCtx);
+    BSONObj _commitMultiShardTransaction(OperationContext* opCtx);
 
     /**
      * Sets the given logical time as the atClusterTime for the transaction to be the greater of the
@@ -315,13 +340,13 @@ private:
      */
     void _verifyParticipantAtClusterTime(const Participant& participant);
 
-    // The currently active transaction number on this transaction router (i.e. on the session)
+    // The currently active transaction number on this router, if beginOrContinueTxn has been
+    // called. Otherwise set to kUninitializedTxnNumber.
     TxnNumber _txnNumber{kUninitializedTxnNumber};
 
-    // Whether the router has initiated a two-phase commit by handing off commit coordination to the
-    // coordinator. If so, the router should no longer implicitly abort the transaction on errors,
-    // since the coordinator may independently make a commit decision.
-    bool _initiatedTwoPhaseCommit{false};
+    // Is updated at commit time to reflect whether the direct commit, two-phase commit, or recover
+    // commit path was taken.
+    CommitType _commitType{CommitType::kNotInitiated};
 
     // Indicates whether this is trying to recover a commitTransaction on the current transaction.
     bool _isRecoveringCommit{false};

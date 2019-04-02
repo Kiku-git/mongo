@@ -53,6 +53,7 @@ namespace mongo {
 
 using std::string;
 using repl::OpTime;
+using repl::OpTimeAndWallTime;
 
 static TimerStats gleWtimeStats;
 static ServerStatusMetricField<TimerStats> displayGleLatency("getLastError.wtime", &gleWtimeStats);
@@ -198,9 +199,9 @@ Status waitForWriteConcern(OperationContext* opCtx,
             if (replCoord->getReplicationMode() != repl::ReplicationCoordinator::Mode::modeNone) {
                 // Wait for ops to become durable then update replication system's
                 // knowledge of this.
-                OpTime appliedOpTime = replCoord->getMyLastAppliedOpTime();
+                auto appliedOpTimeAndWallTime = replCoord->getMyLastAppliedOpTimeAndWallTime();
                 opCtx->recoveryUnit()->waitUntilDurable();
-                replCoord->setMyLastDurableOpTimeForward(appliedOpTime);
+                replCoord->setMyLastDurableOpTimeAndWallTimeForward(appliedOpTimeAndWallTime);
             } else {
                 opCtx->recoveryUnit()->waitUntilDurable();
             }

@@ -52,7 +52,6 @@
 #include "mongo/db/curop.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/server_parameters.h"
 #include "mongo/rpc/factory.h"
 #include "mongo/rpc/metadata/client_metadata_ismaster.h"
 #include "mongo/rpc/op_msg_rpc_impls.h"
@@ -124,19 +123,14 @@ const StringMap<int> txnCmdWhitelist = {{"abortTransaction", 1},
                                         {"insert", 1},
                                         {"killCursors", 1},
                                         {"prepareTransaction", 1},
-                                        {"update", 1},
-                                        {"voteAbortTransaction", 1},
-                                        {"voteCommitTransaction", 1}};
-
+                                        {"update", 1}};
 
 // The commands that can be run on the 'admin' database in multi-document transactions.
 const StringMap<int> txnAdminCommands = {{"abortTransaction", 1},
                                          {"commitTransaction", 1},
                                          {"coordinateCommitTransaction", 1},
                                          {"doTxn", 1},
-                                         {"prepareTransaction", 1},
-                                         {"voteAbortTransaction", 1},
-                                         {"voteCommitTransaction", 1}};
+                                         {"prepareTransaction", 1}};
 
 }  // namespace
 

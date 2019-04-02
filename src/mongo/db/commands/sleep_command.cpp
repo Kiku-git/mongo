@@ -61,7 +61,8 @@ public:
                "   lock: r, w, none. If r or w, db will block under a lock. Defaults to r."
                " 'lock' and 'w' may not both be set.\n"
                "   secs:<seconds> Amount of time to sleep, in seconds.\n"
-               "   millis:<milliseconds> Amount of time to sleep, in ms.\n";
+               "   millis:<milliseconds> Amount of time to sleep, in ms.\n"
+               "'seconds' may be used as an alias for 'secs'.\n";
     }
 
     // No auth needed because it only works when enabled via command line.
@@ -74,17 +75,17 @@ public:
                       LockMode mode,
                       const StringData& ns) {
         if (ns.empty()) {
-            Lock::GlobalLock lk(opCtx, mode, opCtx->getDeadline(), Lock::InterruptBehavior::kThrow);
+            Lock::GlobalLock lk(opCtx, mode, Date_t::max(), Lock::InterruptBehavior::kThrow);
             opCtx->sleepFor(Milliseconds(millis));
         } else if (nsIsDbOnly(ns)) {
             uassert(50961, "lockTarget is not a valid namespace", NamespaceString::validDBName(ns));
-            Lock::DBLock lk(opCtx, ns, mode, opCtx->getDeadline());
+            Lock::DBLock lk(opCtx, ns, mode, Date_t::max());
             opCtx->sleepFor(Milliseconds(millis));
         } else {
             uassert(50962,
                     "lockTarget is not a valid namespace",
                     NamespaceString::validCollectionComponent(ns));
-            Lock::CollectionLock lk(opCtx->lockState(), ns, mode, opCtx->getDeadline());
+            Lock::CollectionLock lk(opCtx->lockState(), ns, mode, Date_t::max());
             opCtx->sleepFor(Milliseconds(millis));
         }
     }
@@ -97,14 +98,22 @@ public:
         log() << "test only command sleep invoked";
         long long millis = 0;
 
-        if (cmdObj["secs"] || cmdObj["millis"]) {
-            if (cmdObj["secs"]) {
-                uassert(34344, "'secs' must be a number.", cmdObj["secs"].isNumber());
-                millis += cmdObj["secs"].numberLong() * 1000;
+        if (cmdObj["secs"] || cmdObj["seconds"] || cmdObj["millis"]) {
+            uassert(51153,
+                    "Only one of 'secs' and 'seconds' may be specified",
+                    !(cmdObj["secs"] && cmdObj["seconds"]));
+
+            if (auto secsElem = cmdObj["secs"]) {
+                uassert(34344, "'secs' must be a number.", secsElem.isNumber());
+                millis += secsElem.numberLong() * 1000;
+            } else if (auto secondsElem = cmdObj["seconds"]) {
+                uassert(51154, "'seconds' must be a number.", secondsElem.isNumber());
+                millis += secondsElem.numberLong() * 1000;
             }
-            if (cmdObj["millis"]) {
-                uassert(34345, "'millis' must be a number.", cmdObj["millis"].isNumber());
-                millis += cmdObj["millis"].numberLong();
+
+            if (auto millisElem = cmdObj["millis"]) {
+                uassert(34345, "'millis' must be a number.", millisElem.isNumber());
+                millis += millisElem.numberLong();
             }
         } else {
             millis = 10 * 1000;

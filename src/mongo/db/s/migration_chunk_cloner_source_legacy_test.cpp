@@ -214,7 +214,7 @@ TEST_F(MigrationChunkClonerSourceLegacyTest, CorrectDocumentsFetched) {
         });
 
         ASSERT_OK(cloner.startClone(operationContext()));
-        futureStartClone.timed_get(kFutureTimeout);
+        futureStartClone.default_timed_get();
     }
 
     // Ensure the initial clone documents are available
@@ -256,14 +256,14 @@ TEST_F(MigrationChunkClonerSourceLegacyTest, CorrectDocumentsFetched) {
 
         WriteUnitOfWork wuow(operationContext());
 
-        cloner.onInsertOp(operationContext(), createCollectionDocument(90), {}, false);
-        cloner.onInsertOp(operationContext(), createCollectionDocument(150), {}, false);
-        cloner.onInsertOp(operationContext(), createCollectionDocument(151), {}, false);
-        cloner.onInsertOp(operationContext(), createCollectionDocument(210), {}, false);
+        cloner.onInsertOp(operationContext(), createCollectionDocument(90), {});
+        cloner.onInsertOp(operationContext(), createCollectionDocument(150), {});
+        cloner.onInsertOp(operationContext(), createCollectionDocument(151), {});
+        cloner.onInsertOp(operationContext(), createCollectionDocument(210), {});
 
-        cloner.onDeleteOp(operationContext(), createCollectionDocument(80), {}, {}, false);
-        cloner.onDeleteOp(operationContext(), createCollectionDocument(199), {}, {}, false);
-        cloner.onDeleteOp(operationContext(), createCollectionDocument(220), {}, {}, false);
+        cloner.onDeleteOp(operationContext(), createCollectionDocument(80), {}, {});
+        cloner.onDeleteOp(operationContext(), createCollectionDocument(199), {}, {});
+        cloner.onDeleteOp(operationContext(), createCollectionDocument(220), {}, {});
 
         wuow.commit();
     }
@@ -301,7 +301,7 @@ TEST_F(MigrationChunkClonerSourceLegacyTest, CorrectDocumentsFetched) {
     });
 
     ASSERT_OK(cloner.commitClone(operationContext()));
-    futureCommit.timed_get(kFutureTimeout);
+    futureCommit.default_timed_get();
 }
 
 TEST_F(MigrationChunkClonerSourceLegacyTest, CollectionNotFound) {
@@ -352,7 +352,7 @@ TEST_F(MigrationChunkClonerSourceLegacyTest, FailedToEngageRecipientShard) {
 
         auto startCloneStatus = cloner.startClone(operationContext());
         ASSERT_EQ(ErrorCodes::NetworkTimeout, startCloneStatus.code());
-        futureStartClone.timed_get(kFutureTimeout);
+        futureStartClone.default_timed_get();
     }
 
     // Ensure that if the recipient tries to fetch some documents, the cloner won't crash

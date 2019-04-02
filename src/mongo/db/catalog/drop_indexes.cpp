@@ -40,10 +40,11 @@
 #include "mongo/db/curop.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/index/index_descriptor.h"
-#include "mongo/db/index_builder.h"
+#include "mongo/db/index_builds_coordinator.h"
 #include "mongo/db/op_observer.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/views/view_catalog.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
@@ -217,7 +218,7 @@ Status dropIndexes(OperationContext* opCtx,
         Database* db = autoDb.getDb();
         Collection* collection = db ? db->getCollection(opCtx, nss) : nullptr;
         if (!db || !collection) {
-            if (db && db->getViewCatalog()->lookup(opCtx, nss.ns())) {
+            if (db && ViewCatalog::get(db)->lookup(opCtx, nss.ns())) {
                 return Status(ErrorCodes::CommandNotSupportedOnView,
                               str::stream() << "Cannot drop indexes on view " << nss);
             }
@@ -225,9 +226,12 @@ Status dropIndexes(OperationContext* opCtx,
             return Status(ErrorCodes::NamespaceNotFound, "ns not found");
         }
 
+        BackgroundOperation::assertNoBgOpInProgForNs(nss);
+        IndexBuildsCoordinator::get(opCtx)->assertNoIndexBuildInProgForCollection(
+            collection->uuid().get());
+
         WriteUnitOfWork wunit(opCtx);
         OldClientContext ctx(opCtx, nss.ns());
-        BackgroundOperation::assertNoBgOpInProgForNs(nss);
 
         Status status = wrappedRun(opCtx, collection, cmdObj, result);
         if (!status.isOK()) {

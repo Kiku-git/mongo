@@ -29,10 +29,8 @@
 
 #pragma once
 
-#include "mongo/base/disallow_copying.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/storage/recovery_unit.h"
 
 namespace mongo {
 
@@ -42,23 +40,12 @@ namespace mongo {
  * TimestampBlock is in scope.
  */
 class TimestampBlock {
-    MONGO_DISALLOW_COPYING(TimestampBlock);
+    TimestampBlock(const TimestampBlock&) = delete;
+    TimestampBlock& operator=(const TimestampBlock&) = delete;
 
 public:
-    TimestampBlock(OperationContext* opCtx, Timestamp ts) : _opCtx(opCtx), _ts(ts) {
-        uassert(ErrorCodes::IllegalOperation,
-                "Cannot timestamp a write operation in read-only mode",
-                !storageGlobalParams.readOnly);
-        if (!_ts.isNull()) {
-            _opCtx->recoveryUnit()->setCommitTimestamp(_ts);
-        }
-    }
-
-    ~TimestampBlock() {
-        if (!_ts.isNull()) {
-            _opCtx->recoveryUnit()->clearCommitTimestamp();
-        }
-    }
+    TimestampBlock(OperationContext* opCtx, Timestamp ts);
+    ~TimestampBlock();
 
 private:
     OperationContext* const _opCtx;

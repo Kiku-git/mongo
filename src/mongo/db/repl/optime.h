@@ -91,6 +91,8 @@ public:
     void append(BSONObjBuilder* builder, const std::string& subObjName) const;
     BSONObj toBSON() const;
 
+    static StatusWith<Date_t> parseWallTimeFromOplogEntry(const BSONObj& obj);
+
     static StatusWith<OpTime> parseFromOplogEntry(const BSONObj& obj);
 
     /**
@@ -158,6 +160,11 @@ private:
     long long _term = kInitialTerm;
 };
 
+struct OpTimeAndWallTime {
+    OpTime opTime;
+    Date_t wallTime;
+};
+std::ostream& operator<<(std::ostream& out, const OpTimeAndWallTime& opTime);
 }  // namespace repl
 
 /**

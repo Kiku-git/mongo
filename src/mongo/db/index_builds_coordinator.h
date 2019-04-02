@@ -152,9 +152,6 @@ public:
      * This should only be called when certain the server will not start any new index builds --
      * i.e. when the server is not accepting user requests and no internal operations are
      * concurrently starting new index builds.
-     *
-     * TODO: not yet fully implemented. IndexBuildsManager::interruptIndexBuild is not yet
-     * implemented.
      */
     void interruptAllIndexBuilds(const std::string& reason);
 
@@ -266,6 +263,11 @@ public:
     bool inProgForDb(StringData db) const;
 
     /**
+     * Uasserts if any index builds are in progress on any database.
+     */
+    void assertNoIndexBuildInProgress() const;
+
+    /**
      * Uasserts if any index builds is in progress on the specified collection.
      */
     void assertNoIndexBuildInProgForCollection(const UUID& collectionUUID) const;
@@ -277,13 +279,8 @@ public:
 
     /**
      * Waits for all index builds on a specified collection to finish.
-     *
-     * Momentarily takes the collection IS lock for 'ns', to fetch the collection UUID.
      */
-    void awaitNoBgOpInProgForNs(OperationContext* opCtx, StringData ns) const;
-    void awaitNoBgOpInProgForNs(OperationContext* opCtx, const NamespaceString& ns) const {
-        awaitNoBgOpInProgForNs(opCtx, ns.ns());
-    }
+    void awaitNoIndexBuildInProgressForCollection(const UUID& collectionUUID) const;
 
     /**
      * Waits for all index builds on a specified database to finish.
@@ -362,10 +359,16 @@ protected:
      * Runs the index build on the caller thread. Handles unregistering the index build and setting
      * the index build's Promise with the outcome of the index build.
      */
-    virtual void _runIndexBuild(OperationContext* opCtx, const UUID& buildUUID) noexcept;
+    void _runIndexBuild(OperationContext* opCtx, const UUID& buildUUID) noexcept;
 
     /**
-     * Modularizes the _indexBuildsManager calls part of _runIndexBuild. Throws on error.
+     * Acquires locks and runs index build. Throws on error.
+     */
+    void _runIndexBuildInner(OperationContext* opCtx,
+                             std::shared_ptr<ReplIndexBuildState> replState);
+
+    /**
+     * Modularizes the _indexBuildsManager calls part of _runIndexBuildInner. Throws on error.
      */
     void _buildIndex(OperationContext* opCtx,
                      Collection* collection,
@@ -455,7 +458,8 @@ protected:
  * builds should be scheduled.
  */
 class ScopedStopNewDatabaseIndexBuilds {
-    MONGO_DISALLOW_COPYING(ScopedStopNewDatabaseIndexBuilds);
+    ScopedStopNewDatabaseIndexBuilds(const ScopedStopNewDatabaseIndexBuilds&) = delete;
+    ScopedStopNewDatabaseIndexBuilds& operator=(const ScopedStopNewDatabaseIndexBuilds&) = delete;
 
 public:
     /**
@@ -485,7 +489,9 @@ private:
  * builds should be scheduled.
  */
 class ScopedStopNewCollectionIndexBuilds {
-    MONGO_DISALLOW_COPYING(ScopedStopNewCollectionIndexBuilds);
+    ScopedStopNewCollectionIndexBuilds(const ScopedStopNewCollectionIndexBuilds&) = delete;
+    ScopedStopNewCollectionIndexBuilds& operator=(const ScopedStopNewCollectionIndexBuilds&) =
+        delete;
 
 public:
     /**

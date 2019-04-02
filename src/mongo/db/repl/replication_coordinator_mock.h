@@ -50,7 +50,8 @@ namespace repl {
  * into dbtests.
  */
 class ReplicationCoordinatorMock : public ReplicationCoordinator {
-    MONGO_DISALLOW_COPYING(ReplicationCoordinatorMock);
+    ReplicationCoordinatorMock(const ReplicationCoordinatorMock&) = delete;
+    ReplicationCoordinatorMock& operator=(const ReplicationCoordinatorMock&) = delete;
 
 public:
     ReplicationCoordinatorMock(ServiceContext* service, const ReplSettings& settings);
@@ -65,6 +66,8 @@ public:
     virtual ~ReplicationCoordinatorMock();
 
     virtual void startup(OperationContext* opCtx);
+
+    virtual void enterTerminalShutdown();
 
     virtual void shutdown(OperationContext* opCtx);
 
@@ -123,17 +126,22 @@ public:
 
     virtual bool shouldRelaxIndexConstraints(OperationContext* opCtx, const NamespaceString& ns);
 
-    virtual void setMyLastAppliedOpTime(const OpTime& opTime);
-    virtual void setMyLastDurableOpTime(const OpTime& opTime);
+    virtual void setMyLastAppliedOpTimeAndWallTime(const OpTimeAndWallTime& opTimeAndWallTime);
+    virtual void setMyLastDurableOpTimeAndWallTime(const OpTimeAndWallTime& opTimeAndWallTime);
 
-    virtual void setMyLastAppliedOpTimeForward(const OpTime& opTime, DataConsistency consistency);
-    virtual void setMyLastDurableOpTimeForward(const OpTime& opTime);
+    virtual void setMyLastAppliedOpTimeAndWallTimeForward(
+        const OpTimeAndWallTime& opTimeAndWallTime, DataConsistency consistency);
+    virtual void setMyLastDurableOpTimeAndWallTimeForward(
+        const OpTimeAndWallTime& opTimeAndWallTime);
 
     virtual void resetMyLastOpTimes();
 
     virtual void setMyHeartbeatMessage(const std::string& msg);
 
+    virtual OpTimeAndWallTime getMyLastAppliedOpTimeAndWallTime() const;
     virtual OpTime getMyLastAppliedOpTime() const;
+
+    virtual OpTimeAndWallTime getMyLastDurableOpTimeAndWallTime() const;
     virtual OpTime getMyLastDurableOpTime() const;
 
     virtual Status waitUntilOpTimeForRead(OperationContext* opCtx,
@@ -142,7 +150,7 @@ public:
     virtual Status waitUntilOpTimeForReadUntil(OperationContext* opCtx,
                                                const ReadConcernArgs& settings,
                                                boost::optional<Date_t> deadline) override;
-    virtual Status awaitOpTimeCommitted(OperationContext* opCtx, OpTime opTime);
+    virtual Status awaitTimestampCommitted(OperationContext* opCtx, Timestamp ts);
     virtual OID getElectionId();
 
     virtual OID getMyRID() const;
@@ -181,7 +189,7 @@ public:
 
     virtual void processReplSetMetadata(const rpc::ReplSetMetadata& replMetadata) override;
 
-    virtual void advanceCommitPoint(const OpTime& committedOptime) override;
+    virtual void advanceCommitPoint(const OpTime& committedOptime, bool fromSyncSource) override;
 
     virtual void cancelAndRescheduleElectionTimeout() override;
 
@@ -229,6 +237,8 @@ public:
                                         boost::optional<rpc::OplogQueryMetadata> oqMetadata);
 
     virtual OpTime getLastCommittedOpTime() const;
+
+    virtual std::vector<MemberData> getMemberData() const override;
 
     virtual Status processReplSetRequestVotes(OperationContext* opCtx,
                                               const ReplSetRequestVotesArgs& args,
@@ -302,7 +312,9 @@ private:
     StorageInterface* _storage = nullptr;
     MemberState _memberState;
     OpTime _myLastDurableOpTime;
+    Date_t _myLastDurableWallTime;
     OpTime _myLastAppliedOpTime;
+    Date_t _myLastAppliedWallTime;
     ReplSetConfig _getConfigReturnValue;
     AwaitReplicationReturnValueFunction _awaitReplicationReturnValueFunction = [](const OpTime&) {
         return StatusAndDuration(Status::OK(), Milliseconds(0));

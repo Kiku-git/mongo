@@ -104,7 +104,7 @@ functions:
           fi
           # If this is a patch build, we add the patch version id to the version string so we know
           # this build was a patch, and which evergreen task it came from
-          if [ "${is_patch|}" = "true" ]; then
+          if [ "${is_patch|false}" = "true" ]; then
             MONGO_VERSION="$MONGO_VERSION-patch-${version_id}"
           fi
 
@@ -229,7 +229,7 @@ functions:
           build_id: ${build_id}
           build_variant: ${build_variant}
           execution: ${execution}
-          is_patch: ${is_patch}
+          is_patch: ${is_patch|false}
           project: ${project}
           project_dir: ${project_dir}
           revision: ${revision}
@@ -266,6 +266,9 @@ functions:
           dsi_analysis_atlas_pw: "${dsi_analysis_atlas_pw}"
           EOF
           chmod 400 runtime_secret.yml
+    - command: expansions.write
+      params:
+        file: work/expansions.yml
     - command: shell.exec
       params:
         working_dir: work
@@ -317,20 +320,40 @@ functions:
         script: |
           ../src/dsi/dsi/run-dsi detect-changes
     - command: shell.exec
+      type: test
+      params:
+        working_dir: work
+        script: |
+          set -o verbose
+          TAG="4.0.2-Baseline"
+          OVERRIDEFILE="../src/dsi/dsi/analysis/${branch_name}/system_perf_override.json"
+          python -u ../src/dsi/dsi/analysis/post_run_check.py ${script_flags} --reports-analysis reports --perf-file perf.json --rev ${revision} --refTag $TAG --overrideFile $OVERRIDEFILE --project_id sys-perf --variant ${build_variant} --task ${task_name}
+          # detect outliers needs to run, so defer the post_run_check exit status to later
+          echo $? > post_run_check.status
+    - command: shell.exec
       params:
         working_dir: work
         script: |
           ../src/dsi/dsi/run-dsi detect-outliers
     - command: shell.exec
+      type: setup
+      params:
+        working_dir: work
+        script: |
+          set -o verbose
+          filename=rejects.json
+          if [ -s "$filename" ]; then
+            echo "Rejecting task due to the following outliers:"
+            cat "$filename"
+            exit 1
+          fi
+    - command: shell.exec
       type: test
       params:
         working_dir: work
         script: |
-          set -o errexit
           set -o verbose
-          TAG="4.0.2-Baseline"
-          OVERRIDEFILE="../src/dsi/dsi/analysis/${branch_name}/system_perf_override.json"
-          python -u ../src/dsi/dsi/analysis/post_run_check.py ${script_flags} --reports-analysis reports --perf-file perf.json --rev ${revision} --refTag $TAG --overrideFile $OVERRIDEFILE --project_id sys-perf --variant ${build_variant} --task ${task_name}
+          exit $(cat post_run_check.status)
 
 #######################################
 #               Tasks                 #
@@ -350,7 +373,6 @@ tasks:
     - func: "prepare environment"
       vars:
         test: "linkbench"
-        authentication: disabled
     - func: "deploy cluster"
     - func: "run test"
     - func: "analyze"
@@ -361,7 +383,6 @@ tasks:
     - func: "prepare environment"
       vars:
         test: "tpcc"
-        authentication: disabled
     - func: "deploy cluster"
     - func: "run test"
     - func: "analyze"
@@ -372,7 +393,6 @@ tasks:
     - func: "prepare environment"
       vars:
         test: "insert_remove"
-        authentication: disabled
     - func: "deploy cluster"
     - func: "run test"
     - func: "analyze"
@@ -383,7 +403,6 @@ tasks:
     - func: "prepare environment"
       vars:
         test: "service_architecture_workloads"
-        authentication: disabled
     - func: "deploy cluster"
     - func: "run test"
     - func: "analyze"
@@ -394,7 +413,6 @@ tasks:
     - func: "prepare environment"
       vars:
         test: "big_update"
-        authentication: disabled
     - func: "deploy cluster"
     - func: "run test"
     - func: "analyze"
@@ -441,7 +459,6 @@ tasks:
     - func: "prepare environment"
       vars:
         test: "crud_workloads"
-        authentication: disabled
     - func: "deploy cluster"
     - func: "run test"
     - func: "analyze"
@@ -452,7 +469,6 @@ tasks:
     - func: "prepare environment"
       vars:
         test: "mixed_workloads"
-        authentication: disabled
     - func: "deploy cluster"
     - func: "run test"
     - func: "analyze"
@@ -463,7 +479,6 @@ tasks:
     - func: "prepare environment"
       vars:
         test: "misc_workloads"
-        authentication: disabled
     - func: "deploy cluster"
     - func: "run test"
     - func: "analyze"
@@ -474,7 +489,6 @@ tasks:
     - func: "prepare environment"
       vars:
         test: "map_reduce_workloads"
-        authentication: disabled
     - func: "deploy cluster"
     - func: "run test"
     - func: "analyze"
@@ -485,7 +499,16 @@ tasks:
     - func: "prepare environment"
       vars:
         test: "short"
-        authentication: disabled
+    - func: "deploy cluster"
+    - func: "run test"
+    - func: "analyze"
+
+- name: jasper_smoke
+  priority: 5
+  commands:
+    - func: "prepare environment"
+      vars:
+        test: "jasper_smoke"
     - func: "deploy cluster"
     - func: "run test"
     - func: "analyze"
@@ -496,7 +519,6 @@ tasks:
     - func: "prepare environment"
       vars:
         test: "retryable_writes"
-        authentication: disabled
     - func: "deploy cluster"
     - func: "run test"
     - func: "analyze"
@@ -507,7 +529,6 @@ tasks:
     - func: "prepare environment"
       vars:
         test: "snapshot_reads"
-        authentication: disabled
     - func: "deploy cluster"
     - func: "run test"
     - func: "analyze"
@@ -518,7 +539,6 @@ tasks:
     - func: "prepare environment"
       vars:
         test: "secondary_reads"
-        authentication: disabled
     - func: "deploy cluster"
     - func: "run test"
     - func: "analyze"
@@ -529,7 +549,6 @@ tasks:
     - func: "prepare environment"
       vars:
         test: "bestbuy_agg"
-        authentication: disabled
     - func: "deploy cluster"
     - func: "run test"
     - func: "analyze"
@@ -540,7 +559,6 @@ tasks:
     - func: "prepare environment"
       vars:
         test: "bestbuy_agg_out"
-        authentication: disabled
     - func: "deploy cluster"
     - func: "run test"
     - func: "analyze"
@@ -551,7 +569,6 @@ tasks:
     - func: "prepare environment"
       vars:
         test: "bestbuy_query"
-        authentication: disabled
     - func: "deploy cluster"
     - func: "run test"
     - func: "analyze"
@@ -562,7 +579,6 @@ tasks:
     - func: "prepare environment"
       vars:
         test: "non_sharded"
-        authentication: disabled
     - func: "deploy cluster"
     - func: "run test"
     - func: "analyze"
@@ -573,7 +589,6 @@ tasks:
     - func: "prepare environment"
       vars:
         test: "mongos"
-        authentication: disabled
     - func: "deploy cluster"
     - func: "run test"
     - func: "analyze"
@@ -584,7 +599,6 @@ tasks:
     - func: "prepare environment"
       vars:
         test: "mongos_large_catalog"
-        authentication: disabled
     - func: "deploy cluster"
     - func: "run test"
     - func: "analyze"
@@ -595,7 +609,6 @@ tasks:
     - func: "prepare environment"
       vars:
         test: "move_chunk"
-        authentication: disabled
     - func: "deploy cluster"
     - func: "run test"
     - func: "analyze"
@@ -606,7 +619,6 @@ tasks:
     - func: "prepare environment"
       vars:
         test: "move_chunk_waiting"
-        authentication: disabled
     - func: "deploy cluster"
     - func: "run test"
     - func: "analyze"
@@ -619,7 +631,6 @@ tasks:
         # Unfortunately the dash/underscore style is different for mongodb_setup and test_control
         test: "secondary_performance"
         setup: "secondary-performance"
-        authentication: disabled
     - func: "deploy cluster"
     - func: "run test"
     - func: "analyze"
@@ -662,7 +673,6 @@ tasks:
     - func: "prepare environment"
       vars:
         test: "change_streams_throughput"
-        authentication: disabled
     - func: "deploy cluster"
     - func: "run test"
     - func: "analyze"
@@ -673,7 +683,6 @@ tasks:
     - func: "prepare environment"
       vars:
         test: "change_streams_latency"
-        authentication: disabled
     - func: "deploy cluster"
     - func: "run test"
     - func: "analyze"
@@ -684,7 +693,6 @@ tasks:
     - func: "prepare environment"
       vars:
         test: "change_streams_multi_mongos"
-        authentication: disabled
     - func: "deploy cluster"
     - func: "run test"
     - func: "analyze"
@@ -820,6 +828,7 @@ buildvariants:
     - name: snapshot_reads
     - name: linkbench
     - name: tpcc
+    - name: jasper_smoke
     - name: insert_remove
     - name: big_update
 
@@ -842,6 +851,7 @@ buildvariants:
   tasks: &standalonetasks
     - name: industry_benchmarks
     - name: crud_workloads
+    - name: jasper_smoke
     - name: insert_remove
     - name: mixed_workloads
     - name: misc_workloads
@@ -875,6 +885,49 @@ buildvariants:
     - name: crud_workloads
     - name: smoke_test
 
+- name: linux-1-node-replSet-ese-cbc
+  display_name: Linux 1-Node ReplSet ESE CBC
+  batchtime: 1440 # 24 hours
+  modules: *modules
+  expansions:
+    setup: single-replica-ese-cbc
+    cluster: single
+    platform: linux
+    project_dir: *project_dir
+    authentication: enabled
+    storageEngine: wiredTiger
+    compile-variant: -enterprise
+  run_on:
+      - "rhel70-perf-single"
+  depends_on:
+      - name: compile
+        variant: compile-amazon2
+  tasks:
+    - name: industry_benchmarks
+    - name: smoke_test
+
+- name: linux-1-node-replSet-ese-gcm
+  display_name: Linux 1-Node ReplSet ESE GCM
+  batchtime: 1440 # 24 hours
+  modules: *modules
+  expansions:
+    setup: single-replica-ese-gcm
+    cluster: single
+    platform: linux
+    project_dir: *project_dir
+    authentication: enabled
+    storageEngine: wiredTiger
+    compile-variant: -enterprise
+  run_on:
+      - "rhel70-perf-single"
+  depends_on:
+      - name: compile
+        variant: compile-amazon2
+  tasks:
+    - name: industry_benchmarks
+    - name: smoke_test
+
+
 - name: linux-3-shard
   display_name: Linux 3-Shard Cluster
   batchtime: 10080 # 7 days
@@ -894,6 +947,7 @@ buildvariants:
   tasks:
     - name: industry_benchmarks
     - name: crud_workloads
+    - name: jasper_smoke
     - name: insert_remove
     - name: mixed_workloads
     - name: misc_workloads
@@ -915,7 +969,7 @@ buildvariants:
     cluster: shard-lite
     platform: linux
     project_dir: *project_dir
-    authentication: disabled
+    authentication: enabled
     storageEngine: wiredTiger
   run_on:
       - "rhel70-perf-shard-lite"
@@ -960,6 +1014,7 @@ buildvariants:
     - name: industry_benchmarks
     - name: industry_benchmarks_secondary_reads
     - name: crud_workloads
+    - name: jasper_smoke
     - name: insert_remove
     - name: service_architecture_workloads
     - name: mixed_workloads
@@ -968,7 +1023,7 @@ buildvariants:
     - name: smoke_test
     - name: retryable_writes_workloads
     - name: industry_benchmarks_wmajority
-    - name: secondary_performance
+    - name: secondary_performance # Uses a special 2 node mongodb setup
     - name: non_sharded_workloads
     - name: bestbuy_agg
     - name: bestbuy_agg_out
@@ -981,6 +1036,26 @@ buildvariants:
     - name: linkbench
     - name: big_update
 
+- name: linux-3-node-replSet-ssl
+  display_name: Linux 3-Node ReplSet (SSL)
+  batchtime: 10080 # 7 days
+  modules: *modules
+  expansions:
+    setup: replica-ssl
+    cluster: replica
+    platform: linux
+    project_dir: *project_dir
+    authentication: enabled
+    storageEngine: wiredTiger
+  run_on:
+      - "rhel70-perf-replset"
+  depends_on:
+      - name: compile
+        variant: compile-linux-64-amzn
+  tasks:
+    - name: industry_benchmarks
+    - name: mixed_workloads
+
 - name: linux-3-node-replSet-initialsync
   display_name: Linux 3-Node ReplSet Initial Sync
   batchtime: 1440  # 24 hours
@@ -989,6 +1064,8 @@ buildvariants:
     setup: replica-2node
     cluster: replica
     platform: linux
+    # TODO(TIG-1506): enabled authentication on initialsync variants
+    authentication: disabled
     storageEngine: wiredTiger
     project_dir: *project_dir
   depends_on:
@@ -1008,6 +1085,8 @@ buildvariants:
     setup: initialsync-logkeeper
     cluster: initialsync-logkeeper
     platform: linux
+    # TODO(TIG-1506): enabled authentication on initialsync variants
+    authentication: disabled
     storageEngine: wiredTiger
     project_dir: *project_dir
   run_on:

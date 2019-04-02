@@ -93,6 +93,7 @@ void OperationContext::setDeadlineAndMaxTime(Date_t when,
                                              ErrorCodes::Error timeoutError) {
     invariant(!getClient()->isInDirectClient() || _hasArtificialDeadline);
     invariant(ErrorCodes::isExceededTimeLimitError(timeoutError));
+    invariant(!ErrorExtraInfo::parserFor(timeoutError));
     uassert(40120,
             "Illegal attempt to change operation deadline",
             _hasArtificialDeadline || !hasDeadline());
@@ -201,7 +202,7 @@ Status OperationContext::checkForInterruptNoAssert() noexcept {
     // TODO: Remove the MONGO_likely(getClient()) once all operation contexts are constructed with
     // clients.
     if (MONGO_likely(getClient() && getServiceContext()) &&
-        getServiceContext()->getKillAllOperations()) {
+        getServiceContext()->getKillAllOperations() && !_isExecutingShutdown) {
         return Status(ErrorCodes::InterruptedAtShutdown, "interrupted at shutdown");
     }
 
@@ -245,49 +246,26 @@ Status OperationContext::checkForInterruptNoAssert() noexcept {
     return Status::OK();
 }
 
-// Theory of operation for waitForConditionOrInterruptNoAssertUntil and markKilled:
+
+// waitForConditionOrInterruptNoAssertUntil returns when:
 //
-// An operation indicates to potential killers that it is waiting on a condition variable by setting
-// _waitMutex and _waitCV, while holding the lock on its parent Client. It then unlocks its Client,
-// unblocking any killers, which are required to have locked the Client before calling markKilled.
+// Normal condvar wait criteria:
+// - cv is notified
+// - deadline is passed
 //
-// When _waitMutex and _waitCV are set, killers must lock _waitMutex before setting the _killCode,
-// and must signal _waitCV before releasing _waitMutex. Unfortunately, they must lock _waitMutex
-// without holding a lock on Client to avoid a deadlock with callers of
-// waitForConditionOrInterruptNoAssertUntil(). So, in the event that _waitMutex is set, the killer
-// increments _numKillers, drops the Client lock, acquires _waitMutex and then re-acquires the
-// Client lock. We know that the Client, its OperationContext and _waitMutex will remain valid
-// during this period because the caller of waitForConditionOrInterruptNoAssertUntil will not return
-// while _numKillers > 0 and will not return until it has itself reacquired _waitMutex. Instead,
-// that caller will keep waiting on _waitCV until _numKillers drops to 0.
+// OperationContext kill criteria:
+// - _deadline is passed (artificial deadline or maxTimeMS)
+// - markKilled is called (killOp)
 //
-// In essence, when _waitMutex is set, _killCode is guarded by _waitMutex and _waitCV, but when
-// _waitMutex is not set, it is guarded by the Client spinlock. Changing _waitMutex is itself
-// guarded by the Client spinlock and _numKillers.
-//
-// When _numKillers does drop to 0, the waiter will null out _waitMutex and _waitCV.
-//
-// This implementation adds a minimum of two spinlock acquire-release pairs to every condition
-// variable wait.
+// Baton criteria:
+// - _baton is notified (someone's queuing work for the baton)
+// - _baton::run returns (timeout fired / networking is ready / socket disconnected)
 StatusWith<stdx::cv_status> OperationContext::waitForConditionOrInterruptNoAssertUntil(
     stdx::condition_variable& cv, stdx::unique_lock<stdx::mutex>& m, Date_t deadline) noexcept {
     invariant(getClient());
-    {
-        stdx::lock_guard<Client> clientLock(*getClient());
-        invariant(!_waitMutex);
-        invariant(!_waitCV);
-        invariant(_waitThread == kNoWaiterThread);
-        invariant(0 == _numKillers);
 
-        // This interrupt check must be done while holding the client lock, so as not to race with a
-        // concurrent caller of markKilled.
-        auto status = checkForInterruptNoAssert();
-        if (!status.isOK()) {
-            return status;
-        }
-        _waitMutex = m.mutex();
-        _waitCV = &cv;
-        _waitThread = stdx::this_thread::get_id();
+    if (auto status = checkForInterruptNoAssert(); !status.isOK()) {
+        return status;
     }
 
     // If the maxTimeNeverTimeOut failpoint is set, behave as though the operation's deadline does
@@ -313,22 +291,10 @@ StatusWith<stdx::cv_status> OperationContext::waitForConditionOrInterruptNoAsser
             cv, m, deadline, _baton.get());
     }();
 
-    // Continue waiting on cv until no other thread is attempting to kill this one.
-    Waitable::wait(_baton.get(), getServiceContext()->getPreciseClockSource(), cv, m, [this] {
-        stdx::lock_guard<Client> clientLock(*getClient());
-        if (0 == _numKillers) {
-            _waitMutex = nullptr;
-            _waitCV = nullptr;
-            _waitThread = kNoWaiterThread;
-            return true;
-        }
-        return false;
-    });
-
-    auto status = checkForInterruptNoAssert();
-    if (!status.isOK()) {
+    if (auto status = checkForInterruptNoAssert(); !status.isOK()) {
         return status;
     }
+
     if (opHasDeadline && waitStatus == stdx::cv_status::timeout && deadline == getDeadline()) {
         // It's possible that the system clock used in stdx::condition_variable::wait_until
         // is slightly ahead of the FastClock used in checkForInterrupt. In this case,
@@ -345,38 +311,14 @@ StatusWith<stdx::cv_status> OperationContext::waitForConditionOrInterruptNoAsser
 
 void OperationContext::markKilled(ErrorCodes::Error killCode) {
     invariant(killCode != ErrorCodes::OK);
+    invariant(!ErrorExtraInfo::parserFor(killCode));
 
     if (killCode == ErrorCodes::ClientDisconnect) {
         log() << "operation was interrupted because a client disconnected";
     }
 
-    stdx::unique_lock<stdx::mutex> lkWaitMutex;
-
-    // If we have a _waitMutex, it means this opCtx is currently blocked in
-    // waitForConditionOrInterrupt.
-    //
-    // From there, we also know which thread is actually doing that waiting (it's recorded in
-    // _waitThread).  If that thread isn't our thread, it's necessary to do the regular numKillers
-    // song and dance mentioned in waitForConditionOrInterrupt.
-    //
-    // If it is our thread, we know that we're currently inside that call to
-    // waitForConditionOrInterrupt and are being invoked by a callback run from Baton->run.  And
-    // that means we don't need to deal with the waitMutex and waitCV (because we're running
-    // callbacks, which means run is returning, which means we'll be checking _killCode in the near
-    // future).
-    if (_waitMutex && stdx::this_thread::get_id() != _waitThread) {
-        invariant(++_numKillers > 0);
-        getClient()->unlock();
-        ON_BLOCK_EXIT([this] {
-            getClient()->lock();
-            invariant(--_numKillers >= 0);
-        });
-        lkWaitMutex = stdx::unique_lock<stdx::mutex>{*_waitMutex};
-    }
-    _killCode.compareAndSwap(ErrorCodes::OK, killCode);
-    if (lkWaitMutex && _numKillers == 0) {
-        invariant(_waitCV);
-        _waitCV->notify_all();
+    if (_killCode.compareAndSwap(ErrorCodes::OK, killCode) == ErrorCodes::OK) {
+        _baton->notify();
     }
 }
 
@@ -398,6 +340,14 @@ void OperationContext::markKillOnClientDisconnect() {
             _baton->markKillOnClientDisconnect();
         }
     }
+}
+
+void OperationContext::setIsExecutingShutdown() {
+    invariant(!_isExecutingShutdown);
+
+    _isExecutingShutdown = true;
+
+    pushIgnoreInterrupts();
 }
 
 void OperationContext::setLogicalSessionId(LogicalSessionId lsid) {

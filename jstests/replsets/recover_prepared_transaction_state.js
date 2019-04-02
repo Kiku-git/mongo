@@ -22,7 +22,8 @@
     const dbName = "test";
     const collName = "recover_prepared_transaction_state_after_rollback";
 
-    const rollbackTest = new RollbackTest(dbName, undefined, true);
+    const rollbackTest =
+        new RollbackTest(dbName, undefined, true /* expect transaction after rollback */);
     let primary = rollbackTest.getPrimary();
 
     // Create collection we're using beforehand.
@@ -49,7 +50,7 @@
     assert.commandWorked(sessionColl1.insert({_id: 1}));
     assert.commandWorked(sessionColl1.insert({_id: 2}));
 
-    rollbackTest.getTestFixture().awaitLastOpCommitted();
+    rollbackTest.awaitLastOpCommitted();
     // Prevent the stable timestamp from moving beyond the following prepared transactions so
     // that when we replay the oplog from the stable timestamp, we correctly recover them.
     assert.commandWorked(
@@ -66,6 +67,7 @@
 
     // Prepare another transaction on the second session.
     session2.startTransaction();
+
     assert.commandWorked(sessionColl2.insert({_id: 4}));
     assert.commandWorked(sessionColl2.update({_id: 2}, {$set: {b: 2}}));
     const prepareTimestamp2 = PrepareHelpers.prepareTransaction(session2);
@@ -75,8 +77,11 @@
 
     // The following commit and abort will be rolled back.
     rollbackTest.transitionToRollbackOperations();
-    PrepareHelpers.commitTransactionAfterPrepareTS(session1, prepareTimestamp);
+    PrepareHelpers.commitTransaction(session1, prepareTimestamp);
     session2.abortTransaction_forTesting();
+
+    // The fastcount should be accurate because there are no open transactions.
+    assert.eq(testColl.count(), 3);
 
     rollbackTest.transitionToSyncSourceOperationsBeforeRollback();
     rollbackTest.transitionToSyncSourceOperationsDuringRollback();
@@ -87,20 +92,24 @@
             primary.adminCommand({configureFailPoint: 'disableSnapshotting', mode: 'off'}));
     }
 
-    arrayEq(sessionColl1.find().toArray(), [{_id: 1}, {_id: 2}]);
-
     // Make sure there are two transactions in the transactions table after rollback recovery.
     assert.eq(primary.getDB('config')['transactions'].find().itcount(), 2);
 
-    // Make sure we can only see the first write and cannot see the writes from the
-    // prepared transactions or the write that was rolled back.
+    // Make sure we can only see the first write and cannot see the writes from the prepared
+    // transactions or the write that was rolled back.
+    arrayEq(sessionColl1.find().toArray(), [{_id: 1}, {_id: 2}]);
     arrayEq(testColl.find().toArray(), [{_id: 1}, {_id: 2}]);
 
-    // Get the correct members after the topology changes.
+    // This check characterizes the current behavior of fastcount after rollback. It will not be
+    // correct, but reflects the count at the point before rollback where both transactions were
+    // completed. Because prepared transactions are guaranteed to be aborted or committed again
+    // after rollback, the count will eventually be correct once the commit and abort are retried.
+    assert.eq(sessionColl1.count(), 3);
+    assert.eq(testColl.count(), 3);
+
+    // Get the correct primary after the topology changes.
     primary = rollbackTest.getPrimary();
-    const rst = rollbackTest.getTestFixture();
-    const secondaries = rst.getSecondaries();
-    rst.awaitReplication();
+    rollbackTest.awaitReplication();
 
     // Make sure we can successfully commit the first rolled back prepared transaction.
     session1 =
@@ -173,11 +182,12 @@
         autocommit: false,
     }));
 
-    rst.awaitReplication();
+    rollbackTest.awaitReplication();
 
     // Make sure we can see the result of the committed prepared transaction and cannot see the
     // write from the aborted transaction.
     arrayEq(testColl.find().toArray(), [{_id: 1, a: 1}, {_id: 2}, {_id: 3}]);
+    assert.eq(testColl.count(), 3);
 
     rollbackTest.stop();
 

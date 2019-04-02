@@ -29,7 +29,6 @@
 
 #pragma once
 
-#include "mongo/base/disallow_copying.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/s/client/shard.h"
 #include "mongo/stdx/mutex.h"
@@ -41,7 +40,8 @@ namespace mongo {
  * in the scenarios where causal consistency is not available yet.
  */
 class RSLocalClient {
-    MONGO_DISALLOW_COPYING(RSLocalClient);
+    RSLocalClient(const RSLocalClient&) = delete;
+    RSLocalClient& operator=(const RSLocalClient&) = delete;
 
 public:
     explicit RSLocalClient() = default;
@@ -53,7 +53,7 @@ public:
      * response and write concern error (if present).
      */
     StatusWith<Shard::CommandResponse> runCommandOnce(OperationContext* opCtx,
-                                                      const std::string& dbName,
+                                                      StringData dbName,
                                                       const BSONObj& cmdObj);
 
     /**

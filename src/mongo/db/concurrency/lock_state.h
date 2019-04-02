@@ -44,7 +44,8 @@ namespace mongo {
  * variable, which can be waited on.
  */
 class CondVarLockGrantNotification : public LockGrantNotification {
-    MONGO_DISALLOW_COPYING(CondVarLockGrantNotification);
+    CondVarLockGrantNotification(const CondVarLockGrantNotification&) = delete;
+    CondVarLockGrantNotification& operator=(const CondVarLockGrantNotification&) = delete;
 
 public:
     CondVarLockGrantNotification();
@@ -145,8 +146,8 @@ public:
 
     virtual bool unlockGlobal();
 
-    virtual LockResult lockRSTLBegin(OperationContext* opCtx);
-    virtual void lockRSTLComplete(OperationContext* opCtx, Date_t deadline);
+    virtual LockResult lockRSTLBegin(OperationContext* opCtx, LockMode mode);
+    virtual void lockRSTLComplete(OperationContext* opCtx, LockMode mode, Date_t deadline);
 
     virtual bool unlockRSTLforPrepare();
 
@@ -179,7 +180,7 @@ public:
     virtual LockMode getLockMode(ResourceId resId) const;
     virtual bool isLockHeldForMode(ResourceId resId, LockMode mode) const;
     virtual bool isDbLockedForMode(StringData dbName, LockMode mode) const;
-    virtual bool isCollectionLockedForMode(StringData ns, LockMode mode) const;
+    virtual bool isCollectionLockedForMode(const NamespaceString& nss, LockMode mode) const;
 
     virtual ResourceId getWaitingResource() const;
 

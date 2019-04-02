@@ -47,8 +47,7 @@ struct SHA256BlockTraits {
 
     static void computeHmac(const uint8_t* key,
                             size_t keyLen,
-                            const uint8_t* input,
-                            size_t inputLen,
+                            std::initializer_list<ConstDataRange> input,
                             HashType* const output);
 };
 

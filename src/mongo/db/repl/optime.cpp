@@ -35,6 +35,7 @@
 
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/util/bson_extract.h"
+#include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/optime.h"
 
 namespace mongo {
@@ -55,6 +56,16 @@ void OpTime::append(BSONObjBuilder* builder, const std::string& subObjName) cons
 
     opTimeBuilder.append(kTermFieldName, _term);
     opTimeBuilder.doneFast();
+}
+
+StatusWith<Date_t> OpTime::parseWallTimeFromOplogEntry(const BSONObj& obj) {
+    BSONElement wallClockTimeElement;
+    Status status = bsonExtractTypedField(
+        obj, OplogEntryBase::kWallClockTimeFieldName, BSONType::Date, &wallClockTimeElement);
+    if (!status.isOK())
+        return status;
+    auto wallClockTime = wallClockTimeElement.Date();
+    return wallClockTime;
 }
 
 StatusWith<OpTime> OpTime::parseFromOplogEntry(const BSONObj& obj) {
@@ -90,6 +101,10 @@ std::string OpTime::toString() const {
 
 std::ostream& operator<<(std::ostream& out, const OpTime& opTime) {
     return out << opTime.toString();
+}
+
+std::ostream& operator<<(std::ostream& out, const OpTimeAndWallTime& opTime) {
+    return out << opTime.opTime.toString() << ", " << opTime.wallTime.toString();
 }
 
 void OpTime::appendAsQuery(BSONObjBuilder* builder) const {

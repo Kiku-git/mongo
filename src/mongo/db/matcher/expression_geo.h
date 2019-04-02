@@ -42,7 +42,8 @@ class GeometryContainer;
 
 // This represents either a $within or a $geoIntersects.
 class GeoExpression {
-    MONGO_DISALLOW_COPYING(GeoExpression);
+    GeoExpression(const GeoExpression&) = delete;
+    GeoExpression& operator=(const GeoExpression&) = delete;
 
 public:
     GeoExpression();
@@ -86,7 +87,7 @@ public:
 
     bool matchesSingleElement(const BSONElement&, MatchDetails* details = nullptr) const final;
 
-    virtual void debugString(StringBuilder& debug, int level = 0) const;
+    virtual void debugString(StringBuilder& debug, int indentationLevel = 0) const;
 
     BSONObj getSerializedRightHandSide() const final;
 
@@ -123,7 +124,8 @@ private:
 // TODO: Make a struct, turn parse stuff into something like
 // static Status parseNearQuery(const BSONObj& obj, NearQuery** out);
 class GeoNearExpression {
-    MONGO_DISALLOW_COPYING(GeoNearExpression);
+    GeoNearExpression(const GeoNearExpression&) = delete;
+    GeoNearExpression& operator=(const GeoNearExpression&) = delete;
 
 public:
     GeoNearExpression();
@@ -177,7 +179,7 @@ public:
      */
     bool matchesSingleElement(const BSONElement&, MatchDetails* details = nullptr) const final;
 
-    virtual void debugString(StringBuilder& debug, int level = 0) const;
+    virtual void debugString(StringBuilder& debug, int indentationLevel = 0) const;
 
     BSONObj getSerializedRightHandSide() const final;
 

@@ -35,7 +35,7 @@ TestData.skipCheckDBHashes = true;
 
     // Create collection that exists on the sync source and rollback node.
     assert.commandWorked(rollbackTest.getPrimary().getDB(dbName).runCommand(
-        {create: collName, writeConcern: {w: 3}}));
+        {create: collName, writeConcern: {w: 2}}));
 
     // Stop replication from the current primary ("rollbackNode").
     const rollbackNode = rollbackTest.transitionToRollbackOperations();
@@ -50,7 +50,7 @@ TestData.skipCheckDBHashes = true;
         session.getDatabase('admin').adminCommand({prepareTransaction: 1, writeConcern: {w: 1}}));
     assert(result.prepareTimestamp,
            "prepareTransaction did not return a 'prepareTimestamp': " + tojson(result));
-    PrepareHelpers.commitTransactionAfterPrepareTS(session, result.prepareTimestamp);
+    PrepareHelpers.commitTransaction(session, result.prepareTimestamp);
 
     // Step down current primary and elect a node that lacks the commit.
     rollbackTest.transitionToSyncSourceOperationsBeforeRollback();

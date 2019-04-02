@@ -50,8 +50,13 @@ public:
     void waitForReadConcern(OperationContext* opCtx,
                             const CommandInvocation* invocation,
                             const OpMsgRequest& request) const override {
-        auto rcStatus = mongo::waitForReadConcern(
-            opCtx, repl::ReadConcernArgs::get(opCtx), invocation->allowsAfterClusterTime());
+        const auto prepareConflictBehavior = invocation->canIgnorePrepareConflicts()
+            ? PrepareConflictBehavior::kIgnore
+            : PrepareConflictBehavior::kEnforce;
+        auto rcStatus = mongo::waitForReadConcern(opCtx,
+                                                  repl::ReadConcernArgs::get(opCtx),
+                                                  invocation->allowsAfterClusterTime(),
+                                                  prepareConflictBehavior);
         uassertStatusOK(rcStatus);
     }
 

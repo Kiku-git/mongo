@@ -1168,7 +1168,7 @@ TEST_F(DConcurrencyTestFixture, IsDbLockedForXMode) {
 }
 
 TEST_F(DConcurrencyTestFixture, IsCollectionLocked_DB_Locked_IS) {
-    const std::string ns("db1.coll");
+    const NamespaceString ns("db1.coll");
 
     auto opCtx = makeOperationContext();
     opCtx->swapLockState(stdx::make_unique<LockerImpl>());
@@ -1177,7 +1177,7 @@ TEST_F(DConcurrencyTestFixture, IsCollectionLocked_DB_Locked_IS) {
     Lock::DBLock dbLock(opCtx.get(), "db1", MODE_IS);
 
     {
-        Lock::CollectionLock collLock(lockState, ns, MODE_IS);
+        Lock::CollectionLock collLock(lockState, ns.ns(), MODE_IS);
 
         ASSERT(lockState->isCollectionLockedForMode(ns, MODE_IS));
         ASSERT(!lockState->isCollectionLockedForMode(ns, MODE_IX));
@@ -1189,7 +1189,7 @@ TEST_F(DConcurrencyTestFixture, IsCollectionLocked_DB_Locked_IS) {
     }
 
     {
-        Lock::CollectionLock collLock(lockState, ns, MODE_S);
+        Lock::CollectionLock collLock(lockState, ns.ns(), MODE_S);
 
         ASSERT(lockState->isCollectionLockedForMode(ns, MODE_IS));
         ASSERT(!lockState->isCollectionLockedForMode(ns, MODE_IX));
@@ -1199,7 +1199,7 @@ TEST_F(DConcurrencyTestFixture, IsCollectionLocked_DB_Locked_IS) {
 }
 
 TEST_F(DConcurrencyTestFixture, IsCollectionLocked_DB_Locked_IX) {
-    const std::string ns("db1.coll");
+    const NamespaceString ns("db1.coll");
 
     auto opCtx = makeOperationContext();
     opCtx->swapLockState(stdx::make_unique<LockerImpl>());
@@ -1208,7 +1208,7 @@ TEST_F(DConcurrencyTestFixture, IsCollectionLocked_DB_Locked_IX) {
     Lock::DBLock dbLock(opCtx.get(), "db1", MODE_IX);
 
     {
-        Lock::CollectionLock collLock(lockState, ns, MODE_IX);
+        Lock::CollectionLock collLock(lockState, ns.ns(), MODE_IX);
 
         // TODO: This is TRUE because Lock::CollectionLock converts IX lock to X
         ASSERT(lockState->isCollectionLockedForMode(ns, MODE_IS));
@@ -1219,7 +1219,7 @@ TEST_F(DConcurrencyTestFixture, IsCollectionLocked_DB_Locked_IX) {
     }
 
     {
-        Lock::CollectionLock collLock(lockState, ns, MODE_X);
+        Lock::CollectionLock collLock(lockState, ns.ns(), MODE_X);
 
         ASSERT(lockState->isCollectionLockedForMode(ns, MODE_IS));
         ASSERT(lockState->isCollectionLockedForMode(ns, MODE_IX));
@@ -1751,7 +1751,7 @@ TEST_F(DConcurrencyTestFixture, CollectionLockTimeout) {
     Lock::DBLock DBL1(opctx1, "testdb"_sd, MODE_IX, Date_t::max());
     ASSERT(opctx1->lockState()->isDbLockedForMode("testdb"_sd, MODE_IX));
     Lock::CollectionLock CL1(opctx1->lockState(), "testdb.test"_sd, MODE_X, Date_t::max());
-    ASSERT(opctx1->lockState()->isCollectionLockedForMode("testdb.test"_sd, MODE_X));
+    ASSERT(opctx1->lockState()->isCollectionLockedForMode(NamespaceString("testdb.test"), MODE_X));
 
     Date_t t1 = Date_t::now();
     Lock::DBLock DBL2(opctx2, "testdb"_sd, MODE_IX, Date_t::max());
@@ -2087,14 +2087,14 @@ TEST_F(DConcurrencyTestFixture, RSTLLockGuardTimeout) {
     auto secondOpCtx = clients[1].second.get();
 
     // The first opCtx holds the RSTL.
-    repl::ReplicationStateTransitionLockGuard firstRSTL(firstOpCtx);
+    repl::ReplicationStateTransitionLockGuard firstRSTL(firstOpCtx, MODE_X);
     ASSERT_TRUE(firstRSTL.isLocked());
     ASSERT_EQ(firstOpCtx->lockState()->getLockMode(resourceIdReplicationStateTransitionLock),
               MODE_X);
 
     // The second opCtx enqueues the lock request but cannot acquire it.
     repl::ReplicationStateTransitionLockGuard secondRSTL(
-        secondOpCtx, repl::ReplicationStateTransitionLockGuard::EnqueueOnly());
+        secondOpCtx, MODE_X, repl::ReplicationStateTransitionLockGuard::EnqueueOnly());
     ASSERT_FALSE(secondRSTL.isLocked());
 
     // The second opCtx times out.
@@ -2115,7 +2115,8 @@ TEST_F(DConcurrencyTestFixture, RSTLLockGuardEnqueueAndWait) {
     auto secondOpCtx = clients[1].second.get();
 
     // The first opCtx holds the RSTL.
-    auto firstRSTL = stdx::make_unique<repl::ReplicationStateTransitionLockGuard>(firstOpCtx);
+    auto firstRSTL =
+        stdx::make_unique<repl::ReplicationStateTransitionLockGuard>(firstOpCtx, MODE_X);
     ASSERT_TRUE(firstRSTL->isLocked());
     ASSERT_EQ(firstOpCtx->lockState()->getLockMode(resourceIdReplicationStateTransitionLock),
               MODE_X);
@@ -2123,7 +2124,7 @@ TEST_F(DConcurrencyTestFixture, RSTLLockGuardEnqueueAndWait) {
 
     // The second opCtx enqueues the lock request but cannot acquire it.
     repl::ReplicationStateTransitionLockGuard secondRSTL(
-        secondOpCtx, repl::ReplicationStateTransitionLockGuard::EnqueueOnly());
+        secondOpCtx, MODE_X, repl::ReplicationStateTransitionLockGuard::EnqueueOnly());
     ASSERT_FALSE(secondRSTL.isLocked());
 
     // The first opCtx unlocks so the second opCtx acquires it.
@@ -2136,6 +2137,42 @@ TEST_F(DConcurrencyTestFixture, RSTLLockGuardEnqueueAndWait) {
     ASSERT_TRUE(secondRSTL.isLocked());
     ASSERT_EQ(secondOpCtx->lockState()->getLockMode(resourceIdReplicationStateTransitionLock),
               MODE_X);
+}
+
+TEST_F(DConcurrencyTestFixture, RSTLLockGuardResilientToExceptionThrownBeforeWaitForRSTLComplete) {
+    auto clients = makeKClientsWithLockers(2);
+    auto firstOpCtx = clients[0].second.get();
+    auto secondOpCtx = clients[1].second.get();
+
+    // The first opCtx holds the RSTL.
+    repl::ReplicationStateTransitionLockGuard firstRSTL(firstOpCtx, MODE_X);
+    ASSERT_TRUE(firstRSTL.isLocked());
+    ASSERT_TRUE(firstOpCtx->lockState()->isRSTLExclusive());
+
+    {
+        // The second opCtx enqueues the lock request but cannot acquire it.
+        repl::ReplicationStateTransitionLockGuard secondRSTL(
+            secondOpCtx, MODE_X, repl::ReplicationStateTransitionLockGuard::EnqueueOnly());
+        ASSERT_FALSE(secondRSTL.isLocked());
+
+        // secondRSTL is going to go out of scope with the lock result as LOCK_WAITING. As a result,
+        // ReplicationStateTransitionLockGuard destructor will be called and we should expect
+        // the RSTL lock state cleaned from both locker and lock manager.
+    }
+
+    // Verify that the RSTL lock state is cleaned from secondOpCtx's locker.
+    ASSERT_FALSE(secondOpCtx->lockState()->isRSTLLocked());
+
+    // Now, make first opCtx to release the lock to test if we can reacquire the lock again.
+    ASSERT_TRUE(firstOpCtx->lockState()->isRSTLExclusive());
+    firstRSTL.release();
+    ASSERT_FALSE(firstRSTL.isLocked());
+
+    // If we haven't cleaned the RSTL lock state from the conflict queue in the lock manager after
+    // the destruction of secondRSTL, first opCtx won't be able to reacquire the RSTL in X mode.
+    firstRSTL.reacquire();
+    ASSERT_TRUE(firstRSTL.isLocked());
+    ASSERT_TRUE(firstOpCtx->lockState()->isRSTLExclusive());
 }
 
 }  // namespace

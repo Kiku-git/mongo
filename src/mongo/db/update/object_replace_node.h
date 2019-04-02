@@ -29,6 +29,11 @@
 
 #pragma once
 
+#include <map>
+#include <string>
+#include <utility>
+#include <vector>
+
 #include "mongo/db/update/update_node.h"
 #include "mongo/stdx/memory.h"
 
@@ -44,7 +49,7 @@ public:
      * Initializes the node with the document to replace with. Any zero-valued timestamps (except
      * for the _id) are updated to the current time.
      */
-    explicit ObjectReplaceNode(BSONObj val);
+    explicit ObjectReplaceNode(BSONObj value);
 
     std::unique_ptr<UpdateNode> clone() const final {
         return stdx::make_unique<ObjectReplaceNode>(*this);
@@ -53,7 +58,7 @@ public:
     void setCollator(const CollatorInterface* collator) final {}
 
     /**
-     * Replaces the document that 'applyParams.element' belongs to with '_val'. If '_val' does not
+     * Replaces the document that 'applyParams.element' belongs to with 'val'. If 'val' does not
      * contain an _id, the _id from the original document is preserved. 'applyParams.element' must
      * be the root of the document. 'applyParams.pathToCreate' and 'applyParams.pathTaken' must be
      * empty. Always returns a result stating that indexes are affected when the replacement is not
@@ -61,11 +66,29 @@ public:
      */
     ApplyResult apply(ApplyParams applyParams) const final;
 
-private:
-    // Object to replace with.
-    BSONObj _val;
+    BSONObj serialize() const {
+        return val;
+    }
 
-    // True if _val contains an _id.
+    /**
+     * ObjectReplaceNode is never part of an update operator tree so this method cannot be called.
+     */
+    virtual void produceSerializationMap(
+        FieldRef* currentPath,
+        std::map<std::string, std::vector<std::pair<std::string, BSONObj>>>*
+            operatorOrientedUpdates) const {
+        MONGO_UNREACHABLE;
+    }
+
+    void acceptVisitor(UpdateNodeVisitor* visitor) final {
+        visitor->visit(this);
+    }
+
+    // Object to replace with.
+    BSONObj val;
+
+private:
+    // True if val contains an _id.
     bool _containsId;
 };
 

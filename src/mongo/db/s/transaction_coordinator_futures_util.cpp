@@ -33,10 +33,10 @@
 
 #include "mongo/db/s/transaction_coordinator_futures_util.h"
 
-#include "mongo/client/remote_command_retry_scheduler.h"
 #include "mongo/client/remote_command_targeter.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/s/sharding_state.h"
+#include "mongo/s/grid.h"
 #include "mongo/transport/service_entry_point.h"
 #include "mongo/util/fail_point_service.h"
 #include "mongo/util/log.h"
@@ -58,12 +58,7 @@ AsyncWorkScheduler::AsyncWorkScheduler(ServiceContext* serviceContext)
       _executor(Grid::get(_serviceContext)->getExecutorPool()->getFixedExecutor()) {}
 
 AsyncWorkScheduler::~AsyncWorkScheduler() {
-    {
-        stdx::unique_lock<stdx::mutex> ul(_mutex);
-        _allListsEmptyCV.wait(ul, [&] {
-            return _activeOpContexts.empty() && _activeHandles.empty() && _childSchedulers.empty();
-        });
-    }
+    join();
 
     if (!_parent)
         return;
@@ -77,15 +72,7 @@ AsyncWorkScheduler::~AsyncWorkScheduler() {
 Future<executor::TaskExecutor::ResponseStatus> AsyncWorkScheduler::scheduleRemoteCommand(
     const ShardId& shardId, const ReadPreferenceSetting& readPref, const BSONObj& commandObj) {
 
-    bool isSelfShard = [this, shardId] {
-        if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
-            return shardId == ShardRegistry::kConfigServerShardId;
-        }
-        if (serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
-            return shardId == ShardingState::get(_serviceContext)->shardId();
-        }
-        MONGO_UNREACHABLE;  // Only sharded systems should use the two-phase commit path.
-    }();
+    const bool isSelfShard = (shardId == getLocalShardId(_serviceContext));
 
     if (isSelfShard) {
         // If sending a command to the same shard as this node is in, send it directly to this node
@@ -94,9 +81,10 @@ Future<executor::TaskExecutor::ResponseStatus> AsyncWorkScheduler::scheduleRemot
         // history. See SERVER-38142 for details.
         return scheduleWork([ this, shardId, commandObj = commandObj.getOwned() ](OperationContext *
                                                                                   opCtx) {
-            // Note: This internal authorization is tied to the lifetime of 'opCtx', which is
-            // destroyed by 'scheduleWork' immediately after this lambda ends.
-            AuthorizationSession::get(Client::getCurrent())->grantInternalAuthorization();
+            // Note: This internal authorization is tied to the lifetime of the client, which will
+            // be destroyed by 'scheduleWork' immediately after this lambda ends
+            AuthorizationSession::get(opCtx->getClient())
+                ->grantInternalAuthorization(opCtx->getClient());
 
             if (MONGO_FAIL_POINT(hangWhileTargetingLocalHost)) {
                 LOG(0) << "Hit hangWhileTargetingLocalHost failpoint";
@@ -207,6 +195,13 @@ void AsyncWorkScheduler::shutdown(Status status) {
     }
 }
 
+void AsyncWorkScheduler::join() {
+    stdx::unique_lock<stdx::mutex> ul(_mutex);
+    _allListsEmptyCV.wait(ul, [&] {
+        return _activeOpContexts.empty() && _activeHandles.empty() && _childSchedulers.empty();
+    });
+}
+
 Future<HostAndPort> AsyncWorkScheduler::_targetHostAsync(const ShardId& shardId,
                                                          const ReadPreferenceSetting& readPref) {
     return scheduleWork([shardId, readPref](OperationContext* opCtx) {
@@ -224,11 +219,20 @@ Future<HostAndPort> AsyncWorkScheduler::_targetHostAsync(const ShardId& shardId,
 }
 
 void AsyncWorkScheduler::_notifyAllTasksComplete(WithLock) {
-    if (_shutdownStatus.isOK())
-        return;
-
     if (_activeOpContexts.empty() && _activeHandles.empty() && _childSchedulers.empty())
         _allListsEmptyCV.notify_all();
+}
+
+ShardId getLocalShardId(ServiceContext* service) {
+    if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
+        return ShardRegistry::kConfigServerShardId;
+    }
+    if (serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
+        return ShardingState::get(service)->shardId();
+    }
+
+    // Only sharded systems should use the two-phase commit path
+    MONGO_UNREACHABLE;
 }
 
 Future<void> whenAll(std::vector<Future<void>>& futures) {

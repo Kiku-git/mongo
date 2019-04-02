@@ -34,6 +34,7 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/matcher/expression_always_boolean.h"
 #include "mongo/db/matcher/expression_path.h"
+#include "mongo/db/matcher/expression_text_base.h"
 
 namespace mongo {
 
@@ -50,9 +51,9 @@ void ListOfMatchExpression::add(MatchExpression* e) {
 }
 
 
-void ListOfMatchExpression::_debugList(StringBuilder& debug, int level) const {
+void ListOfMatchExpression::_debugList(StringBuilder& debug, int indentationLevel) const {
     for (unsigned i = 0; i < _expressions.size(); i++)
-        _expressions[i]->debugString(debug, level + 1);
+        _expressions[i]->debugString(debug, indentationLevel + 1);
 }
 
 void ListOfMatchExpression::_listToBSON(BSONArrayBuilder* out) const {
@@ -214,10 +215,10 @@ bool AndMatchExpression::matchesSingleElement(const BSONElement& e, MatchDetails
 }
 
 
-void AndMatchExpression::debugString(StringBuilder& debug, int level) const {
-    _debugAddSpace(debug, level);
+void AndMatchExpression::debugString(StringBuilder& debug, int indentationLevel) const {
+    _debugAddSpace(debug, indentationLevel);
     debug << "$and\n";
-    _debugList(debug, level);
+    _debugList(debug, indentationLevel);
 }
 
 void AndMatchExpression::serialize(BSONObjBuilder* out) const {
@@ -257,10 +258,10 @@ bool OrMatchExpression::matchesSingleElement(const BSONElement& e, MatchDetails*
 }
 
 
-void OrMatchExpression::debugString(StringBuilder& debug, int level) const {
-    _debugAddSpace(debug, level);
+void OrMatchExpression::debugString(StringBuilder& debug, int indentationLevel) const {
+    _debugAddSpace(debug, indentationLevel);
     debug << "$or\n";
-    _debugList(debug, level);
+    _debugList(debug, indentationLevel);
 }
 
 void OrMatchExpression::serialize(BSONObjBuilder* out) const {
@@ -299,10 +300,10 @@ bool NorMatchExpression::matchesSingleElement(const BSONElement& e, MatchDetails
     return true;
 }
 
-void NorMatchExpression::debugString(StringBuilder& debug, int level) const {
-    _debugAddSpace(debug, level);
+void NorMatchExpression::debugString(StringBuilder& debug, int indentationLevel) const {
+    _debugAddSpace(debug, indentationLevel);
     debug << "$nor\n";
-    _debugList(debug, level);
+    _debugList(debug, indentationLevel);
 }
 
 void NorMatchExpression::serialize(BSONObjBuilder* out) const {
@@ -312,15 +313,23 @@ void NorMatchExpression::serialize(BSONObjBuilder* out) const {
 
 // -------
 
-void NotMatchExpression::debugString(StringBuilder& debug, int level) const {
-    _debugAddSpace(debug, level);
+void NotMatchExpression::debugString(StringBuilder& debug, int indentationLevel) const {
+    _debugAddSpace(debug, indentationLevel);
     debug << "$not\n";
-    _exp->debugString(debug, level + 1);
+    _exp->debugString(debug, indentationLevel + 1);
 }
 
 boost::optional<StringData> NotMatchExpression::getPathIfNotWithSinglePathMatchExpressionTree(
     MatchExpression* exp) {
     if (auto pathMatch = dynamic_cast<PathMatchExpression*>(exp)) {
+        if (dynamic_cast<TextMatchExpressionBase*>(exp)) {
+            // While TextMatchExpressionBase derives from PathMatchExpression, text match
+            // expressions cannot be serialized in the same manner as other PathMatchExpression
+            // derivatives. This is because the path for a TextMatchExpression is embedded within
+            // the $text object, whereas for other PathMatchExpressions it is on the left-hand-side,
+            // for example {x: {$eq: 1}}.
+            return boost::none;
+        }
         return pathMatch->path();
     }
 
@@ -328,7 +337,7 @@ boost::optional<StringData> NotMatchExpression::getPathIfNotWithSinglePathMatchE
         boost::optional<StringData> path;
         for (size_t i = 0; i < exp->numChildren(); ++i) {
             auto pathMatchChild = dynamic_cast<PathMatchExpression*>(exp->getChild(i));
-            if (!pathMatchChild) {
+            if (!pathMatchChild || dynamic_cast<TextMatchExpressionBase*>(exp->getChild(i))) {
                 return boost::none;
             }
 

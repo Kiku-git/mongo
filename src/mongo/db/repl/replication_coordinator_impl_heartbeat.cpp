@@ -148,7 +148,6 @@ void ReplicationCoordinatorImpl::_handleHeartbeatResponse(
     }
 
     ReplSetHeartbeatResponse hbResponse;
-    OpTime lastOpCommitted;
     BSONObj resp;
     if (responseStatus.isOK()) {
         resp = cbData.response.data;
@@ -177,12 +176,24 @@ void ReplicationCoordinatorImpl::_handleHeartbeatResponse(
             replMetadata = responseStatus;
         }
         if (replMetadata.isOK()) {
-            lastOpCommitted = replMetadata.getValue().getLastOpCommitted();
 
-            // Arbiters are the only nodes allowed to advance their commit point via heartbeats.
-            if (_getMemberState_inlock().arbiter()) {
-                _advanceCommitPoint(lk, lastOpCommitted);
+            // The majority commit point can be propagated through heartbeats as long as there are
+            // no 4.0 nodes in the replica set. If there are 4.0 nodes, propagating the majority
+            // commit point through heartbeats can cause a sync source cycle due to SERVER-33248.
+            // Note that FCV may not be initialized, since for a new replica set, the first primary
+            // initializes the FCV after it is elected.
+            // TODO SERVER-40211: Always propagate the majority commit point through heartbeats,
+            // regardless of FCV.
+            const auto isFCV42 = serverGlobalParams.featureCompatibility.isVersionInitialized() &&
+                serverGlobalParams.featureCompatibility.getVersion() ==
+                    ServerGlobalParams::FeatureCompatibility::Version::kFullyUpgradedTo42;
+            if (_getMemberState_inlock().arbiter() || isFCV42) {
+                // The node that sent the heartbeat is not guaranteed to be our sync source.
+                const bool fromSyncSource = false;
+                _advanceCommitPoint(
+                    lk, replMetadata.getValue().getLastOpCommitted(), fromSyncSource);
             }
+
             // Asynchronous stepdown could happen, but it will wait for _mutex and execute
             // after this function, so we cannot and don't need to wait for it to finish.
             _processReplSetMetadata_inlock(replMetadata.getValue());
@@ -211,8 +222,8 @@ void ReplicationCoordinatorImpl::_handleHeartbeatResponse(
         hbStatusResponse = StatusWith<ReplSetHeartbeatResponse>(responseStatus);
     }
 
-    HeartbeatResponseAction action = _topCoord->processHeartbeatResponse(
-        now, networkTime, target, hbStatusResponse, lastOpCommitted);
+    HeartbeatResponseAction action =
+        _topCoord->processHeartbeatResponse(now, networkTime, target, hbStatusResponse);
 
     if (action.getAction() == HeartbeatResponseAction::NoAction && hbStatusResponse.isOK() &&
         hbStatusResponse.getValue().hasState() &&
@@ -384,7 +395,7 @@ void ReplicationCoordinatorImpl::_stepDownFinish(
     auto opCtx = cc().makeOperationContext();
 
     ReplicationStateTransitionLockGuard rstlLock(
-        opCtx.get(), ReplicationStateTransitionLockGuard::EnqueueOnly());
+        opCtx.get(), MODE_X, ReplicationStateTransitionLockGuard::EnqueueOnly());
 
     // kill all write operations which are no longer safe to run on step down. Also, operations that
     // have taken global lock in S mode will be killed to avoid 3-way deadlock between read,
@@ -579,7 +590,7 @@ void ReplicationCoordinatorImpl::_heartbeatReconfigFinish(
         // transition out of primary while waiting for the RSTL, there's no harm in holding
         // it.
         lk.unlock();
-        transitionGuard.emplace(opCtx.get());
+        transitionGuard.emplace(opCtx.get(), MODE_X);
         lk.lock();
     }
 

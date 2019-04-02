@@ -36,7 +36,6 @@
 #include <string>
 #include <vector>
 
-#include "mongo/base/disallow_copying.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -56,7 +55,8 @@ struct CollectionMockStats {
 };
 
 class CollectionBulkLoaderMock : public CollectionBulkLoader {
-    MONGO_DISALLOW_COPYING(CollectionBulkLoaderMock);
+    CollectionBulkLoaderMock(const CollectionBulkLoaderMock&) = delete;
+    CollectionBulkLoaderMock& operator=(const CollectionBulkLoaderMock&) = delete;
 
 public:
     explicit CollectionBulkLoaderMock(std::shared_ptr<CollectionMockStats> collStats)
@@ -87,7 +87,8 @@ public:
 };
 
 class StorageInterfaceMock : public StorageInterface {
-    MONGO_DISALLOW_COPYING(StorageInterfaceMock);
+    StorageInterfaceMock(const StorageInterfaceMock&) = delete;
+    StorageInterfaceMock& operator=(const StorageInterfaceMock&) = delete;
 
 public:
     // Used for testing.
@@ -389,7 +390,7 @@ public:
                                          const BSONObj& startKey,
                                          BoundInclusion boundInclusion,
                                          std::size_t limit) {
-        return Status{ErrorCodes::IllegalOperation, "FindOneFn not implemented."};
+        return Status{ErrorCodes::IllegalOperation, "FindDocumentsFn not implemented."};
     };
     DeleteDocumentsFn deleteDocumentsFn = [](OperationContext* opCtx,
                                              const NamespaceString& nss,

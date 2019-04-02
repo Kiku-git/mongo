@@ -95,6 +95,13 @@ OplogApplier::Options SyncTailTest::makeInitialSyncOptions() {
     return options;
 }
 
+OplogApplier::Options SyncTailTest::makeRecoveryOptions() {
+    OplogApplier::Options options;
+    options.allowNamespaceNotFoundErrorsOnCrudOps = true;
+    options.skipWritesToOplog = true;
+    return options;
+}
+
 void SyncTailTest::setUp() {
     ServiceContextMongoDTest::setUp();
 
@@ -153,7 +160,8 @@ void SyncTailTest::_testSyncApplyCrudOperation(ErrorCodes::Error expectedError,
         ASSERT_TRUE(opCtx);
         ASSERT_TRUE(opCtx->lockState()->isDbLockedForMode("test", MODE_IX));
         ASSERT_FALSE(opCtx->lockState()->isDbLockedForMode("test", MODE_X));
-        ASSERT_TRUE(opCtx->lockState()->isCollectionLockedForMode("test.t", MODE_IX));
+        ASSERT_TRUE(
+            opCtx->lockState()->isCollectionLockedForMode(NamespaceString("test.t"), MODE_IX));
         ASSERT_FALSE(opCtx->writesAreReplicated());
         ASSERT_TRUE(documentValidationDisabled(opCtx));
     };

@@ -32,7 +32,6 @@
 #include <boost/optional.hpp>
 #include <memory>
 
-#include "mongo/base/disallow_copying.h"
 #include "mongo/base/status.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/locker.h"
@@ -74,7 +73,8 @@ class UnreplicatedWritesBlock;
  * RecoveryUnit and to allow better invariant checking.
  */
 class OperationContext : public Interruptible, public Decorable<OperationContext> {
-    MONGO_DISALLOW_COPYING(OperationContext);
+    OperationContext(const OperationContext&) = delete;
+    OperationContext& operator=(const OperationContext&) = delete;
 
 public:
     OperationContext(Client* client, unsigned int opId);
@@ -237,6 +237,17 @@ public:
     }
 
     void markKillOnClientDisconnect();
+
+    /**
+     * Identifies the opCtx as an operation which is executing global shutdown.  This has the effect
+     * of masking any existing time limits, removing markKill-ability and is slightly stronger than
+     * code run under runWithoutInterruptionExceptAtGlobalShutdown, because it is also immune to
+     * global shutdown.
+     *
+     * This should only be called from the registered task of global shutdown and is not
+     * recoverable.
+     */
+    void setIsExecutingShutdown();
 
     /**
      * Marks this operation as killed so that subsequent calls to checkForInterrupt and
@@ -435,26 +446,7 @@ private:
     // once from OK to some kill code.
     AtomicWord<ErrorCodes::Error> _killCode{ErrorCodes::OK};
 
-    // A transport Baton associated with the operation. The presence of this object implies that a
-    // client thread is doing it's own async networking by blocking on it's own thread.
     BatonHandle _baton;
-
-    // If non-null, _waitMutex and _waitCV are the (mutex, condition variable) pair that the
-    // operation is currently waiting on inside a call to waitForConditionOrInterrupt...().
-    //
-    // _waitThread is the calling thread's thread id.
-    //
-    // All access guarded by the Client's lock.
-    stdx::mutex* _waitMutex = nullptr;
-    stdx::condition_variable* _waitCV = nullptr;
-    stdx::thread::id _waitThread;
-
-    // If _waitMutex and _waitCV are non-null, this is the number of threads in a call to markKilled
-    // actively attempting to kill the operation. If this value is non-zero, the operation is inside
-    // waitForConditionOrInterrupt...() and must stay there until _numKillers reaches 0.
-    //
-    // All access guarded by the Client's lock.
-    int _numKillers = 0;
 
     WriteConcernOptions _writeConcern;
 
@@ -466,6 +458,7 @@ private:
     bool _hasArtificialDeadline = false;
     bool _markKillOnClientDisconnect = false;
     Date_t _lastClientCheck;
+    bool _isExecutingShutdown = false;
 
     // Max operation time requested by the user or by the cursor in the case of a getMore with no
     // user-specified maxTime. This is tracked with microsecond granularity for the purpose of
@@ -486,7 +479,8 @@ namespace repl {
  * object is in scope.
  */
 class UnreplicatedWritesBlock {
-    MONGO_DISALLOW_COPYING(UnreplicatedWritesBlock);
+    UnreplicatedWritesBlock(const UnreplicatedWritesBlock&) = delete;
+    UnreplicatedWritesBlock& operator=(const UnreplicatedWritesBlock&) = delete;
 
 public:
     UnreplicatedWritesBlock(OperationContext* opCtx)

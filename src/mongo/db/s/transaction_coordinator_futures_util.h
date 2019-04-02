@@ -34,7 +34,6 @@
 #include "mongo/client/read_preference.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/executor/task_executor_pool.h"
-#include "mongo/s/grid.h"
 #include "mongo/s/shard_id.h"
 #include "mongo/util/concurrency/mutex.h"
 #include "mongo/util/future.h"
@@ -146,6 +145,15 @@ public:
      */
     void shutdown(Status status);
 
+    /**
+     * Blocking call, which will wait until any scheduled commands/tasks and child schedulers have
+     * drained.
+     *
+     * It is allowed to be called without calling shutdown, but in that case it the caller's
+     * responsibility to ensure that no new work gets scheduled.
+     */
+    void join();
+
 private:
     using ChildIteratorsList = std::list<AsyncWorkScheduler*>;
 
@@ -193,6 +201,8 @@ private:
     // child scheduler has been unregistered.
     stdx::condition_variable _allListsEmptyCV;
 };
+
+ShardId getLocalShardId(ServiceContext* service);
 
 enum class ShouldStopIteration { kYes, kNo };
 

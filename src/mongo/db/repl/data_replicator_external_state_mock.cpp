@@ -40,7 +40,8 @@ namespace repl {
 namespace {
 
 class OplogApplierMock : public OplogApplier {
-    MONGO_DISALLOW_COPYING(OplogApplierMock);
+    OplogApplierMock(const OplogApplierMock&) = delete;
+    OplogApplierMock& operator=(const OplogApplierMock&) = delete;
 
 public:
     OplogApplierMock(executor::TaskExecutor* executor,
@@ -77,12 +78,10 @@ OpTimeWithTerm DataReplicatorExternalStateMock::getCurrentTermAndLastCommittedOp
     return {currentTerm, lastCommittedOpTime};
 }
 
-void DataReplicatorExternalStateMock::processMetadata(
-    const rpc::ReplSetMetadata& replMetadata, boost::optional<rpc::OplogQueryMetadata> oqMetadata) {
+void DataReplicatorExternalStateMock::processMetadata(const rpc::ReplSetMetadata& replMetadata,
+                                                      rpc::OplogQueryMetadata oqMetadata) {
     replMetadataProcessed = replMetadata;
-    if (oqMetadata) {
-        oqMetadataProcessed = oqMetadata.get();
-    }
+    oqMetadataProcessed = oqMetadata;
     metadataWasProcessed = true;
 }
 

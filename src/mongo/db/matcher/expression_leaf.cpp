@@ -45,6 +45,7 @@
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/util/mongoutils/str.h"
+#include "mongo/util/regex_util.h"
 
 namespace mongo {
 
@@ -72,8 +73,8 @@ bool ComparisonMatchExpressionBase::equivalent(const MatchExpression* other) con
     return path() == realOther->path() && eltCmp.evaluate(_rhs == realOther->_rhs);
 }
 
-void ComparisonMatchExpressionBase::debugString(StringBuilder& debug, int level) const {
-    _debugAddSpace(debug, level);
+void ComparisonMatchExpressionBase::debugString(StringBuilder& debug, int indentationLevel) const {
+    _debugAddSpace(debug, indentationLevel);
     debug << path() << " " << name();
     debug << " " << _rhs.toString(false);
 
@@ -196,34 +197,13 @@ constexpr StringData LTEMatchExpression::kName;
 constexpr StringData GTMatchExpression::kName;
 constexpr StringData GTEMatchExpression::kName;
 
-// ---------------
-
-// TODO: move
-inline pcrecpp::RE_Options flags2options(const char* flags) {
-    pcrecpp::RE_Options options;
-    options.set_utf8(true);
-    while (flags && *flags) {
-        if (*flags == 'i')
-            options.set_caseless(true);
-        else if (*flags == 'm')
-            options.set_multiline(true);
-        else if (*flags == 'x')
-            options.set_extended(true);
-        else if (*flags == 's')
-            options.set_dotall(true);
-        flags++;
-    }
-    return options;
-}
-
 const std::set<char> RegexMatchExpression::kValidRegexFlags = {'i', 'm', 's', 'x'};
-constexpr size_t RegexMatchExpression::kMaxPatternSize;
 
 RegexMatchExpression::RegexMatchExpression(StringData path, const BSONElement& e)
     : LeafMatchExpression(REGEX, path),
       _regex(e.regex()),
       _flags(e.regexFlags()),
-      _re(new pcrecpp::RE(_regex.c_str(), flags2options(_flags.c_str()))) {
+      _re(new pcrecpp::RE(_regex.c_str(), regex_util::flags2PcreOptions(_flags, true))) {
     uassert(ErrorCodes::BadValue, "regex not a regex", e.type() == RegEx);
     _init();
 }
@@ -232,14 +212,11 @@ RegexMatchExpression::RegexMatchExpression(StringData path, StringData regex, St
     : LeafMatchExpression(REGEX, path),
       _regex(regex.toString()),
       _flags(options.toString()),
-      _re(new pcrecpp::RE(_regex.c_str(), flags2options(_flags.c_str()))) {
+      _re(new pcrecpp::RE(_regex.c_str(), regex_util::flags2PcreOptions(_flags, true))) {
     _init();
 }
 
 void RegexMatchExpression::_init() {
-    uassert(
-        ErrorCodes::BadValue, "Regular expression is too long", _regex.size() <= kMaxPatternSize);
-
     uassert(ErrorCodes::BadValue,
             "Regular expression cannot contain an embedded null byte",
             _regex.find('\0') == std::string::npos);
@@ -247,6 +224,10 @@ void RegexMatchExpression::_init() {
     uassert(ErrorCodes::BadValue,
             "Regular expression options string cannot contain an embedded null byte",
             _flags.find('\0') == std::string::npos);
+
+    uassert(51091,
+            str::stream() << "Regular expression is invalid: " << _re->error(),
+            _re->error().empty());
 }
 
 RegexMatchExpression::~RegexMatchExpression() {}
@@ -277,8 +258,8 @@ bool RegexMatchExpression::matchesSingleElement(const BSONElement& e, MatchDetai
     }
 }
 
-void RegexMatchExpression::debugString(StringBuilder& debug, int level) const {
-    _debugAddSpace(debug, level);
+void RegexMatchExpression::debugString(StringBuilder& debug, int indentationLevel) const {
+    _debugAddSpace(debug, indentationLevel);
     debug << path() << " regex /" << _regex << "/" << _flags;
 
     MatchExpression::TagData* td = getTag();
@@ -321,8 +302,8 @@ bool ModMatchExpression::matchesSingleElement(const BSONElement& e, MatchDetails
     return e.numberLong() % _divisor == _remainder;
 }
 
-void ModMatchExpression::debugString(StringBuilder& debug, int level) const {
-    _debugAddSpace(debug, level);
+void ModMatchExpression::debugString(StringBuilder& debug, int indentationLevel) const {
+    _debugAddSpace(debug, indentationLevel);
     debug << path() << " mod " << _divisor << " % x == " << _remainder;
     MatchExpression::TagData* td = getTag();
     if (NULL != td) {
@@ -355,8 +336,8 @@ bool ExistsMatchExpression::matchesSingleElement(const BSONElement& e,
     return !e.eoo();
 }
 
-void ExistsMatchExpression::debugString(StringBuilder& debug, int level) const {
-    _debugAddSpace(debug, level);
+void ExistsMatchExpression::debugString(StringBuilder& debug, int indentationLevel) const {
+    _debugAddSpace(debug, indentationLevel);
     debug << path() << " exists";
     MatchExpression::TagData* td = getTag();
     if (NULL != td) {
@@ -419,8 +400,8 @@ bool InMatchExpression::matchesSingleElement(const BSONElement& e, MatchDetails*
     return false;
 }
 
-void InMatchExpression::debugString(StringBuilder& debug, int level) const {
-    _debugAddSpace(debug, level);
+void InMatchExpression::debugString(StringBuilder& debug, int indentationLevel) const {
+    _debugAddSpace(debug, indentationLevel);
     debug << path() << " $in ";
     debug << "[ ";
     for (auto&& equality : _equalitySet) {
@@ -740,8 +721,8 @@ bool BitTestMatchExpression::matchesSingleElement(const BSONElement& e,
     return performBitTest(eValue);
 }
 
-void BitTestMatchExpression::debugString(StringBuilder& debug, int level) const {
-    _debugAddSpace(debug, level);
+void BitTestMatchExpression::debugString(StringBuilder& debug, int indentationLevel) const {
+    _debugAddSpace(debug, indentationLevel);
 
     debug << path() << " ";
 

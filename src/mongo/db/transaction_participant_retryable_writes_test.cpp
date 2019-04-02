@@ -87,10 +87,10 @@ repl::OplogEntry makeOplogEntry(repl::OpTime opTime,
 class OpObserverMock : public OpObserverNoop {
 public:
     void onTransactionPrepare(OperationContext* opCtx,
-                              const OplogSlot& prepareOpTime,
+                              const std::vector<OplogSlot>& reservedSlots,
                               std::vector<repl::ReplOperation>& statements) override {
         ASSERT_TRUE(opCtx->lockState()->inAWriteUnitOfWork());
-        OpObserverNoop::onTransactionPrepare(opCtx, prepareOpTime, statements);
+        OpObserverNoop::onTransactionPrepare(opCtx, reservedSlots, statements);
 
         uassert(ErrorCodes::OperationFailed,
                 "onTransactionPrepare() failed",
@@ -164,7 +164,7 @@ public:
 
 class TransactionParticipantRetryableWritesTest : public MockReplCoordServerFixture {
 protected:
-    void setUp() final {
+    void setUp() {
         MockReplCoordServerFixture::setUp();
 
         MongoDSessionCatalog::onStepUp(opCtx());
@@ -178,7 +178,7 @@ protected:
         _opContextSession.emplace(opCtx());
     }
 
-    void tearDown() final {
+    void tearDown() {
         _opContextSession.reset();
 
         MockReplCoordServerFixture::tearDown();
@@ -238,7 +238,7 @@ protected:
         const auto opTime =
             logOp(opCtx(), kNss, uuid, session->getSessionId(), txnNum, stmtId, prevOpTime);
         txnParticipant.onWriteOpCompletedOnPrimary(
-            opCtx(), txnNum, {stmtId}, opTime, Date_t::now(), txnState);
+            opCtx(), txnNum, {stmtId}, opTime, Date_t::now(), txnState, boost::none);
         wuow.commit();
 
         return opTime;
@@ -398,7 +398,7 @@ TEST_F(TransactionParticipantRetryableWritesTest, SessionTransactionsCollectionN
     const auto uuid = UUID::gen();
     const auto opTime = logOp(opCtx(), kNss, uuid, sessionId, txnNum, 0);
     ASSERT_THROWS(txnParticipant.onWriteOpCompletedOnPrimary(
-                      opCtx(), txnNum, {0}, opTime, Date_t::now(), boost::none),
+                      opCtx(), txnNum, {0}, opTime, Date_t::now(), boost::none, boost::none),
                   AssertionException);
 }
 
@@ -457,7 +457,7 @@ DEATH_TEST_F(TransactionParticipantRetryableWritesTest,
         WriteUnitOfWork wuow(opCtx());
         const auto opTime = logOp(opCtx(), kNss, uuid, sessionId, txnNum, 0);
         txnParticipant.onWriteOpCompletedOnPrimary(
-            opCtx(), txnNum, {0}, opTime, Date_t::now(), boost::none);
+            opCtx(), txnNum, {0}, opTime, Date_t::now(), boost::none, boost::none);
         wuow.commit();
     }
 
@@ -466,7 +466,7 @@ DEATH_TEST_F(TransactionParticipantRetryableWritesTest,
         WriteUnitOfWork wuow(opCtx());
         const auto opTime = logOp(opCtx(), kNss, uuid, sessionId, txnNum - 1, 0);
         txnParticipant.onWriteOpCompletedOnPrimary(
-            opCtx(), txnNum - 1, {0}, opTime, Date_t::now(), boost::none);
+            opCtx(), txnNum - 1, {0}, opTime, Date_t::now(), boost::none, boost::none);
     }
 }
 
@@ -486,7 +486,7 @@ DEATH_TEST_F(TransactionParticipantRetryableWritesTest,
 
     txnParticipant.invalidate(opCtx());
     txnParticipant.onWriteOpCompletedOnPrimary(
-        opCtx(), txnNum, {0}, opTime, Date_t::now(), boost::none);
+        opCtx(), txnNum, {0}, opTime, Date_t::now(), boost::none, boost::none);
 }
 
 TEST_F(TransactionParticipantRetryableWritesTest, IncompleteHistoryDueToOpLogTruncation) {
@@ -591,7 +591,7 @@ TEST_F(TransactionParticipantRetryableWritesTest, ErrorOnlyWhenStmtIdBeingChecke
                                   false /* inTxn */,
                                   OplogSlot());
         txnParticipant.onWriteOpCompletedOnPrimary(
-            opCtx(), txnNum, {1}, opTime, wallClockTime, boost::none);
+            opCtx(), txnNum, {1}, opTime, wallClockTime, boost::none, boost::none);
         wuow.commit();
 
         return opTime;
@@ -621,8 +621,13 @@ TEST_F(TransactionParticipantRetryableWritesTest, ErrorOnlyWhenStmtIdBeingChecke
                                   false /* inTxn */,
                                   OplogSlot());
 
-        txnParticipant.onWriteOpCompletedOnPrimary(
-            opCtx(), txnNum, {kIncompleteHistoryStmtId}, opTime, wallClockTime, boost::none);
+        txnParticipant.onWriteOpCompletedOnPrimary(opCtx(),
+                                                   txnNum,
+                                                   {kIncompleteHistoryStmtId},
+                                                   opTime,
+                                                   wallClockTime,
+                                                   boost::none,
+                                                   boost::none);
         wuow.commit();
     }
 
@@ -645,6 +650,60 @@ TEST_F(TransactionParticipantRetryableWritesTest, ErrorOnlyWhenStmtIdBeingChecke
     }
 
     ASSERT_THROWS(txnParticipant.checkStatementExecuted(opCtx(), 2), AssertionException);
+}
+
+/**
+ * Test fixture for a transaction participant running on a shard server.
+ */
+class ShardTxnParticipantRetryableWritesTest : public TransactionParticipantRetryableWritesTest {
+protected:
+    void setUp() final {
+        TransactionParticipantRetryableWritesTest::setUp();
+        serverGlobalParams.clusterRole = ClusterRole::ShardServer;
+    }
+
+    void tearDown() final {
+        serverGlobalParams.clusterRole = ClusterRole::None;
+        TransactionParticipantRetryableWritesTest::tearDown();
+    }
+};
+
+TEST_F(ShardTxnParticipantRetryableWritesTest,
+       RestartingTxnWithExecutedRetryableWriteShouldAssert) {
+    auto txnParticipant = TransactionParticipant::get(opCtx());
+    txnParticipant.refreshFromStorageIfNeeded(opCtx());
+
+    const auto& sessionId = *opCtx()->getLogicalSessionId();
+    const TxnNumber txnNum = 20;
+    const auto uuid = UUID::gen();
+
+    txnParticipant.beginOrContinue(opCtx(), txnNum, boost::none, boost::none);
+
+    {
+        AutoGetCollection autoColl(opCtx(), kNss, MODE_IX);
+        WriteUnitOfWork wuow(opCtx());
+        const auto opTime = logOp(opCtx(), kNss, uuid, sessionId, txnNum, 0);
+        txnParticipant.onWriteOpCompletedOnPrimary(
+            opCtx(), txnNum, {0}, opTime, Date_t::now(), boost::none, boost::none);
+        wuow.commit();
+    }
+
+    auto autocommit = false;
+    auto startTransaction = true;
+
+    ASSERT_THROWS_CODE(
+        txnParticipant.beginOrContinue(opCtx(), txnNum, autocommit, startTransaction),
+        AssertionException,
+        50911);
+
+    // Should have the same behavior after loading state from storage.
+    txnParticipant.invalidate(opCtx());
+    txnParticipant.refreshFromStorageIfNeeded(opCtx());
+
+    ASSERT_THROWS_CODE(
+        txnParticipant.beginOrContinue(opCtx(), txnNum, autocommit, startTransaction),
+        AssertionException,
+        50911);
 }
 
 }  // namespace

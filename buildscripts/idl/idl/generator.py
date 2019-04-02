@@ -760,8 +760,9 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
 
     def gen_known_fields_declaration(self):
         # type: () -> None
-        """Generate a known fields vector for a command."""
-        self._writer.write_line("static const std::vector<StringData> _knownFields;")
+        """Generate all the known fields vectors for a command."""
+        self._writer.write_line("static const std::vector<StringData> _knownBSONFields;")
+        self._writer.write_line("static const std::vector<StringData> _knownOP_MSGFields;")
         self.write_empty_line()
 
     def gen_comparison_operators_declarations(self, struct):
@@ -1264,6 +1265,7 @@ class _CppSourceFileWriter(_CppFileWriterBase):
     def _gen_constructor(self, struct, constructor, default_init):
         # type: (ast.Struct, struct_types.MethodInfo, bool) -> None
         """Generate the C++ constructor definition."""
+        # pylint: disable=too-many-branches
 
         initializers = ['_%s(std::move(%s))' % (arg.name, arg.name) for arg in constructor.args]
 
@@ -1284,6 +1286,12 @@ class _CppSourceFileWriter(_CppFileWriterBase):
         if [arg for arg in constructor.args if arg.name == 'nss']:
             if [field for field in struct.fields if field.serialize_op_msg_request_only]:
                 initializers.append('_dbName(nss.db().toString())')
+                initializes_db_name = True
+        elif [arg for arg in constructor.args if arg.name == 'nssOrUUID']:
+            if [field for field in struct.fields if field.serialize_op_msg_request_only]:
+                initializers.append(
+                    '_dbName(nssOrUUID.uuid() ? nssOrUUID.dbname() : nssOrUUID.nss().get().db().toString())'
+                )
                 initializes_db_name = True
 
         # Serialize has fields third
@@ -1435,10 +1443,13 @@ class _CppSourceFileWriter(_CppFileWriterBase):
                                                 (cpp_type_info.get_storage_type()))
                     self._writer.write_line('%s object(localCmdType);' %
                                             (common.title_case(struct.cpp_name)))
-                elif struct.namespace == common.COMMAND_NAMESPACE_CONCATENATE_WITH_DB:
+                elif struct.namespace in (common.COMMAND_NAMESPACE_CONCATENATE_WITH_DB,
+                                          common.COMMAND_NAMESPACE_CONCATENATE_WITH_DB_OR_UUID):
                     self._writer.write_line('NamespaceString localNS;')
                     self._writer.write_line('%s object(localNS);' %
                                             (common.title_case(struct.cpp_name)))
+                else:
+                    assert "Missing case"
             else:
                 self._writer.write_line('%s object;' % common.title_case(struct.cpp_name))
 
@@ -1756,9 +1767,10 @@ class _CppSourceFileWriter(_CppFileWriterBase):
 
         # Append passthrough elements
         if isinstance(struct, ast.Command):
+            known_name = "_knownOP_MSGFields" if is_op_msg_request else "_knownBSONFields"
             self._writer.write_line(
-                "IDLParserErrorContext::appendGenericCommandArguments(commandPassthroughFields, _knownFields, builder);"
-            )
+                "IDLParserErrorContext::appendGenericCommandArguments(commandPassthroughFields, %s, builder);"
+                % (known_name))
             self._writer.write_empty_line()
 
     def gen_bson_serializer_method(self, struct):
@@ -1871,17 +1883,17 @@ class _CppSourceFileWriter(_CppFileWriterBase):
         enum_type_info.gen_serializer_definition(self._writer)
         self._writer.write_empty_line()
 
-    def gen_known_fields_declaration(self, struct):
-        # type: (ast.Struct) -> None
-        """Generate the known fields declaration."""
-        if not isinstance(struct, ast.Command):
-            return
-
+    def _gen_known_fields_declaration(self, struct, name, include_op_msg_implicit):
+        # type: (ast.Struct, unicode, bool) -> None
+        """Generate the known fields declaration with specified name."""
         block_name = common.template_args(
-            'const std::vector<StringData> ${class_name}::_knownFields {',
+            'const std::vector<StringData> ${class_name}::_${name}Fields {', name=name,
             class_name=common.title_case(struct.cpp_name))
         with self._block(block_name, "};"):
-            sorted_fields = sorted([field for field in struct.fields], key=lambda f: f.cpp_name)
+            sorted_fields = sorted([
+                field for field in struct.fields
+                if (not field.serialize_op_msg_request_only or include_op_msg_implicit)
+            ], key=lambda f: f.cpp_name)
 
             for field in sorted_fields:
                 self._writer.write_line(
@@ -1892,6 +1904,15 @@ class _CppSourceFileWriter(_CppFileWriterBase):
             self._writer.write_line(
                 common.template_args('${class_name}::kCommandName,', class_name=common.title_case(
                     struct.cpp_name)))
+
+    def gen_known_fields_declaration(self, struct):
+        # type: (ast.Struct) -> None
+        """Generate the all the known fields declarations."""
+        if not isinstance(struct, ast.Command):
+            return
+
+        self._gen_known_fields_declaration(struct, "knownBSON", False)
+        self._gen_known_fields_declaration(struct, "knownOP_MSG", True)
 
     def _gen_server_parameter_specialized(self, param):
         # type: (ast.ServerParameter) -> None
@@ -1954,7 +1975,8 @@ class _CppSourceFileWriter(_CppFileWriterBase):
         if param.redact:
             self._writer.write_line('ret->setRedact();')
 
-        if param.default is not None:
+        if param.default and not (param.cpp_vartype and param.cpp_varname):
+            # Only need to call setValue() if we haven't in-place initialized the declared var.
             self._writer.write_line('uassertStatusOK(ret->setValue(%s));' %
                                     (_get_expression(param.default)))
 
@@ -2023,11 +2045,14 @@ class _CppSourceFileWriter(_CppFileWriterBase):
         vartype = ("moe::OptionTypeMap<moe::%s>::type" %
                    (opt.arg_vartype)) if opt.cpp_vartype is None else opt.cpp_vartype
 
+        # Mark option as coming from IDL autogenerated code.
+        usage = 'moe::OptionSection::OptionParserUsageType::IDLAutoGeneratedCode'
+
         with self._condition(opt.condition):
             with self._block(section, ';'):
                 self._writer.write_line(
                     common.template_format(
-                        '.addOptionChaining(${name}, ${short}, moe::${argtype}, ${desc}, ${deprname}, ${deprshortname})',
+                        '.addOptionChaining(${name}, ${short}, moe::${argtype}, ${desc}, ${deprname}, ${deprshortname}, ${usage})',
                         {
                             'name': _encaps(opt.name),
                             'short': _encaps(opt.short_name),
@@ -2035,6 +2060,7 @@ class _CppSourceFileWriter(_CppFileWriterBase):
                             'desc': _get_expression(opt.description),
                             'deprname': _encaps_list(opt.deprecated_name),
                             'deprshortname': _encaps_list(opt.deprecated_short_name),
+                            'usage': usage,
                         }))
                 self._writer.write_line('.setSources(moe::%s)' % (opt.source))
                 if opt.hidden:

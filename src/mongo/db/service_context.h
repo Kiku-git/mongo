@@ -33,7 +33,6 @@
 #include <functional>
 #include <vector>
 
-#include "mongo/base/disallow_copying.h"
 #include "mongo/base/global_initializer_registerer.h"
 #include "mongo/db/logical_session_id.h"
 #include "mongo/db/storage/storage_engine.h"
@@ -70,7 +69,8 @@ class TransportLayer;
  * including limitations on the lifetime of registered listeners.
  */
 class KillOpListenerInterface {
-    MONGO_DISALLOW_COPYING(KillOpListenerInterface);
+    KillOpListenerInterface(const KillOpListenerInterface&) = delete;
+    KillOpListenerInterface& operator=(const KillOpListenerInterface&) = delete;
 
 public:
     /**
@@ -95,7 +95,8 @@ protected:
  * zero or more Clients, which in turn each own OperationContexts.
  */
 class ServiceContext final : public Decorable<ServiceContext> {
-    MONGO_DISALLOW_COPYING(ServiceContext);
+    ServiceContext(const ServiceContext&) = delete;
+    ServiceContext& operator=(const ServiceContext&) = delete;
 
 public:
     /**
@@ -421,14 +422,6 @@ public:
      */
     void waitForStartupComplete();
 
-    /**
-     * Wait for all clients to complete and unregister themselves. Shutting-down, unmanaged threads
-     * may potentially be unable to acquire the service context mutex before the service context
-     * itself does on destruction.
-     * Used for testing.
-     */
-    void waitForClientsToFinish();
-
     /*
      * Marks initialization as complete and all transport layers as started.
      */
@@ -569,7 +562,6 @@ private:
      */
     std::vector<ClientObserverHolder> _clientObservers;
     ClientSet _clients;
-    stdx::condition_variable _clientsEmptyCondVar;
 
     /**
      * The registered OpObserver.

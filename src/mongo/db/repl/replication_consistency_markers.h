@@ -29,7 +29,6 @@
 
 #pragma once
 
-#include "mongo/base/disallow_copying.h"
 #include "mongo/db/namespace_string.h"
 
 namespace mongo {
@@ -75,7 +74,8 @@ class StorageInterface;
  * See below for explanations of each field.
  */
 class ReplicationConsistencyMarkers {
-    MONGO_DISALLOW_COPYING(ReplicationConsistencyMarkers);
+    ReplicationConsistencyMarkers(const ReplicationConsistencyMarkers&) = delete;
+    ReplicationConsistencyMarkers& operator=(const ReplicationConsistencyMarkers&) = delete;
 
 public:
     // Constructor and Destructor.
@@ -165,9 +165,12 @@ public:
     /**
      * The applied through point is a persistent record of which oplog entries we've applied.
      * If we crash while applying a batch of oplog entries, this OpTime tells us where to start
-     * applying operations on startup.
+     * applying operations on startup. If 'setTimestamp' is true, the write will be timestamped with
+     * the timestamp from 'optime'.
      */
-    virtual void setAppliedThrough(OperationContext* opCtx, const OpTime& optime) = 0;
+    virtual void setAppliedThrough(OperationContext* opCtx,
+                                   const OpTime& optime,
+                                   bool setTimestamp = true) = 0;
 
     /**
      * Unsets the applied through OpTime at the given 'writeTimestamp'.

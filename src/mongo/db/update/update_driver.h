@@ -39,6 +39,8 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/update/modifier_table.h"
+#include "mongo/db/update/object_replace_node.h"
+#include "mongo/db/update/update_node_visitor.h"
 #include "mongo/db/update/update_object_node.h"
 #include "mongo/db/update_index_data.h"
 
@@ -114,6 +116,14 @@ public:
                   bool* docWasModified = nullptr,
                   FieldRefSetWithStorage* modifiedPaths = nullptr);
 
+    /**
+     * Passes the visitor through to the root of the update tree. The visitor is responsible for
+     * implementing methods that operate on the nodes of the tree.
+     */
+    void visitRoot(UpdateNodeVisitor* visitor) {
+        _root->acceptVisitor(visitor);
+    }
+
     //
     // Accessors
     //
@@ -140,6 +150,15 @@ public:
 
     bool needMatchDetails() const {
         return _positional;
+    }
+
+    /**
+     * Serialize the update expression to BSON. Output of this method is expected to, when parsed,
+     * produce a logically equivalent update expression.
+     */
+    BSONObj serialize() const {
+        return _replacementMode ? static_cast<ObjectReplaceNode*>(_root.get())->serialize()
+                                : static_cast<UpdateObjectNode*>(_root.get())->serialize();
     }
 
     /**

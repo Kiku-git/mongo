@@ -35,6 +35,8 @@
 
 #include "mongo/db/catalog/database_catalog_entry.h"
 
+#include "mongo/db/namespace_string.h"
+
 namespace mongo {
 
 class KVStorageEngineInterface;
@@ -68,7 +70,7 @@ public:
                                 IndexCatalogEntry* index) override = 0;
 
     Status createCollection(OperationContext* opCtx,
-                            StringData ns,
+                            const NamespaceString& nss,
                             const CollectionOptions& options,
                             bool allocateDefaultSpace) override;
 
@@ -86,10 +88,6 @@ public:
     void reinitCollectionAfterRepair(OperationContext* opCtx, const std::string& ns);
 
 protected:
-    class AddCollectionChange;
-    class RemoveCollectionChange;
-    class RenameCollectionChange;
-
     typedef std::map<std::string, KVCollectionCatalogEntry*> CollectionMap;
 
 

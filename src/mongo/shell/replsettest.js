@@ -921,6 +921,23 @@ var ReplSetTest = function(opts) {
         }
     };
 
+    function replSetCommandWithRetry(master, cmd) {
+        printjson(cmd);
+        const cmdName = Object.keys(cmd)[0];
+        const errorMsg = `${cmdName} during initiate failed`;
+        assert.retry(() => {
+            const result = assert.commandWorkedOrFailedWithCode(
+                master.runCommand(cmd),
+                [
+                  ErrorCodes.NodeNotFound,
+                  ErrorCodes.NewReplicaSetConfigurationIncompatible,
+                  ErrorCodes.InterruptedDueToStepDown
+                ],
+                errorMsg);
+            return result.ok;
+        }, errorMsg, 3, 5 * 1000);
+    }
+
     /**
      * Runs replSetInitiate on the first node of the replica set.
      * Ensures that a primary is elected (not necessarily node 0).
@@ -953,9 +970,13 @@ var ReplSetTest = function(opts) {
         this._setDefaultConfigOptions(config);
 
         cmd[cmdKey] = config;
-        printjson(cmd);
 
-        assert.commandWorked(master.runCommand(cmd), tojson(cmd));
+        // replSetInitiate and replSetReconfig commands can fail with a NodeNotFound error if a
+        // heartbeat times out during the quorum check. They may also fail with
+        // NewReplicaSetConfigurationIncompatible on similar timeout during the config validation
+        // stage while deducing isSelf(). This can fail with an InterruptedDueToStepDown error when
+        // interrupted. We try several times, to reduce the chance of failing this way.
+        replSetCommandWithRetry(master, cmd);
         this.getPrimary();  // Blocks until there is a primary.
 
         // Reconfigure the set to contain the correct number of nodes (if necessary).
@@ -974,40 +995,7 @@ var ReplSetTest = function(opts) {
 
             cmd = {replSetReconfig: config};
             print("Reconfiguring replica set to add in other nodes");
-            printjson(cmd);
-
-            // replSetInitiate and replSetReconfig commands can fail with a NodeNotFound error
-            // if a heartbeat times out during the quorum check.
-            // They may also fail with NewReplicaSetConfigurationIncompatible on similar timeout
-            // during the config validation stage while deducing isSelf().
-            // This can fail with an InterruptedDueToStepDown error when interrupted.
-            // We retry three times to reduce the chance of failing this way.
-            assert.retry(() => {
-                var res;
-                try {
-                    res = master.runCommand(cmd);
-                    if (res.ok === 1) {
-                        return true;
-                    }
-                } catch (e) {
-                    // reconfig can lead to a stepdown if the primary looks for a majority before
-                    // a majority of nodes have successfully joined the set. If there is a stepdown
-                    // then the reconfig request will be killed and respond with a network error.
-                    if (isNetworkError(e)) {
-                        return true;
-                    }
-                    throw e;
-                }
-
-                assert.commandFailedWithCode(res,
-                                             [
-                                               ErrorCodes.NodeNotFound,
-                                               ErrorCodes.NewReplicaSetConfigurationIncompatible,
-                                               ErrorCodes.InterruptedDueToStepDown
-                                             ],
-                                             "replSetReconfig during initiate failed");
-                return false;
-            }, "replSetReconfig during initiate failed", 3, 5 * 1000);
+            replSetCommandWithRetry(master, cmd);
         }
 
         // Setup authentication if running test with authentication
@@ -1190,24 +1178,34 @@ var ReplSetTest = function(opts) {
     };
 
     /**
-     * Waits for the last oplog entry on the primary to be visible in the committed snapshop view
+     * Waits for the last oplog entry on the primary to be visible in the committed snapshot view
      * of the oplog on *all* secondaries. When majority read concern is disabled, there is no
      * committed snapshot view, so this function waits for the knowledge of the majority commit
      * point on each node to advance to the optime of the last oplog entry on the primary.
      * Returns last oplog entry.
      */
-    this.awaitLastOpCommitted = function(timeout) {
+    this.awaitLastOpCommitted = function(timeout, members) {
         var rst = this;
         var master = rst.getPrimary();
         var masterOpTime = _getLastOpTime(master);
 
-        print("Waiting for op with OpTime " + tojson(masterOpTime) +
-              " to be committed on all secondaries");
+        let membersToCheck;
+        if (members !== undefined) {
+            print("Waiting for op with OpTime " + tojson(masterOpTime) + " to be committed on " +
+                  members.map(s => s.host));
+
+            membersToCheck = members;
+        } else {
+            print("Waiting for op with OpTime " + tojson(masterOpTime) +
+                  " to be committed on all secondaries");
+
+            membersToCheck = rst.nodes;
+        }
 
         assert.soonNoExcept(
             function() {
-                for (var i = 0; i < rst.nodes.length; i++) {
-                    var node = rst.nodes[i];
+                for (var i = 0; i < membersToCheck.length; i++) {
+                    var node = membersToCheck[i];
 
                     // Continue if we're connected to an arbiter
                     var res = assert.commandWorked(node.adminCommand({replSetGetStatus: 1}));
@@ -1259,6 +1257,11 @@ var ReplSetTest = function(opts) {
                     "data": {"awaitLastStableRecoveryTimestamp": 1},
                     "writeConcern": {"w": "majority", "wtimeout": ReplSetTest.kDefaultTimeoutMS}
                 }));
+
+                // Perform a second write, in case some node had lost its sync source.
+                // TODO SERVER-40211: Remove the second write.
+                assert.commandWorked(db.adminCommand(
+                    {"appendOplogNote": 1, "data": {"awaitLastStableRecoveryTimestamp": 2}}));
             };
 
             // TODO(SERVER-14017): Remove this extra sub-shell in favor of a cleaner authentication
@@ -1354,6 +1357,10 @@ var ReplSetTest = function(opts) {
     // Wait until the optime of the specified type reaches the primary's last applied optime. Blocks
     // on all secondary nodes or just 'slaves', if specified.
     this.awaitReplication = function(timeout, secondaryOpTimeType, slaves) {
+        if (slaves !== undefined && slaves !== self._slaves) {
+            print("ReplSetTest awaitReplication: going to check only " + slaves.map(s => s.host));
+        }
+
         timeout = timeout || self.kDefaultTimeoutMS;
 
         secondaryOpTimeType = secondaryOpTimeType || ReplSetTest.OpTimeType.LAST_APPLIED;
@@ -2272,14 +2279,14 @@ var ReplSetTest = function(opts) {
         }
 
         // If restarting a node, use its existing options as the defaults.
+        var baseOptions;
         if ((options && options.restart) || restart) {
-            const existingOpts =
-                _useBridge ? _unbridgedNodes[n].fullOptions : this.nodes[n].fullOptions;
-            options = Object.merge(existingOpts, options);
+            baseOptions = _useBridge ? _unbridgedNodes[n].fullOptions : this.nodes[n].fullOptions;
         } else {
-            options = Object.merge(defaults, options);
+            baseOptions = defaults;
         }
-        options = Object.merge(options, this.nodeOptions["n" + n]);
+        baseOptions = Object.merge(baseOptions, this.nodeOptions["n" + n]);
+        options = Object.merge(baseOptions, options);
         delete options.rsConfig;
 
         options.restart = options.restart || restart;

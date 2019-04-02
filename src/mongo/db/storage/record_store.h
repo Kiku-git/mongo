@@ -239,7 +239,8 @@ public:
  * for MMAPv1 is this class not thread-safe.
  */
 class RecordStore {
-    MONGO_DISALLOW_COPYING(RecordStore);
+    RecordStore(const RecordStore&) = delete;
+    RecordStore& operator=(const RecordStore&) = delete;
 
 public:
     RecordStore(StringData ns) : _ns(ns.toString()) {}
@@ -513,15 +514,13 @@ public:
     }
 
     /**
-     * @return OK if the validate run successfully
-     *         OK will be returned even if corruption is found
-     *         deatils will be in result
+     * Performs record store specific validation to ensure consistency of underlying data
+     * structures. If corruption is found, details of the errors will be in the results parameter.
      */
-    virtual Status validate(OperationContext* opCtx,
-                            ValidateCmdLevel level,
-                            ValidateAdaptor* adaptor,
-                            ValidateResults* results,
-                            BSONObjBuilder* output) = 0;
+    virtual void validate(OperationContext* opCtx,
+                          ValidateCmdLevel level,
+                          ValidateResults* results,
+                          BSONObjBuilder* output) {}
 
     /**
      * @param scaleSize - amount by which to scale size metrics

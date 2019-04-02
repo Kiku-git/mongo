@@ -32,12 +32,6 @@
 #include "mongo/db/update/update_internal_node.h"
 
 namespace mongo {
-namespace {
-
-std::string toArrayFilterIdentifier(const std::string& fieldName) {
-    return "$[" + fieldName + "]";
-}
-}
 
 // static
 std::map<std::string, clonable_ptr<UpdateNode>> UpdateInternalNode::createUpdateNodeMapByMerging(
@@ -91,7 +85,7 @@ std::unique_ptr<UpdateNode> UpdateInternalNode::copyOrMergeAsNecessary(
     } else if (!rightNode) {
         return leftNode->clone();
     } else {
-        FieldRefTempAppend tempAppend(
+        FieldRef::FieldRefTempAppend tempAppend(
             *pathTaken,
             wrapFieldNameAsArrayFilterIdentifier ? toArrayFilterIdentifier(nextField) : nextField);
         return UpdateNode::createUpdateNodeByMerging(*leftNode, *rightNode, pathTaken);

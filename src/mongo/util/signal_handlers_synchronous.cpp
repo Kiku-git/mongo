@@ -42,7 +42,6 @@
 #include <streambuf>
 #include <typeinfo>
 
-#include "mongo/base/disallow_copying.h"
 #include "mongo/base/string_data.h"
 #include "mongo/logger/log_domain.h"
 #include "mongo/logger/logger.h"
@@ -94,7 +93,8 @@ void endProcessWithSignal(int signalNum) {
 
 // This should only be used with MallocFreeOSteam
 class MallocFreeStreambuf : public std::streambuf {
-    MONGO_DISALLOW_COPYING(MallocFreeStreambuf);
+    MallocFreeStreambuf(const MallocFreeStreambuf&) = delete;
+    MallocFreeStreambuf& operator=(const MallocFreeStreambuf&) = delete;
 
 public:
     MallocFreeStreambuf() {
@@ -114,7 +114,8 @@ private:
 };
 
 class MallocFreeOStream : public std::ostream {
-    MONGO_DISALLOW_COPYING(MallocFreeOStream);
+    MallocFreeOStream(const MallocFreeOStream&) = delete;
+    MallocFreeOStream& operator=(const MallocFreeOStream&) = delete;
 
 public:
     MallocFreeOStream() : std::ostream(&_buf) {}
@@ -286,10 +287,6 @@ void abruptQuitWithAddrSignal(int signalNum, siginfo_t* siginfo, void* ucontext_
 
 }  // namespace
 
-#if !defined(__has_feature)
-#define __has_feature(x) 0
-#endif
-
 void setupSynchronousSignalHandlers() {
     std::set_terminate(myTerminate);
     std::set_new_handler(reportOutOfMemoryErrorAndExit);
@@ -319,27 +316,7 @@ void setupSynchronousSignalHandlers() {
         // ^\ is the stronger ^C. Log and quit hard without waiting for cleanup.
         invariant(sigaction(SIGQUIT, &plainSignals, nullptr) == 0);
 
-#if __has_feature(address_sanitizer)
-        // Sanitizers may be configured to call abort(). If so, we should omit our signal handler.
-        bool shouldRegister = true;
-        constexpr std::array<StringData, 5> sanitizerConfigVariable{"ASAN_OPTIONS"_sd,
-                                                                    "TSAN_OPTIONS"_sd,
-                                                                    "MSAN_OPTIONS"_sd,
-                                                                    "UBSAN_OPTIONS"_sd,
-                                                                    "LSAN_OPTIONS"_sd};
-        for (const StringData& option : sanitizerConfigVariable) {
-            StringData configString(getenv(option.rawData()));
-            if (configString.find("abort_on_error=1") != std::string::npos ||
-                configString.find("abort_on_error=true") != std::string::npos) {
-                shouldRegister = false;
-            }
-        }
-        if (shouldRegister) {
-            invariant(sigaction(SIGABRT, &plainSignals, nullptr) == 0);
-        }
-#else
         invariant(sigaction(SIGABRT, &plainSignals, nullptr) == 0);
-#endif
     }
     {
         struct sigaction addrSignals;

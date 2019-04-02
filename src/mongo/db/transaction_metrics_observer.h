@@ -70,44 +70,26 @@ public:
     /**
      * Updates relevant metrics when a transaction commits. Also removes this transaction's oldest
      * oplog entry OpTime from the oldestActiveOplogEntryOpTimes set if it is not boost::none.
-     * Finally, updates an entry in oldestNonMajorityCommittedOpTimes to include its commit OpTime.
      */
     void onCommit(ServerTransactionsMetrics* serverTransactionsMetrics,
                   TickSource* tickSource,
                   boost::optional<repl::OpTime> oldestOplogEntryOpTime,
-                  boost::optional<repl::OpTime> commitOpTime,
                   Top* top,
                   bool wasPrepared);
 
     /**
-     * Updates relevant metrics when an active transaction aborts. Also removes this transaction's
-     * oldest oplog entry OpTime from the oldestActiveOplogEntryOpTimes set if it is not
-     * boost::none.
-     * Finally, updates an entry in oldestNonMajorityCommittedOpTimes to include its abort OpTime.
+     * Updates relevant metrics when a transaction aborts.
+     * See _onAbortActive() and _onAbortInactive().
      */
-    void onAbortActive(ServerTransactionsMetrics* serverTransactionsMetrics,
-                       TickSource* tickSource,
-                       boost::optional<repl::OpTime> oldestOplogEntryOpTime,
-                       boost::optional<repl::OpTime> abortOpTime,
-                       Top* top,
-                       bool wasPrepared);
+    void onAbort(ServerTransactionsMetrics* serverTransactionsMetrics,
+                 TickSource* tickSource,
+                 boost::optional<repl::OpTime> oldestOplogEntryOpTime,
+                 Top* top,
+                 bool wasPrepared);
 
     /**
-     * Updates relevant metrics when an inactive transaction aborts. Also removes this transaction's
-     * oldest oplog entry OpTime from the oldestActiveOplogEntryOpTimes set if it is not
-     * boost::none.
-     * Does not accept an optional abortOpTime parameter because we cannot abort an inactive
-     * prepared transaction. Instead, uses boost::none as the abortOpTime, which subsequently will
-     * not modify oldestNonMajorityCommittedOpTimes.
-     */
-    void onAbortInactive(ServerTransactionsMetrics* serverTransactionsMetrics,
-                         TickSource* tickSource,
-                         boost::optional<repl::OpTime> oldestOplogEntryOpTime,
-                         Top* top);
-
-    /**
-     * Adds the prepareOpTime, which is currently the Timestamp of the first oplog entry written by
-     * an active transaction, to the oldestActiveOplogEntryTS set.
+     * Adds the prepareOpTime, which is currently the OpTime of the first oplog entry written
+     * by an active transaction, to the oldestActiveOplogEntryOpTimes set.
      */
     void onPrepare(ServerTransactionsMetrics* serverTransactionsMetrics,
                    repl::OpTime prepareOpTime,
@@ -117,9 +99,9 @@ public:
      * Updates relevant metrics and storage statistics when an operation running on the transaction
      * completes. An operation may be a read/write operation, or an abort/commit command.
      */
-    void onTransactionOperation(Client* client,
+    void onTransactionOperation(OperationContext* opCtx,
                                 OpDebug::AdditiveMetrics additiveMetrics,
-                                std::shared_ptr<StorageStats> storageStats);
+                                bool isPrepared);
 
     /**
      * Returns a read-only reference to the SingleTransactionStats object stored in this
@@ -143,6 +125,31 @@ private:
                   TickSource::Tick curTick,
                   TickSource* tickSource,
                   Top* top);
+
+    /**
+     * Updates relevant metrics when an active transaction aborts. Also removes this transaction's
+     * oldest oplog entry OpTime from the oldestActiveOplogEntryOpTimes set if it is not
+     * boost::none.
+     * Finally, updates an entry in oldestNonMajorityCommittedOpTimes to include its abort OpTime.
+     */
+    void _onAbortActive(ServerTransactionsMetrics* serverTransactionsMetrics,
+                        TickSource* tickSource,
+                        boost::optional<repl::OpTime> oldestOplogEntryOpTime,
+                        Top* top,
+                        bool wasPrepared);
+
+    /**
+     * Updates relevant metrics when an inactive transaction aborts. Also removes this transaction's
+     * oldest oplog entry OpTime from the oldestActiveOplogEntryOpTimes set if it is not
+     * boost::none.
+     * Does not accept an optional abortOpTime parameter because we cannot abort an inactive
+     * prepared transaction. Instead, uses boost::none as the abortOpTime, which subsequently will
+     * not modify oldestNonMajorityCommittedOpTimes.
+     */
+    void _onAbortInactive(ServerTransactionsMetrics* serverTransactionsMetrics,
+                          TickSource* tickSource,
+                          boost::optional<repl::OpTime> oldestOplogEntryOpTime,
+                          Top* top);
 
     // Tracks metrics for a single multi-document transaction.
     SingleTransactionStats _singleTransactionStats;

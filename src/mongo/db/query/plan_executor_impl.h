@@ -32,13 +32,13 @@
 #include <boost/optional.hpp>
 #include <queue>
 
-#include "mongo/base/disallow_copying.h"
 #include "mongo/db/query/plan_executor.h"
 
 namespace mongo {
 
 class PlanExecutorImpl : public PlanExecutor {
-    MONGO_DISALLOW_COPYING(PlanExecutorImpl);
+    PlanExecutorImpl(const PlanExecutorImpl&) = delete;
+    PlanExecutorImpl& operator=(const PlanExecutorImpl&) = delete;
 
 public:
     /**
@@ -72,7 +72,6 @@ public:
     void markAsKilled(Status killStatus) final;
     void dispose(OperationContext* opCtx) final;
     void enqueue(const BSONObj& obj) final;
-    BSONObjSet getOutputSorts() const final;
     bool isMarkedAsKilled() const final;
     Status getKillStatus() final;
     bool isDisposed() const final;

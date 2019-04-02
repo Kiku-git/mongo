@@ -290,7 +290,7 @@ std::vector<BSONObj> IndexCatalogImpl::removeExistingIndexes(
 
 StatusWith<BSONObj> IndexCatalogImpl::createIndexOnEmptyCollection(OperationContext* opCtx,
                                                                    BSONObj spec) {
-    invariant(opCtx->lockState()->isCollectionLockedForMode(_collection->ns().toString(), MODE_X));
+    invariant(opCtx->lockState()->isCollectionLockedForMode(_collection->ns(), MODE_X));
     invariant(_collection->numRecords(opCtx) == 0,
               str::stream() << "Collection must be empty. Collection: " << _collection->ns()
                             << " UUID: "
@@ -361,7 +361,7 @@ Status _checkValidFilterExpressions(MatchExpression* expression, int level = 0) 
         default:
             return Status(ErrorCodes::CannotCreateIndex,
                           str::stream() << "unsupported expression in partial index: "
-                                        << expression->toString());
+                                        << expression->debugString());
     }
 }
 }  // namespace
@@ -678,7 +678,7 @@ Status IndexCatalogImpl::_doesSpecConflictWithExisting(OperationContext* opCtx,
         const IndexDescriptor* desc =
             findIndexByKeyPatternAndCollationSpec(opCtx, key, collation, findInProgressIndexes);
         if (desc) {
-            LOG(2) << "index already exists with diff name " << name << " pattern: " << key
+            LOG(2) << "Index already exists with a different name: " << name << " pattern: " << key
                    << " collation: " << collation;
 
             IndexDescriptor temp(_collection, _getAccessMethodName(key), spec);
@@ -688,8 +688,9 @@ Status IndexCatalogImpl::_doesSpecConflictWithExisting(OperationContext* opCtx,
                                             << " already exists with different options: "
                                             << desc->infoObj());
 
-            return Status(ErrorCodes::IndexAlreadyExists,
-                          str::stream() << "index already exists with different name: " << name);
+            return Status(ErrorCodes::IndexOptionsConflict,
+                          str::stream() << "Index with name: " << name
+                                        << " already exists with a different name");
         }
     }
 
@@ -738,9 +739,12 @@ BSONObj IndexCatalogImpl::getDefaultIdIndexSpec() const {
 void IndexCatalogImpl::dropAllIndexes(OperationContext* opCtx,
                                       bool includingIdIndex,
                                       stdx::function<void(const IndexDescriptor*)> onDropFn) {
-    invariant(opCtx->lockState()->isCollectionLockedForMode(_collection->ns().toString(), MODE_X));
+    invariant(opCtx->lockState()->isCollectionLockedForMode(_collection->ns(), MODE_X));
 
-    BackgroundOperation::assertNoBgOpInProgForNs(_collection->ns().ns());
+    uassert(ErrorCodes::BackgroundOperationInProgressForNamespace,
+            mongoutils::str::stream()
+                << "cannot perform operation: an index build is currently running",
+            !haveAnyIndexesInProgress());
 
     // make sure nothing in progress
     massert(17348,
@@ -812,9 +816,8 @@ void IndexCatalogImpl::dropAllIndexes(OperationContext* opCtx, bool includingIdI
 }
 
 Status IndexCatalogImpl::dropIndex(OperationContext* opCtx, const IndexDescriptor* desc) {
-    invariant(opCtx->lockState()->isCollectionLockedForMode(_collection->ns().toString(), MODE_X));
-    BackgroundOperation::assertNoBgOpInProgForNs(_collection->ns().ns());
-    invariant(_buildingIndexes.size() == 0);
+    invariant(opCtx->lockState()->isCollectionLockedForMode(_collection->ns(), MODE_X));
+    invariant(!haveAnyIndexesInProgress());
 
     IndexCatalogEntry* entry = _readyIndexes.find(desc);
 
@@ -960,6 +963,10 @@ bool IndexCatalogImpl::haveAnyIndexes() const {
     return _readyIndexes.size() > 0 || _buildingIndexes.size() > 0;
 }
 
+bool IndexCatalogImpl::haveAnyIndexesInProgress() const {
+    return _buildingIndexes.size() > 0;
+}
+
 int IndexCatalogImpl::numIndexesTotal(OperationContext* opCtx) const {
     int count = _readyIndexes.size() + _buildingIndexes.size() + _unfinishedIndexes.size();
     dassert(_collection->getCatalogEntry()->getTotalIndexCount(opCtx) == count);
@@ -987,6 +994,10 @@ int IndexCatalogImpl::numIndexesReady(OperationContext* opCtx) const {
             log() << "collection catalog reports: ";
             for (auto const& i : completedIndexes) {
                 log() << "  index: " << i;
+            }
+
+            if (_collection->uuid()) {
+                log() << "collection uuid: " << _collection->uuid();
             }
 
             invariant(itIndexes.size() == completedIndexes.size(),
@@ -1119,8 +1130,7 @@ std::vector<std::shared_ptr<const IndexCatalogEntry>> IndexCatalogImpl::getAllRe
 
 const IndexDescriptor* IndexCatalogImpl::refreshEntry(OperationContext* opCtx,
                                                       const IndexDescriptor* oldDesc) {
-    invariant(opCtx->lockState()->isCollectionLockedForMode(_collection->ns().ns(), MODE_X));
-    invariant(!BackgroundOperation::inProgForNs(_collection->ns()));
+    invariant(opCtx->lockState()->isCollectionLockedForMode(_collection->ns(), MODE_X));
     invariant(_buildingIndexes.size() == 0);
 
     const std::string indexName = oldDesc->indexName();

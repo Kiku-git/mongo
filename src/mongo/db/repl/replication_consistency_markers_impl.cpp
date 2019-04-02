@@ -144,7 +144,8 @@ void ReplicationConsistencyMarkersImpl::clearInitialSyncFlag(OperationContext* o
     LOG(3) << "clearing initial sync flag";
 
     auto replCoord = repl::ReplicationCoordinator::get(opCtx);
-    OpTime time = replCoord->getMyLastAppliedOpTime();
+    OpTimeAndWallTime opTimeAndWallTime = replCoord->getMyLastAppliedOpTimeAndWallTime();
+    const auto time = opTimeAndWallTime.opTime;
     TimestampedBSONObj update;
     update.obj = BSON("$unset" << kInitialSyncFlag << "$set"
                                << BSON(MinValidDocument::kMinValidTimestampFieldName
@@ -170,7 +171,7 @@ void ReplicationConsistencyMarkersImpl::clearInitialSyncFlag(OperationContext* o
 
     if (getGlobalServiceContext()->getStorageEngine()->isDurable()) {
         opCtx->recoveryUnit()->waitUntilDurable();
-        replCoord->setMyLastDurableOpTime(time);
+        replCoord->setMyLastDurableOpTimeAndWallTime(opTimeAndWallTime);
     }
 }
 
@@ -243,7 +244,8 @@ void ReplicationConsistencyMarkersImpl::setMinValidToAtLeast(OperationContext* o
 }
 
 void ReplicationConsistencyMarkersImpl::setAppliedThrough(OperationContext* opCtx,
-                                                          const OpTime& optime) {
+                                                          const OpTime& optime,
+                                                          bool setTimestamp) {
     invariant(!optime.isNull());
     LOG(3) << "setting appliedThrough to: " << optime.toString() << "(" << optime.toBSON() << ")";
 
@@ -251,7 +253,9 @@ void ReplicationConsistencyMarkersImpl::setAppliedThrough(OperationContext* opCt
     // in checkpoints that contain all writes through this timestamp since it indicates the top of
     // the oplog.
     TimestampedBSONObj update;
-    update.timestamp = optime.getTimestamp();
+    if (setTimestamp) {
+        update.timestamp = optime.getTimestamp();
+    }
     update.obj = BSON("$set" << BSON(MinValidDocument::kAppliedThroughFieldName << optime));
 
     _updateMinValidDocument(opCtx, update);

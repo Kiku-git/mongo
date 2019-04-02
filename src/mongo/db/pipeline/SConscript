@@ -140,6 +140,7 @@ env.Library(
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/query/datetime/date_time_support',
         '$BUILD_DIR/mongo/db/server_options_core',
+        '$BUILD_DIR/mongo/util/regex_util',
         '$BUILD_DIR/mongo/util/summation',
         'dependencies',
         'document_value',
@@ -316,6 +317,7 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/session_catalog',
         '$BUILD_DIR/mongo/db/storage/backup_cursor_hooks',
+        '$BUILD_DIR/mongo/db/transaction',
     ],
 )
 
@@ -325,6 +327,7 @@ env.Library(
         'process_interface_shardsvr.cpp',
     ],
     LIBDEPS=[
+        '$BUILD_DIR/mongo/db/transaction',
         '$BUILD_DIR/mongo/s/sharding_api',
         'process_interface_standalone',
         'sharded_agg_helpers',
@@ -403,7 +406,6 @@ pipelineeEnv.Library(
         'document_source_sort_by_count.cpp',
         'document_source_tee_consumer.cpp',
         'document_source_unwind.cpp',
-        'document_source_watch_for_uuid.cpp',
         'pipeline.cpp',
         'sequential_document_cache.cpp',
         'stage_constraints.cpp',
@@ -593,6 +595,7 @@ env.Library(
         env.Idlc('document_source_list_sessions.idl')[0],
         env.Idlc('document_source_out.idl')[0],
         env.Idlc('exchange_spec.idl')[0],
+        env.Idlc('runtime_constants.idl')[0],
         'resume_token.cpp',
     ],
     LIBDEPS=[

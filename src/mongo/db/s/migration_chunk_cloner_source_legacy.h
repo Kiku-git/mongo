@@ -55,7 +55,8 @@ class Database;
 class RecordId;
 
 class MigrationChunkClonerSourceLegacy final : public MigrationChunkClonerSource {
-    MONGO_DISALLOW_COPYING(MigrationChunkClonerSourceLegacy);
+    MigrationChunkClonerSourceLegacy(const MigrationChunkClonerSourceLegacy&) = delete;
+    MigrationChunkClonerSourceLegacy& operator=(const MigrationChunkClonerSourceLegacy&) = delete;
 
 public:
     MigrationChunkClonerSourceLegacy(MoveChunkRequest request,
@@ -75,30 +76,19 @@ public:
 
     bool isDocumentInMigratingChunk(const BSONObj& doc) override;
 
-
-    /**
-     * For the following operation handlers:
-     *
-     * If 'fromPreparedTransactionCommit' is true, the cloner will immediately apply the operation
-     * instead of registering it with the RecoveryUnit's onCommitHandler. If 'fromPrepareCommit'
-     * is true, this implies the operation was already committed to storage.
-     */
     void onInsertOp(OperationContext* opCtx,
                     const BSONObj& insertedDoc,
-                    const repl::OpTime& opTime,
-                    const bool fromPreparedTransactionCommit) override;
+                    const repl::OpTime& opTime) override;
 
     void onUpdateOp(OperationContext* opCtx,
                     const BSONObj& updatedDoc,
                     const repl::OpTime& opTime,
-                    const repl::OpTime& prePostImageOpTime,
-                    const bool fromPreparedTransactionCommit) override;
+                    const repl::OpTime& prePostImageOpTime) override;
 
     void onDeleteOp(OperationContext* opCtx,
                     const BSONObj& deletedDocId,
                     const repl::OpTime& opTime,
-                    const repl::OpTime& preImageOpTime,
-                    const bool fromPreparedTransactionCommit) override;
+                    const repl::OpTime& preImageOpTime) override;
 
     // Legacy cloner specific functionality
 
@@ -174,6 +164,16 @@ public:
      */
     boost::optional<repl::OpTime> nextSessionMigrationBatch(OperationContext* opCtx,
                                                             BSONArrayBuilder* arrBuilder);
+
+    /**
+     * Returns a notification that can be used to wait for new oplog that needs to be migrated.
+     * If the value in the notification returns true, it means that there are no more new batches
+     * that needs to be fetched because the migration has already entered the critical section or
+     * aborted.
+     *
+     * Returns nullptr if there is no session migration associated with this migration.
+     */
+    std::shared_ptr<Notification<bool>> getNotificationForNextSessionMigrationBatch();
 
 private:
     friend class LogOpForShardingHandler;

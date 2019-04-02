@@ -29,7 +29,6 @@
 
 #pragma once
 
-#include "mongo/base/disallow_copying.h"
 #include "mongo/base/status_with.h"
 #include "mongo/db/repl/multiapplier.h"
 #include "mongo/db/repl/oplog_applier.h"
@@ -66,7 +65,8 @@ using OpTimeWithTerm = OpTimeWith<long long>;
  * InitialSyncer should be moved here.
  */
 class DataReplicatorExternalState {
-    MONGO_DISALLOW_COPYING(DataReplicatorExternalState);
+    DataReplicatorExternalState(const DataReplicatorExternalState&) = delete;
+    DataReplicatorExternalState& operator=(const DataReplicatorExternalState&) = delete;
 
 public:
     DataReplicatorExternalState() = default;
@@ -86,11 +86,9 @@ public:
 
     /**
      * Forwards the parsed metadata in the query results to the replication system.
-     *
-     * TODO (SERVER-27668): Make OplogQueryMetadata non-optional in mongodb 3.8.
      */
     virtual void processMetadata(const rpc::ReplSetMetadata& replMetadata,
-                                 boost::optional<rpc::OplogQueryMetadata> oqMetadata) = 0;
+                                 rpc::OplogQueryMetadata oqMetadata) = 0;
 
     /**
      * Evaluates quality of sync source. Accepts the current sync source; the last optime on this

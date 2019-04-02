@@ -63,7 +63,8 @@ class MozJSImplScope;
  *
  */
 class MozJSProxyScope final : public Scope {
-    MONGO_DISALLOW_COPYING(MozJSProxyScope);
+    MozJSProxyScope(const MozJSProxyScope&) = delete;
+    MozJSProxyScope& operator=(const MozJSProxyScope&) = delete;
 
     /**
      * The FSM is fairly tight:
@@ -180,7 +181,7 @@ private:
     void run(Closure&& closure);
 
     template <typename Closure>
-    void runWithoutInterruption(Closure&& closure);
+    void runWithoutInterruptionExceptAtGlobalShutdown(Closure&& closure);
 
     void runOnImplThread(unique_function<void()> f);
 
@@ -200,7 +201,8 @@ private:
     Status _status;
     OperationContext* _opCtx = nullptr;
 
-    stdx::condition_variable _condvar;
+    stdx::condition_variable _proxyCondvar;
+    stdx::condition_variable _implCondvar;
     PRThread* _thread;
 };
 

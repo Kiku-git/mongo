@@ -31,7 +31,6 @@
 
 #include <string>
 
-#include "mongo/base/disallow_copying.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/collection_options.h"
@@ -309,12 +308,13 @@ public:
      * The onTransactionPrepare method is called when an atomic transaction is prepared. It must be
      * called when a transaction is active.
      *
-     * The 'prepareOpTime' is passed in to be used as the OpTime of the oplog entry.
+     * 'reservedSlots' is a list of oplog slots reserved for the oplog entries in a transaction. The
+     * last reserved slot represents the prepareOpTime used for the prepare oplog entry.
      *
      * The 'statements' are the list of CRUD operations to be applied in this transaction.
      */
     virtual void onTransactionPrepare(OperationContext* opCtx,
-                                      const OplogSlot& prepareOpTime,
+                                      const std::vector<OplogSlot>& reservedSlots,
                                       std::vector<repl::ReplOperation>& statements) = 0;
 
     /**

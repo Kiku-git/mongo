@@ -128,13 +128,8 @@ TEST_F(DatabaseTest, SetDropPendingThrowsExceptionIfDatabaseIsAlreadyInADropPend
         db->setDropPending(_opCtx.get(), true);
         ASSERT_TRUE(db->isDropPending(_opCtx.get()));
 
-        ASSERT_THROWS_CODE_AND_WHAT(
-            db->setDropPending(_opCtx.get(), true),
-            AssertionException,
-            ErrorCodes::DatabaseDropPending,
-            (StringBuilder() << "Unable to drop database " << _nss.db()
-                             << " because it is already in the process of being dropped.")
-                .stringData());
+        db->setDropPending(_opCtx.get(), true);
+        ASSERT_TRUE(db->isDropPending(_opCtx.get()));
 
         db->setDropPending(_opCtx.get(), false);
         ASSERT_FALSE(db->isDropPending(_opCtx.get()));
@@ -324,7 +319,9 @@ void _testDropCollectionThrowsExceptionIfThereAreIndexesInProgress(OperationCont
         ASSERT_GREATER_THAN(indexCatalog->numIndexesInProgress(opCtx), 0);
 
         WriteUnitOfWork wuow(opCtx);
-        ASSERT_THROWS_CODE(db->dropCollection(opCtx, nss.ns()), AssertionException, 40461);
+        ASSERT_THROWS_CODE(db->dropCollection(opCtx, nss.ns()),
+                           AssertionException,
+                           ErrorCodes::BackgroundOperationInProgressForNamespace);
     });
 }
 
@@ -508,7 +505,7 @@ TEST_F(DatabaseTest, AutoGetCollectionForReadCommandSucceedsWithDeadlineNow) {
     Lock::DBLock dbLock(_opCtx.get(), nss.db(), MODE_X);
     ASSERT(_opCtx.get()->lockState()->isDbLockedForMode(nss.db(), MODE_X));
     Lock::CollectionLock collLock(_opCtx.get()->lockState(), nss.toString(), MODE_X);
-    ASSERT(_opCtx.get()->lockState()->isCollectionLockedForMode(nss.toString(), MODE_X));
+    ASSERT(_opCtx.get()->lockState()->isCollectionLockedForMode(nss, MODE_X));
     try {
         AutoGetCollectionForReadCommand db(
             _opCtx.get(), nss, AutoGetCollection::kViewsForbidden, Date_t::now());
@@ -522,7 +519,7 @@ TEST_F(DatabaseTest, AutoGetCollectionForReadCommandSucceedsWithDeadlineMin) {
     Lock::DBLock dbLock(_opCtx.get(), nss.db(), MODE_X);
     ASSERT(_opCtx.get()->lockState()->isDbLockedForMode(nss.db(), MODE_X));
     Lock::CollectionLock collLock(_opCtx.get()->lockState(), nss.toString(), MODE_X);
-    ASSERT(_opCtx.get()->lockState()->isCollectionLockedForMode(nss.toString(), MODE_X));
+    ASSERT(_opCtx.get()->lockState()->isCollectionLockedForMode(nss, MODE_X));
     try {
         AutoGetCollectionForReadCommand db(
             _opCtx.get(), nss, AutoGetCollection::kViewsForbidden, Date_t());

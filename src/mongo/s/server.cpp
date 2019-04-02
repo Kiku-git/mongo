@@ -199,6 +199,8 @@ void cleanupTask(ServiceContext* serviceContext) {
             opCtx = uniqueTxn.get();
         }
 
+        opCtx->setIsExecutingShutdown();
+
         if (serviceContext) {
             serviceContext->setKillAllOperations();
 
@@ -226,6 +228,10 @@ void cleanupTask(ServiceContext* serviceContext) {
 
         if (auto catalog = Grid::get(opCtx)->catalogClient()) {
             catalog->shutDown(opCtx);
+        }
+
+        if (auto shardRegistry = Grid::get(opCtx)->shardRegistry()) {
+            shardRegistry->shutdown();
         }
 
 #if __has_feature(address_sanitizer)

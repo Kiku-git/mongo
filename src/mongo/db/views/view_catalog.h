@@ -50,6 +50,7 @@
 
 namespace mongo {
 class OperationContext;
+class Database;
 
 /**
  * In-memory data structure for view definitions. This data structure is thread-safe -- this is
@@ -59,13 +60,18 @@ class OperationContext;
  * views catalog collection if necessary, throwing if the refresh fails.
  */
 class ViewCatalog {
-    MONGO_DISALLOW_COPYING(ViewCatalog);
+    ViewCatalog(const ViewCatalog&) = delete;
+    ViewCatalog& operator=(const ViewCatalog&) = delete;
 
 public:
     using ViewMap = StringMap<std::shared_ptr<ViewDefinition>>;
     using ViewIteratorCallback = stdx::function<void(const ViewDefinition& view)>;
 
-    explicit ViewCatalog(DurableViewCatalog* durable) : _durable(durable) {}
+    static ViewCatalog* get(const Database* db);
+    static void set(Database* db, std::unique_ptr<ViewCatalog> catalog);
+
+    explicit ViewCatalog(std::unique_ptr<DurableViewCatalog> durable)
+        : _durable(std::move(durable)) {}
 
     /**
      * Iterates through the catalog, applying 'callback' to each view. This callback function
@@ -176,7 +182,7 @@ private:
 
     stdx::mutex _mutex;  // Protects all members, except for _valid.
     ViewMap _viewMap;
-    DurableViewCatalog* _durable;
+    std::unique_ptr<DurableViewCatalog> _durable;
     AtomicWord<bool> _valid;
     ViewGraph _viewGraph;
     bool _viewGraphNeedsRefresh = true;  // Defers initializing the graph until the first insert.

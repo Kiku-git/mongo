@@ -34,6 +34,7 @@
 #include "mongo/db/client.h"
 #include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/repl/replication_coordinator_impl.h"
 #include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/executor/network_interface_mock.h"
 #include "mongo/executor/task_executor.h"
@@ -102,6 +103,25 @@ protected:
      */
     ReplicationCoordinatorImpl* getReplCoord() {
         return _repl.get();
+    }
+
+    void replCoordSetMyLastAppliedOpTime(const OpTime& opTime, Date_t wallTime = Date_t::min()) {
+        getReplCoord()->setMyLastAppliedOpTimeAndWallTime({opTime, wallTime});
+    }
+
+    void replCoordSetMyLastAppliedOpTimeForward(const OpTime& opTime,
+                                                ReplicationCoordinator::DataConsistency consistency,
+                                                Date_t wallTime = Date_t::min()) {
+        getReplCoord()->setMyLastAppliedOpTimeAndWallTimeForward({opTime, wallTime}, consistency);
+    }
+
+    void replCoordSetMyLastDurableOpTime(const OpTime& opTime, Date_t wallTime = Date_t::min()) {
+        getReplCoord()->setMyLastDurableOpTimeAndWallTime({opTime, wallTime});
+    }
+
+    void replCoordSetMyLastDurableOpTimeForward(const OpTime& opTime,
+                                                Date_t wallTime = Date_t::min()) {
+        getReplCoord()->setMyLastDurableOpTimeAndWallTimeForward({opTime, wallTime});
     }
 
     /**

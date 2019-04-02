@@ -19,7 +19,7 @@
             // Load the prepare helpers to be called in the parallel shell.
             load('jstests/core/txns/libs/prepare_helpers.js');
             const prepareTimestamp = PrepareHelpers.prepareTransaction(session);
-            PrepareHelpers.commitTransactionAfterPrepareTS(session, prepareTimestamp);
+            PrepareHelpers.commitTransaction(session, prepareTimestamp);
         } else {
             session.commitTransaction();
         }
@@ -104,8 +104,6 @@
     // This will make the transaction hang.
     assert.commandWorked(testDB.adminCommand(
         {configureFailPoint: 'hangAfterSettingPrepareStartTime', mode: 'alwaysOn'}));
-    assert.commandWorked(
-        testDB.adminCommand({setParameter: 1, internalQueryExecYieldIterations: 1}));
 
     let timeBeforeTransactionStarts = new ISODate();
     let isPrepared = true;
@@ -150,8 +148,8 @@
     res = assert.commandWorked(testDB.runCommand({insert: collName, documents: [{x: 1}]}));
 
     // This will make the transaction hang.
-    assert.commandWorked(testDB.adminCommand(
-        {configureFailPoint: 'setInterruptOnlyPlansCheckForInterruptHang', mode: 'alwaysOn'}));
+    assert.commandWorked(
+        testDB.adminCommand({configureFailPoint: 'hangDuringBatchUpdate', mode: 'alwaysOn'}));
 
     timeBeforeTransactionStarts = new ISODate();
     isPrepared = false;
@@ -186,8 +184,8 @@
                          timeBeforeCurrentOp);
 
     // Now the transaction can proceed.
-    assert.commandWorked(testDB.adminCommand(
-        {configureFailPoint: 'setInterruptOnlyPlansCheckForInterruptHang', mode: 'off'}));
+    assert.commandWorked(
+        testDB.adminCommand({configureFailPoint: 'hangDuringBatchUpdate', mode: 'off'}));
     joinTransaction();
 
     rst.stopSet();

@@ -29,6 +29,7 @@
 
 #pragma once
 
+#include "mongo/base/string_data.h"
 #include "mongo/db/update/modifier_node.h"
 #include "mongo/stdx/memory.h"
 
@@ -49,6 +50,12 @@ public:
 
     void setCollator(const CollatorInterface* collator) final {}
 
+    void acceptVisitor(UpdateNodeVisitor* visitor) final {
+        visitor->visit(this);
+    }
+
+    BSONElement val;
+
 protected:
     ModifyResult updateExistingElement(mutablebson::Element* element,
                                        std::shared_ptr<FieldRef> elementPath) const final;
@@ -63,7 +70,13 @@ protected:
     }
 
 private:
-    BSONElement _val;
+    StringData operatorName() const final {
+        return context == Context::kAll ? "$set" : "$setOnInsert";
+    }
+
+    BSONObj operatorValue() const final {
+        return BSON("" << val);
+    }
 };
 
 }  // namespace mongo

@@ -95,8 +95,8 @@ protected:
     OplogEntry insert(const BSONObj& obj);
     template <class IdType>
     OplogEntry update(IdType _id, const BSONObj& obj);
-    OplogEntry buildIndex(const BSONObj& indexSpec, const BSONObj& options, UUID uuid);
-    OplogEntry dropIndex(const std::string& indexName);
+    OplogEntry buildIndex(const BSONObj& indexSpec, const BSONObj& options, const UUID& uuid);
+    OplogEntry dropIndex(const std::string& indexName, const UUID& uuid);
     virtual Status resetState();
 
     /**
@@ -156,17 +156,28 @@ OplogEntry makeCommandOplogEntry(OpTime opTime,
                                  const BSONObj& command,
                                  boost::optional<UUID> uuid = boost::none);
 
+OplogEntry makeCommandOplogEntryWithSessionInfoAndStmtId(
+    OpTime opTime,
+    const NamespaceString& nss,
+    const BSONObj& command,
+    LogicalSessionId lsid,
+    TxnNumber txnNum,
+    StmtId stmtId,
+    boost::optional<OpTime> prevOpTime = boost::none);
+
 OplogEntry makeInsertDocumentOplogEntryWithSessionInfo(OpTime opTime,
                                                        const NamespaceString& nss,
                                                        const BSONObj& documentToInsert,
                                                        OperationSessionInfo info);
 
-OplogEntry makeInsertDocumentOplogEntryWithSessionInfoAndStmtId(OpTime opTime,
-                                                                const NamespaceString& nss,
-                                                                const BSONObj& documentToInsert,
-                                                                LogicalSessionId lsid,
-                                                                TxnNumber txnNum,
-                                                                StmtId stmtId);
-
+OplogEntry makeInsertDocumentOplogEntryWithSessionInfoAndStmtId(
+    OpTime opTime,
+    const NamespaceString& nss,
+    boost::optional<UUID> uuid,
+    const BSONObj& documentToInsert,
+    LogicalSessionId lsid,
+    TxnNumber txnNum,
+    StmtId stmtId,
+    boost::optional<OpTime> prevOpTime = boost::none);
 }  // namespace repl
 }  // namespace mongo

@@ -39,7 +39,8 @@ namespace mongo {
  * Container for server-wide statistics on writeConcern levels used by operations.
  */
 class ServerWriteConcernMetrics {
-    MONGO_DISALLOW_COPYING(ServerWriteConcernMetrics);
+    ServerWriteConcernMetrics(const ServerWriteConcernMetrics&) = delete;
+    ServerWriteConcernMetrics& operator=(const ServerWriteConcernMetrics&) = delete;
 
 public:
     ServerWriteConcernMetrics() = default;
@@ -83,16 +84,16 @@ private:
         void toBSON(BSONObjBuilder* builder) const;
 
         // Count of operations with writeConcern w:"majority".
-        long long wMajorityCount = 0;
+        std::uint64_t wMajorityCount = 0;
 
         // Count of operations without a writeConcern "w" value.
-        long long noWCount = 0;
+        std::uint64_t noWCount = 0;
 
         // Counts of operations with writeConcern w:<num>.
-        std::map<int, long long> wNumCounts;
+        std::map<int, std::uint64_t> wNumCounts;
 
         // Counts of operations with writeConcern w:"tag".
-        StringMap<long long> wTagCounts;
+        StringMap<std::uint64_t> wTagCounts;
     };
 
     mutable stdx::mutex _mutex;

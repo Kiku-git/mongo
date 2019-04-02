@@ -121,7 +121,7 @@ Status _authenticateX509(OperationContext* opCtx, const UserName& user, const BS
                 }
             }
 
-            authorizationSession->grantInternalAuthorization();
+            authorizationSession->grantInternalAuthorization(client);
         }
         // Handle normal client authentication, only applies to client-server connections
         else {
@@ -285,8 +285,7 @@ bool CmdAuthenticate::run(OperationContext* opCtx,
     if (!status.isOK()) {
         if (!serverGlobalParams.quiet.load()) {
             auto const client = opCtx->getClient();
-            log() << "Failed to authenticate " << user
-                  << (client->hasRemote() ? (" from client " + client->getRemote().toString()) : "")
+            log() << "Failed to authenticate " << user << " from client " << client->getRemote()
                   << " with mechanism " << mechanism << ": " << status;
         }
         sleepmillis(saslGlobalParams.authFailedDelay.load());
@@ -299,6 +298,12 @@ bool CmdAuthenticate::run(OperationContext* opCtx,
         }
         return false;
     }
+
+    if (!serverGlobalParams.quiet.load()) {
+        log() << "Successfully authenticated as principal " << user.getUser() << " on "
+              << user.getDB() << " from client " << opCtx->getClient()->session()->remote();
+    }
+
     result.append("dbname", user.getDB());
     result.append("user", user.getUser());
     return true;
@@ -336,14 +341,14 @@ public:
              const BSONObj& cmdObj,
              BSONObjBuilder& result) {
         AuthorizationSession* authSession = AuthorizationSession::get(Client::getCurrent());
-        authSession->logoutDatabase(dbname);
+        authSession->logoutDatabase(opCtx, dbname);
         if (getTestCommandsEnabled() && dbname == "admin") {
             // Allows logging out as the internal user against the admin database, however
             // this actually logs out of the local database as well. This is to
             // support the auth passthrough test framework on mongos (since you can't use the
             // local database on a mongos, so you can't logout as the internal user
             // without this).
-            authSession->logoutDatabase("local");
+            authSession->logoutDatabase(opCtx, "local");
         }
         return true;
     }

@@ -52,6 +52,16 @@ env.Library(
     ],
 )
 
+env.Library(
+    target='regex_util',
+    source= [
+        'regex_util.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+    ],
+)
+
 debuggerEnv = env.Clone()
 if has_option("gdbserver"):
     debuggerEnv.Append(CPPDEFINES=["USE_GDBSERVER"])
@@ -374,7 +384,7 @@ env.CppUnitTest(
     ],
 )
 
-if env['MONGO_ALLOCATOR'] == 'tcmalloc':
+if env['MONGO_ALLOCATOR'] in ['tcmalloc', 'tcmalloc-experimental']:
     tcmspEnv = env.Clone()
 
     if not use_system_version_of_library('tcmalloc'):
@@ -404,7 +414,6 @@ if env['MONGO_ALLOCATOR'] == 'tcmalloc':
             'heap_profiler.cpp',
         ],
         LIBDEPS=[
-            '$BUILD_DIR/mongo/db/server_parameters',
             '$BUILD_DIR/mongo/transport/service_executor',
         ],
         LIBDEPS_PRIVATE=[

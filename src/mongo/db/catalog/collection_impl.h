@@ -224,6 +224,9 @@ public:
      * removes all documents as fast as possible
      * indexes before and after will be the same
      * as will other characteristics
+     *
+     * The caller should hold a collection X lock and ensure there are no index builds in progress
+     * on the collection.
      */
     Status truncate(OperationContext* opCtx) final;
 
@@ -252,6 +255,9 @@ public:
      * collection.  The collection cannot be completely emptied using this
      * function.  An assertion will be thrown if that is attempted.
      * @param inclusive - Truncate 'end' as well iff true
+     *
+     * The caller should hold a collection X lock and ensure there are no index builds in progress
+     * on the collection.
      */
     void cappedTruncateAfter(OperationContext* opCtx, RecordId end, bool inclusive) final;
 
@@ -331,9 +337,11 @@ public:
         return _minVisibleSnapshot;
     }
 
-    void setMinimumVisibleSnapshot(Timestamp name) final {
-        _minVisibleSnapshot = name;
-    }
+    /**
+     * Updates the minimum visible snapshot. The 'newMinimumVisibleSnapshot' is ignored if it would
+     * set the minimum visible snapshot backwards in time.
+     */
+    void setMinimumVisibleSnapshot(Timestamp newMinimumVisibleSnapshot) final;
 
     bool haveCappedWaiters() final;
 

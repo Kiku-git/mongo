@@ -32,7 +32,6 @@
 #include <boost/optional.hpp>
 #include <string>
 
-#include "mongo/base/disallow_copying.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/stdx/functional.h"
 #include "mongo/transport/baton.h"
@@ -50,7 +49,8 @@ MONGO_FAIL_POINT_DECLARE(networkInterfaceDiscardCommandsAfterAcquireConn);
  * Interface to networking for use by TaskExecutor implementations.
  */
 class NetworkInterface {
-    MONGO_DISALLOW_COPYING(NetworkInterface);
+    NetworkInterface(const NetworkInterface&) = delete;
+    NetworkInterface& operator=(const NetworkInterface&) = delete;
 
 public:
     using Response = RemoteCommandResponse;
@@ -185,7 +185,20 @@ public:
      * Any callbacks invoked from setAlarm must observe onNetworkThread to
      * return true. See that method for why.
      */
-    virtual Status setAlarm(Date_t when, unique_function<void()> action) = 0;
+    virtual Status setAlarm(const TaskExecutor::CallbackHandle& cbHandle,
+                            Date_t when,
+                            unique_function<void(Status)> action) = 0;
+
+    /**
+     * Requests cancellation of the alarm associated with "cbHandle" if it has not yet completed.
+     */
+    virtual void cancelAlarm(const TaskExecutor::CallbackHandle& cbHandle) = 0;
+
+    /**
+     * Schedules the specified action to run as soon as possible on the network interface's
+     * execution resource
+     */
+    virtual Status schedule(unique_function<void(Status)> action) = 0;
 
     /**
      * Returns true if called from a thread dedicated to networking. I.e. not a

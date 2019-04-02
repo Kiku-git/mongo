@@ -31,7 +31,6 @@
 
 #include <vector>
 
-#include "mongo/base/disallow_copying.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/oid.h"
 #include "mongo/bson/timestamp.h"
@@ -50,7 +49,10 @@ class ServiceContext;
 namespace repl {
 
 class ReplicationCoordinatorExternalStateMock : public ReplicationCoordinatorExternalState {
-    MONGO_DISALLOW_COPYING(ReplicationCoordinatorExternalStateMock);
+    ReplicationCoordinatorExternalStateMock(const ReplicationCoordinatorExternalStateMock&) =
+        delete;
+    ReplicationCoordinatorExternalStateMock& operator=(
+        const ReplicationCoordinatorExternalStateMock&) = delete;
 
 public:
     class GlobalSharedLockAcquirer;
@@ -79,7 +81,7 @@ public:
     virtual void setGlobalTimestamp(ServiceContext* service, const Timestamp& newTime);
     virtual Timestamp getGlobalTimestamp(ServiceContext* service);
     bool oplogExists(OperationContext* opCtx) override;
-    virtual StatusWith<OpTime> loadLastOpTime(OperationContext* opCtx);
+    virtual StatusWith<OpTimeAndWallTime> loadLastOpTimeAndWallTime(OperationContext* opCtx);
     virtual void closeConnections();
     virtual void shardingOnStepDownHook();
     virtual void signalApplierToChooseNewSyncSource();
@@ -121,7 +123,8 @@ public:
     /**
      * Sets the return value for subsequent calls to loadLastOpTimeApplied.
      */
-    void setLastOpTime(const StatusWith<OpTime>& lastApplied);
+    void setLastOpTimeAndWallTime(const StatusWith<OpTime>& lastApplied,
+                                  Date_t lastAppliedWall = Date_t::min());
 
     /**
      * Sets the return value for subsequent calls to storeLocalConfigDocument().
@@ -182,6 +185,7 @@ private:
     StatusWith<BSONObj> _localRsConfigDocument;
     StatusWith<LastVote> _localRsLastVoteDocument;
     StatusWith<OpTime> _lastOpTime;
+    StatusWith<Date_t> _lastWallTime;
     std::vector<HostAndPort> _selfHosts;
     bool _canAcquireGlobalSharedLock;
     Status _storeLocalConfigDocumentStatus;

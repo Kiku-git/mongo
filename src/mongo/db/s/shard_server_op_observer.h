@@ -29,7 +29,6 @@
 
 #pragma once
 
-#include "mongo/base/disallow_copying.h"
 #include "mongo/db/op_observer.h"
 #include "mongo/db/s/collection_sharding_runtime.h"
 
@@ -40,7 +39,8 @@ namespace mongo {
  * server (--shardsvr).
  */
 class ShardServerOpObserver final : public OpObserver {
-    MONGO_DISALLOW_COPYING(ShardServerOpObserver);
+    ShardServerOpObserver(const ShardServerOpObserver&) = delete;
+    ShardServerOpObserver& operator=(const ShardServerOpObserver&) = delete;
 
 public:
     ShardServerOpObserver();
@@ -168,7 +168,7 @@ public:
         const std::vector<repl::ReplOperation>& statements) noexcept override {}
 
     void onTransactionPrepare(OperationContext* opCtx,
-                              const OplogSlot& prepareOpTime,
+                              const std::vector<OplogSlot>& reservedSlots,
                               std::vector<repl::ReplOperation>& statements) override {}
 
     void onTransactionAbort(OperationContext* opCtx,

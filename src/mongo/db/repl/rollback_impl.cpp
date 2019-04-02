@@ -43,6 +43,7 @@
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/replication_state_transition_lock_guard.h"
 #include "mongo/db/db_raii.h"
+#include "mongo/db/index_builds_coordinator.h"
 #include "mongo/db/kill_sessions_local.h"
 #include "mongo/db/logical_time_validator.h"
 #include "mongo/db/operation_context.h"
@@ -54,7 +55,6 @@
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/s/shard_identity_rollback_notifier.h"
 #include "mongo/db/s/type_shard_identity.h"
-#include "mongo/db/server_parameters.h"
 #include "mongo/db/server_recovery.h"
 #include "mongo/db/server_transactions_metrics.h"
 #include "mongo/db/session_catalog_mongod.h"
@@ -65,6 +65,9 @@
 
 namespace mongo {
 namespace repl {
+
+MONGO_FAIL_POINT_DEFINE(rollbackHangAfterTransitionToRollback);
+
 namespace {
 
 // Used to set RollbackImpl::_newCounts to force a collection scan to fix count.
@@ -171,6 +174,13 @@ Status RollbackImpl::runRollback(OperationContext* opCtx) {
         return status;
     }
     _listener->onTransitionToRollback();
+
+    if (MONGO_FAIL_POINT(rollbackHangAfterTransitionToRollback)) {
+        log() << "rollbackHangAfterTransitionToRollback fail point enabled. Blocking until fail "
+                 "point is disabled (rollback_impl).";
+        MONGO_FAIL_POINT_PAUSE_WHILE_SET_OR_INTERRUPTED(opCtx,
+                                                        rollbackHangAfterTransitionToRollback);
+    }
 
     // We clear the SizeRecoveryState before we recover to a stable timestamp. This ensures that we
     // only use size adjustment markings from the storage and replication recovery processes in this
@@ -341,7 +351,7 @@ Status RollbackImpl::_transitionToRollback(OperationContext* opCtx) {
 
     log() << "transition to ROLLBACK";
     {
-        ReplicationStateTransitionLockGuard transitionGuard(opCtx);
+        ReplicationStateTransitionLockGuard transitionGuard(opCtx, MODE_X);
 
         auto status =
             _replicationCoordinator->setFollowerModeStrict(opCtx, MemberState::RS_ROLLBACK);
@@ -376,10 +386,13 @@ Status RollbackImpl::_awaitBgIndexCompletion(OperationContext* opCtx) {
     log() << "Waiting for all background operations to complete before starting rollback";
     for (auto db : dbNames) {
         auto numInProg = BackgroundOperation::numInProgForDb(db);
-        if (numInProg > 0) {
-            LOG(1) << "Waiting for " << numInProg
+        auto numInProgInCoordinator = IndexBuildsCoordinator::get(opCtx)->numInProgForDb(db);
+        if (numInProg > 0 || numInProgInCoordinator > 0) {
+            LOG(1) << "Waiting for "
+                   << (numInProg > numInProgInCoordinator ? numInProg : numInProgInCoordinator)
                    << " background operations to complete on database '" << db << "'";
             BackgroundOperation::awaitNoBgOpInProgForDb(db);
+            IndexBuildsCoordinator::get(opCtx)->awaitNoBgOpInProgForDb(db);
         }
 
         // Check for shutdown again.
@@ -629,6 +642,15 @@ Status RollbackImpl::_processRollbackOp(const OplogEntry& oplogEntry) {
 
     // For applyOps entries, we process each sub-operation individually.
     if (oplogEntry.getCommandType() == OplogEntry::CommandType::kApplyOps) {
+        if (oplogEntry.getPrepare()) {
+            // Uncommitted prepared transactions are always aborted before rollback begins, which
+            // rolls back collection counts. Processing the operation here would result in
+            // double-counting the sub-operations when correcting collection counts later.
+            // Additionally, this logic makes an assumption that transactions are only ever
+            // committed when the prepare operation is majority committed. This implies that when a
+            // prepare oplog entry is rolled-back, it is guaranteed that it has never committed.
+            return Status::OK();
+        }
         try {
             auto subOps = ApplyOps::extractOperations(oplogEntry);
             for (auto& subOp : subOps) {
@@ -811,6 +833,8 @@ StatusWith<RollBackLocalOperations::RollbackCommonPoint> RollbackImpl::_findComm
     OpTime commonPointOpTime = commonPointSW.getValue().getOpTime();
     OpTime lastCommittedOpTime = _replicationCoordinator->getLastCommittedOpTime();
     OpTime committedSnapshot = _replicationCoordinator->getCurrentCommittedSnapshotOpTime();
+    auto stableTimestamp =
+        _storageInterface->getLastStableRecoveryTimestamp(opCtx->getServiceContext());
 
     log() << "Rollback common point is " << commonPointOpTime;
 
@@ -821,6 +845,16 @@ StatusWith<RollBackLocalOperations::RollbackCommonPoint> RollbackImpl::_findComm
     // Rollback common point should be >= the committed snapshot optime.
     invariant(commonPointOpTime.getTimestamp() >= committedSnapshot.getTimestamp());
     invariant(commonPointOpTime >= committedSnapshot);
+
+    // Rollback common point should be >= the stable timestamp.
+    invariant(stableTimestamp);
+    if (commonPointOpTime.getTimestamp() < *stableTimestamp) {
+        // This is an fassert rather than an invariant, since it can happen if the server was
+        // recently upgraded to enableMajorityReadConcern=true.
+        severe() << "Common point must be at least stable timestamp, common point: "
+                 << commonPointOpTime.getTimestamp() << ", stable timestamp: " << *stableTimestamp;
+        fassertFailedNoTrace(51121);
+    }
 
     return commonPointSW.getValue();
 }
@@ -1044,7 +1078,7 @@ void RollbackImpl::_transitionFromRollbackToSecondary(OperationContext* opCtx) {
 
     log() << "transition to SECONDARY";
 
-    ReplicationStateTransitionLockGuard transitionGuard(opCtx);
+    ReplicationStateTransitionLockGuard transitionGuard(opCtx, MODE_X);
 
     auto status = _replicationCoordinator->setFollowerMode(MemberState::RS_SECONDARY);
     if (!status.isOK()) {

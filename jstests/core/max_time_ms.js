@@ -5,11 +5,11 @@
 //   # failpoint. The former operations may be routed to a secondary in the replica set, whereas the
 //   # latter must be routed to the primary.
 //   assumes_read_preference_unchanged,
-//   requires_getmore,
 //   requires_fastcount,
-//
+//   requires_getmore,
 //   # Uses $where operator
 //   requires_scripting,
+//   uses_testing_only_commands,
 // ]
 
 var t = db.max_time_ms;
@@ -181,7 +181,11 @@ cursor = t.find({
 cursor.batchSize(3);
 cursor.maxTimeMS(20 * 1000);
 assert.doesNotThrow(function() {
+    // SERVER-40305: Add some additional logging here in case this fails to help us track down why
+    // it failed.
+    assert.commandWorked(db.adminCommand({setParameter: 1, traceExceptions: 1}));
     cursor.itcount();
+    assert.commandWorked(db.adminCommand({setParameter: 1, traceExceptions: 0}));
 }, [], "expected find() to not hit the time limit");
 
 //

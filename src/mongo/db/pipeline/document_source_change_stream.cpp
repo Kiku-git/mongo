@@ -44,7 +44,6 @@
 #include "mongo/db/pipeline/document_source_limit.h"
 #include "mongo/db/pipeline/document_source_lookup_change_post_image.h"
 #include "mongo/db/pipeline/document_source_sort.h"
-#include "mongo/db/pipeline/document_source_watch_for_uuid.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
 #include "mongo/db/pipeline/resume_token.h"
@@ -159,15 +158,17 @@ void DocumentSourceChangeStream::checkValueType(const Value v,
 namespace {
 
 /**
- * Constructs the filter which will match 'applyOps' oplog entries that are:
- * 1) Part of a transaction
- * 2) Have sub-entries which should be returned in the change stream
+ * Constructs a filter matching 'applyOps' oplog entries that:
+ * 1) Represent a committed transaction (i.e., not just the "prepare" part of a two-phase
+ *    transaction).
+ * 2) Have sub-entries which should be returned in the change stream.
  */
 BSONObj getTxnApplyOpsFilter(BSONElement nsMatch, const NamespaceString& nss) {
     BSONObjBuilder applyOpsBuilder;
     applyOpsBuilder.append("op", "c");
     applyOpsBuilder.append("lsid", BSON("$exists" << true));
     applyOpsBuilder.append("txnNumber", BSON("$exists" << true));
+    applyOpsBuilder.append("prepare", BSON("$not" << BSON("$eq" << true)));
     const std::string& kApplyOpsNs = "o.applyOps.ns";
     applyOpsBuilder.appendAs(nsMatch, kApplyOpsNs);
     return applyOpsBuilder.obj();
@@ -220,14 +221,6 @@ BSONObj DocumentSourceChangeStream::buildMatchFilter(
         // Generate 'rename' entries if the change stream is open on the source or target namespace.
         relevantCommands.append(BSON("o.renameCollection" << nss.ns()));
         relevantCommands.append(BSON("o.to" << nss.ns()));
-        if (expCtx->collation.isEmpty()) {
-            // If the user did not specify a collation, they should be using the collection's
-            // default collation. So a "create" command which has any collation present would
-            // invalidate the change stream, since that must mean the stream was created before the
-            // collection existed and used the simple collation, which is no longer the default.
-            relevantCommands.append(
-                BSON("o.create" << nss.coll() << "o.collation" << BSON("$exists" << true)));
-        }
     } else {
         // For change streams on an entire database, include notifications for drops and renames of
         // non-system collections which will not invalidate the stream. Also include the
@@ -251,10 +244,13 @@ BSONObj DocumentSourceChangeStream::buildMatchFilter(
     // 1.2) Supported commands that have arbitrary db namespaces in "ns" field.
     auto renameDropTarget = BSON("o.to" << BSONRegEx(getNsRegexForChangeStream(nss)));
 
-    // All supported commands that are either (1.1) or (1.2).
+    // 1.3) Transaction commit commands.
+    auto transactionCommit = BSON("o.commitTransaction" << 1);
+
+    // All supported commands that are either (1.1), (1.2) or (1.3).
     BSONObj commandMatch = BSON("op"
                                 << "c"
-                                << OR(commandsOnTargetDb, renameDropTarget));
+                                << OR(commandsOnTargetDb, renameDropTarget, transactionCommit));
 
     // 2.1) Normal CRUD ops.
     auto normalOpTypeMatch = BSON("op" << NE << "n");
@@ -282,52 +278,6 @@ BSONObj DocumentSourceChangeStream::buildMatchFilter(
 
 namespace {
 
-/**
- * Throws an assertion if this pipeline might need to use a collation but it can't figure out what
- * the collation should be. Specifically, it is only safe to resume if at least one of the following
- * is true:
- *      * The request has an explicit collation set, so we don't need to know if there was a default
- *        collation on the collection.
- *      * The request is 'collectionless', meaning it's a change stream on a whole database or a
- *        whole cluster. Unlike individual collections, there is no concept of a default collation
- *        at the level of an entire database or cluster.
- *      * The resume token contains a UUID and a collection with that UUID still exists, thus we can
- *        figure out its default collation.
- */
-void assertResumeAllowed(const intrusive_ptr<ExpressionContext>& expCtx,
-                         const ResumeTokenData& tokenData) {
-    if (!expCtx->collation.isEmpty()) {
-        // Explicit collation has been set, it's okay to resume.
-        return;
-    }
-
-    if (!expCtx->isSingleNamespaceAggregation()) {
-        // Change stream on a whole database or cluster, do not need to worry about collation.
-        return;
-    }
-
-    if (!tokenData.uuid && ResumeToken::isHighWaterMarkToken(tokenData)) {
-        // The only time we see a single-collection high water mark with no UUID is when the stream
-        // was opened on a non-existent collection. We allow this to proceed, as the resumed stream
-        // will immediately invalidate itself if it observes a createCollection event in the oplog
-        // with a non-simple collation.
-        return;
-    }
-
-    const auto cannotResumeErrMsg =
-        "Attempted to resume a stream on a collection which has been dropped. The change stream's "
-        "pipeline may need to make comparisons which should respect the collection's default "
-        "collation, which can no longer be determined. If you wish to resume this change stream "
-        "you must specify a collation with the request.";
-    // Verify that the UUID on the expression context matches the UUID in the resume token.
-    // TODO SERVER-35254: If we're on a stale mongos, this check may incorrectly reject a valid
-    // resume token since the UUID on the expression context could be for a previous version of the
-    // collection.
-    uassert(ErrorCodes::InvalidResumeToken,
-            cannotResumeErrMsg,
-            expCtx->uuid && tokenData.uuid && expCtx->uuid.get() == tokenData.uuid.get());
-}
-
 list<intrusive_ptr<DocumentSource>> buildPipeline(const intrusive_ptr<ExpressionContext>& expCtx,
                                                   const DocumentSourceChangeStreamSpec spec,
                                                   BSONElement elem) {
@@ -354,9 +304,14 @@ list<intrusive_ptr<DocumentSource>> buildPipeline(const intrusive_ptr<Expression
                 "Attempting to resume a change stream using 'resumeAfter' is not allowed from an "
                 "invalidate notification.",
                 !resumeAfter || !tokenData.fromInvalidate);
-        // Verify that the requested resume attempt is possible based on the stream type, resume
-        // token UUID, and collation.
-        assertResumeAllowed(expCtx, tokenData);
+
+        // If we are resuming a single-collection stream, the resume token should always contain a
+        // UUID unless the token is a high water mark.
+        uassert(ErrorCodes::InvalidResumeToken,
+                "Attempted to resume a single-collection stream, but the resume token does not "
+                "include a UUID.",
+                tokenData.uuid || !expCtx->isSingleNamespaceAggregation() ||
+                    ResumeToken::isHighWaterMarkToken(tokenData));
 
         // Store the resume token as the initial postBatchResumeToken for this stream.
         expCtx->initialPostBatchResumeToken = token.toDocument().toBson();
@@ -404,20 +359,14 @@ list<intrusive_ptr<DocumentSource>> buildPipeline(const intrusive_ptr<Expression
         if (expCtx->initialPostBatchResumeToken.isEmpty()) {
             Timestamp startTime{startFrom->getSecs(), startFrom->getInc() + (!startFromInclusive)};
             expCtx->initialPostBatchResumeToken =
-                ResumeToken::makeHighWaterMarkToken(startTime, expCtx->uuid).toDocument().toBson();
+                ResumeToken::makeHighWaterMarkToken(startTime).toDocument().toBson();
         }
     }
 
+    // Obtain the current FCV and use it to create the DocumentSourceChangeStreamTransform stage.
     const auto fcv = serverGlobalParams.featureCompatibility.getVersion();
     stages.push_back(
         DocumentSourceChangeStreamTransform::create(expCtx, fcv, elem.embeddedObject()));
-
-    // If this is a single-collection stream but we don't have a UUID set on the expression context,
-    // then the stream was opened before the collection exists. Add a stage which will populate the
-    // UUID using the first change stream result observed by the pipeline during execution.
-    if (!expCtx->uuid && expCtx->isSingleNamespaceAggregation()) {
-        stages.push_back(DocumentSourceWatchForUUID::create(expCtx));
-    }
 
     // The resume stage must come after the check invalidate stage so that the former can determine
     // whether the event that matches the resume token should be followed by an "invalidate" event.
@@ -462,13 +411,6 @@ list<intrusive_ptr<DocumentSource>> DocumentSourceChangeStream::createFromBson(
         // There should only be one close cursor stage. If we're on the shards and producing input
         // to be merged, do not add a close cursor stage, since the mongos will already have one.
         stages.push_back(DocumentSourceCloseCursor::create(expCtx));
-
-        // If this is a single-collection stream but we do not have a UUID set on the expression
-        // context, then the stream was opened before the collection exists. Add a stage on mongoS
-        // which will watch for and populate the UUID using the first result seen by the pipeline.
-        if (expCtx->inMongos && !expCtx->uuid && expCtx->isSingleNamespaceAggregation()) {
-            stages.push_back(DocumentSourceWatchForUUID::create(expCtx));
-        }
 
         // There should be only one post-image lookup stage.  If we're on the shards and producing
         // input to be merged, the lookup is done on the mongos.

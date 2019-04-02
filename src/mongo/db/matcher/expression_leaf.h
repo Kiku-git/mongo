@@ -104,7 +104,7 @@ public:
 
     virtual ~ComparisonMatchExpressionBase() = default;
 
-    virtual void debugString(StringBuilder& debug, int level = 0) const;
+    virtual void debugString(StringBuilder& debug, int indentationLevel = 0) const;
 
     BSONObj getSerializedRightHandSide() const final;
 
@@ -117,6 +117,14 @@ public:
 
     const BSONElement& getData() const {
         return _rhs;
+    }
+
+    /**
+     * Replaces the RHS element of this expression. The caller is responsible for ensuring that the
+     * BSONObj backing 'elem' outlives this MatchExpression.
+     */
+    void setData(BSONElement elem) {
+        _rhs = elem;
     }
 
     const CollatorInterface* getCollator() const {
@@ -282,7 +290,6 @@ public:
 
 class RegexMatchExpression : public LeafMatchExpression {
 public:
-    static constexpr size_t kMaxPatternSize = 32764;
     static const std::set<char> kValidRegexFlags;
 
     RegexMatchExpression(StringData path, const BSONElement& e);
@@ -301,7 +308,7 @@ public:
 
     bool matchesSingleElement(const BSONElement&, MatchDetails* details = nullptr) const final;
 
-    virtual void debugString(StringBuilder& debug, int level) const;
+    virtual void debugString(StringBuilder& debug, int indentationLevel) const;
 
     BSONObj getSerializedRightHandSide() const final;
 
@@ -345,7 +352,7 @@ public:
 
     bool matchesSingleElement(const BSONElement&, MatchDetails* details = nullptr) const final;
 
-    virtual void debugString(StringBuilder& debug, int level) const;
+    virtual void debugString(StringBuilder& debug, int indentationLevel) const;
 
     BSONObj getSerializedRightHandSide() const final;
 
@@ -381,7 +388,7 @@ public:
 
     bool matchesSingleElement(const BSONElement&, MatchDetails* details = nullptr) const final;
 
-    virtual void debugString(StringBuilder& debug, int level) const;
+    virtual void debugString(StringBuilder& debug, int indentationLevel) const;
 
     BSONObj getSerializedRightHandSide() const final;
 
@@ -404,7 +411,7 @@ public:
 
     bool matchesSingleElement(const BSONElement&, MatchDetails* details = nullptr) const final;
 
-    virtual void debugString(StringBuilder& debug, int level) const;
+    virtual void debugString(StringBuilder& debug, int indentationLevel) const;
 
     BSONObj getSerializedRightHandSide() const final;
 
@@ -493,7 +500,7 @@ public:
 
     bool matchesSingleElement(const BSONElement&, MatchDetails* details = nullptr) const final;
 
-    virtual void debugString(StringBuilder& debug, int level) const;
+    virtual void debugString(StringBuilder& debug, int indentationLevel) const;
 
     BSONObj getSerializedRightHandSide() const final;
 

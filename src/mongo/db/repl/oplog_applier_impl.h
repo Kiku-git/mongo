@@ -30,7 +30,6 @@
 
 #pragma once
 
-#include "mongo/base/disallow_copying.h"
 #include "mongo/db/repl/oplog_applier.h"
 #include "mongo/db/repl/replication_consistency_markers.h"
 #include "mongo/db/repl/replication_coordinator.h"
@@ -45,7 +44,8 @@ namespace repl {
  * Reads from an OplogBuffer batches of operations that may be applied in parallel.
  */
 class OplogApplierImpl : public OplogApplier {
-    MONGO_DISALLOW_COPYING(OplogApplierImpl);
+    OplogApplierImpl(const OplogApplierImpl&) = delete;
+    OplogApplierImpl& operator=(const OplogApplierImpl&) = delete;
 
 public:
     /**
@@ -64,14 +64,16 @@ public:
 
 private:
     void _run(OplogBuffer* oplogBuffer) override;
+
     void _shutdown() override;
+
     StatusWith<OpTime> _multiApply(OperationContext* opCtx, Operations ops) override;
 
     // Not owned by us.
     ReplicationCoordinator* const _replCoord;
 
     // Used to run oplog application loop.
-    std::unique_ptr<SyncTail> _syncTail;
+    SyncTail _syncTail;
 
     // Used to determine which operations should be applied during initial sync. If this is null,
     // we will apply all operations that were fetched.

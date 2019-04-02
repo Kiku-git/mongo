@@ -455,7 +455,7 @@ void _insertDocument(OperationContext* opCtx, const NamespaceString& nss, const 
  * catalog. The caller must hold the appropriate locks from the lock manager.
  */
 Collection* _getCollection_inlock(OperationContext* opCtx, const NamespaceString& nss) {
-    invariant(opCtx->lockState()->isCollectionLockedForMode(nss.ns(), MODE_IS));
+    invariant(opCtx->lockState()->isCollectionLockedForMode(nss, MODE_IS));
     auto databaseHolder = DatabaseHolder::get(opCtx);
     auto* db = databaseHolder->getDb(opCtx, nss.db());
     if (!db) {
@@ -1259,6 +1259,20 @@ TEST_F(RenameCollectionTest, FailRenameCollectionFromUnreplicatedToReplicatedDB)
 
     ASSERT_EQUALS(ErrorCodes::IllegalOperation,
                   renameCollection(_opCtx.get(), sourceNss, targetNss, {}));
+}
+
+TEST_F(RenameCollectionTest,
+       RenameCollectionForApplyOpsReturnsInvalidNamespaceIfTargetNamespaceIsInvalid) {
+    _createCollection(_opCtx.get(), _sourceNss);
+    auto dbName = _sourceNss.db().toString();
+
+    // Create a namespace that is not in the form "database.collection".
+    NamespaceString invalidTargetNss("invalidNamespace");
+
+    auto cmd = BSON("renameCollection" << _sourceNss.ns() << "to" << invalidTargetNss.ns());
+
+    ASSERT_EQUALS(ErrorCodes::InvalidNamespace,
+                  renameCollectionForApplyOps(_opCtx.get(), dbName, {}, cmd, {}));
 }
 
 }  // namespace

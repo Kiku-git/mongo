@@ -31,7 +31,6 @@
 
 #include <deque>
 
-#include "mongo/base/disallow_copying.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/repl/bgsync.h"
 #include "mongo/db/repl/oplog_applier.h"
@@ -58,7 +57,10 @@ class NoopWriter;
 
 class ReplicationCoordinatorExternalStateImpl final : public ReplicationCoordinatorExternalState,
                                                       public JournalListener {
-    MONGO_DISALLOW_COPYING(ReplicationCoordinatorExternalStateImpl);
+    ReplicationCoordinatorExternalStateImpl(const ReplicationCoordinatorExternalStateImpl&) =
+        delete;
+    ReplicationCoordinatorExternalStateImpl& operator=(
+        const ReplicationCoordinatorExternalStateImpl&) = delete;
 
 public:
     ReplicationCoordinatorExternalStateImpl(
@@ -89,7 +91,7 @@ public:
     virtual void setGlobalTimestamp(ServiceContext* service, const Timestamp& newTime);
     virtual Timestamp getGlobalTimestamp(ServiceContext* service);
     bool oplogExists(OperationContext* opCtx) final;
-    virtual StatusWith<OpTime> loadLastOpTime(OperationContext* opCtx);
+    virtual StatusWith<OpTimeAndWallTime> loadLastOpTimeAndWallTime(OperationContext* opCtx);
     virtual HostAndPort getClientHostAndPort(const OperationContext* opCtx);
     virtual void closeConnections();
     virtual void shardingOnStepDownHook();

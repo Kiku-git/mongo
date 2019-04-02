@@ -194,7 +194,7 @@ selector:
   - jstests/core/index_stats.js
 
   ##
-  ## WriteErrors get converted to WriteCommandErrors if part of a txn.
+  ## SERVER-39175 WriteErrors get converted to WriteCommandErrors if part of a txn.
   ##
 
   # The same error code, but with ok:0.
@@ -399,8 +399,5 @@ executor:
         numInitialSyncAttempts: 1
         # TODO SERVER-38302: Disable the no-op writer.
         writePeriodicNoops: true
-        # TODO: SERVER-38588 Hybrid index builds can conflict with prepared transactions on
-        # secondaries and miss documents.
-        enableHybridIndexBuilds: false
     num_rs_nodes_per_shard: 2
     num_shards: 2

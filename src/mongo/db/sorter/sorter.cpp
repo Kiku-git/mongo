@@ -59,6 +59,7 @@
 #include "mongo/db/storage/encryption_hooks.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/platform/atomic_word.h"
+#include "mongo/platform/overflow_arithmetic.h"
 #include "mongo/s/is_mongos.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/bufreader.h"
@@ -655,10 +656,11 @@ public:
             _fileName = _opts.tempDir + "/" + nextFileName();
         }
 
-        // Preallocate a fixed sized vector of the required size if we
-        // don't expect it to have a major impact on our memory budget.
-        // This is the common case with small limits.
-        if ((sizeof(Data) * opts.limit) < opts.maxMemoryUsageBytes / 10) {
+        // Preallocate a fixed sized vector of the required size if we don't expect it to have a
+        // major impact on our memory budget. This is the common case with small limits.
+        if (opts.limit <
+            std::min((opts.maxMemoryUsageBytes / 10) / sizeof(typename decltype(_data)::value_type),
+                     _data.max_size())) {
             _data.reserve(opts.limit);
         }
     }

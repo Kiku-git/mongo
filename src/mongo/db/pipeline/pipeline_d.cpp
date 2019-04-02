@@ -70,7 +70,7 @@
 #include "mongo/db/query/plan_summary_stats.h"
 #include "mongo/db/query/query_planner.h"
 #include "mongo/db/s/collection_sharding_state.h"
-#include "mongo/db/s/sharding_state.h"
+#include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/stats/top.h"
 #include "mongo/db/storage/record_store.h"
@@ -105,7 +105,7 @@ StatusWith<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> createRandomCursorEx
     Collection* coll, OperationContext* opCtx, long long sampleSize, long long numRecords) {
     // Verify that we are already under a collection lock. We avoid taking locks ourselves in this
     // function because double-locking forces any PlanExecutor we create to adopt a NO_YIELD policy.
-    invariant(opCtx->lockState()->isCollectionLockedForMode(coll->ns().ns(), MODE_IS));
+    invariant(opCtx->lockState()->isCollectionLockedForMode(coll->ns(), MODE_IS));
 
     static const double kMaxSampleRatioForRandCursor = 0.05;
     if (sampleSize > numRecords * kMaxSampleRatioForRandCursor || numRecords <= 100) {
@@ -124,10 +124,11 @@ StatusWith<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> createRandomCursorEx
     std::unique_ptr<PlanStage> root = std::make_unique<MultiIteratorStage>(opCtx, ws.get(), coll);
     static_cast<MultiIteratorStage*>(root.get())->addIterator(std::move(rsRandCursor));
 
-    // Determine whether this collection is sharded. If so, retrieve its sharding metadata.
+    // If the incoming operation is sharded, use the CSS to infer the filtering metadata for the
+    // collection, otherwise treat it as unsharded
     boost::optional<ScopedCollectionMetadata> shardMetadata =
-        (ShardingState::get(opCtx)->needCollectionMetadata(opCtx, coll->ns().ns())
-             ? CollectionShardingState::get(opCtx, coll->ns())->getMetadataForOperation(opCtx)
+        (OperationShardingState::isOperationVersioned(opCtx)
+             ? CollectionShardingState::get(opCtx, coll->ns())->getOrphansFilter(opCtx)
              : boost::optional<ScopedCollectionMetadata>{});
 
     // Because 'numRecords' includes orphan documents, our initial decision to optimize the $sample
@@ -235,7 +236,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> attemptToGetExe
         }
     }
 
-    return getExecutorFind(opCtx, collection, nss, std::move(cq.getValue()), plannerOpts);
+    return getExecutorFind(opCtx, collection, std::move(cq.getValue()), plannerOpts);
 }
 
 BSONObj removeSortKeyMetaProjection(BSONObj projectionObj) {
@@ -304,7 +305,7 @@ void PipelineD::prepareCursorSource(Collection* collection,
     }
 
     // We are going to generate an input cursor, so we need to be holding the collection lock.
-    dassert(expCtx->opCtx->lockState()->isCollectionLockedForMode(nss.ns(), MODE_IS));
+    dassert(expCtx->opCtx->lockState()->isCollectionLockedForMode(nss, MODE_IS));
 
     if (!sources.empty()) {
         auto sampleStage = dynamic_cast<DocumentSourceSample*>(sources.front().get());

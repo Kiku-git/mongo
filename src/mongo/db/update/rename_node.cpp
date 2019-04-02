@@ -31,6 +31,7 @@
 
 #include "mongo/db/update/rename_node.h"
 
+#include "mongo/base/string_data.h"
 #include "mongo/bson/mutable/algorithm.h"
 #include "mongo/db/update/field_checker.h"
 #include "mongo/db/update/modifier_node.h"
@@ -39,8 +40,6 @@
 #include "mongo/db/update/unset_node.h"
 
 namespace mongo {
-
-namespace {
 
 /**
  * The SetElementNode class provides the $set functionality for $rename. A $rename from a source
@@ -69,6 +68,18 @@ public:
         return Status::OK();
     }
 
+    /**
+     * These internally-generated nodes do not need to be serialized.
+     */
+    void produceSerializationMap(
+        FieldRef* currentPath,
+        std::map<std::string, std::vector<std::pair<std::string, BSONObj>>>*
+            operatorOrientedUpdates) const final {}
+
+    void acceptVisitor(UpdateNodeVisitor* visitor) final {
+        visitor->visit(this);
+    }
+
 protected:
     ModifierNode::ModifyResult updateExistingElement(
         mutablebson::Element* element, std::shared_ptr<FieldRef> elementPath) const final {
@@ -89,10 +100,16 @@ protected:
     }
 
 private:
+    StringData operatorName() const final {
+        return "$set";
+    }
+
+    BSONObj operatorValue() const final {
+        return BSON("" << _elemToSet.getValue());
+    }
+
     mutablebson::Element _elemToSet;
 };
-
-}  // namespace
 
 Status RenameNode::init(BSONElement modExpr,
                         const boost::intrusive_ptr<ExpressionContext>& expCtx) {

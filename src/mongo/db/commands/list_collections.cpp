@@ -321,7 +321,12 @@ public:
                         }
                     }
                 } else {
-                    for (auto&& collection : *db) {
+                    for (auto collIt = db->begin(opCtx); collIt != db->end(opCtx); ++collIt) {
+                        auto collection = *collIt;
+                        if (!collection) {
+                            break;
+                        }
+
                         if (authorizedCollections &&
                             (collection->ns().coll().startsWith("system.") ||
                              !as->isAuthorizedForAnyActionOnResource(
@@ -342,7 +347,7 @@ public:
                     SimpleBSONObjComparator::kInstance.evaluate(
                         filterElt.Obj() == ListCollectionsFilter::makeTypeCollectionFilter());
                 if (!skipViews) {
-                    db->getViewCatalog()->iterate(opCtx, [&](const ViewDefinition& view) {
+                    ViewCatalog::get(db)->iterate(opCtx, [&](const ViewDefinition& view) {
                         BSONObj viewBson = buildViewBson(view, nameOnly);
                         if (!viewBson.isEmpty()) {
                             _addWorkingSetMember(

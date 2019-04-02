@@ -46,7 +46,6 @@
 #include "mongo/bson/util/builder.h"
 #include "mongo/config.h"
 #include "mongo/db/server_options.h"
-#include "mongo/db/server_parameters.h"
 #include "mongo/logger/log_component.h"
 #include "mongo/logger/message_event_utf8_encoder.h"
 #include "mongo/transport/message_compressor_registry.h"
@@ -432,10 +431,5 @@ Status storeBaseOptions(const moe::Environment& params) {
 
     return Status::OK();
 }
-
-ExportedServerParameter<std::vector<std::string>, ServerParameterType::kStartupOnly>
-    SecureAllocatorDomains(ServerParameterSet::getGlobal(),
-                           "disabledSecureAllocatorDomains",
-                           &serverGlobalParams.disabledSecureAllocatorDomains);
 
 }  // namespace mongo

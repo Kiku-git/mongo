@@ -82,7 +82,8 @@ class TopologyCoordinator;
 class VoteRequester;
 
 class ReplicationCoordinatorImpl : public ReplicationCoordinator {
-    MONGO_DISALLOW_COPYING(ReplicationCoordinatorImpl);
+    ReplicationCoordinatorImpl(const ReplicationCoordinatorImpl&) = delete;
+    ReplicationCoordinatorImpl& operator=(const ReplicationCoordinatorImpl&) = delete;
 
 public:
     ReplicationCoordinatorImpl(ServiceContext* serviceContext,
@@ -100,6 +101,8 @@ public:
 
     virtual void startup(OperationContext* opCtx) override;
 
+    virtual void enterTerminalShutdown() override;
+
     virtual void shutdown(OperationContext* opCtx) override;
 
     virtual const ReplSettings& getSettings() const override;
@@ -107,6 +110,8 @@ public:
     virtual Mode getReplicationMode() const override;
 
     virtual MemberState getMemberState() const override;
+
+    virtual std::vector<MemberData> getMemberData() const override;
 
     virtual Status waitForMemberState(MemberState expectedState, Milliseconds timeout) override;
 
@@ -152,18 +157,23 @@ public:
 
     virtual bool shouldRelaxIndexConstraints(OperationContext* opCtx, const NamespaceString& ns);
 
-    virtual void setMyLastAppliedOpTime(const OpTime& opTime);
-    virtual void setMyLastDurableOpTime(const OpTime& opTime);
+    virtual void setMyLastAppliedOpTimeAndWallTime(const OpTimeAndWallTime& opTimeAndWallTime);
+    virtual void setMyLastDurableOpTimeAndWallTime(const OpTimeAndWallTime& opTimeAndWallTime);
 
-    virtual void setMyLastAppliedOpTimeForward(const OpTime& opTime, DataConsistency consistency);
-    virtual void setMyLastDurableOpTimeForward(const OpTime& opTime);
+    virtual void setMyLastAppliedOpTimeAndWallTimeForward(
+        const OpTimeAndWallTime& opTimeAndWallTime, DataConsistency consistency);
+    virtual void setMyLastDurableOpTimeAndWallTimeForward(
+        const OpTimeAndWallTime& opTimeAndWallTime);
 
     virtual void resetMyLastOpTimes();
 
     virtual void setMyHeartbeatMessage(const std::string& msg);
 
     virtual OpTime getMyLastAppliedOpTime() const override;
+    virtual OpTimeAndWallTime getMyLastAppliedOpTimeAndWallTime() const override;
+
     virtual OpTime getMyLastDurableOpTime() const override;
+    virtual OpTimeAndWallTime getMyLastDurableOpTimeAndWallTime() const override;
 
     virtual Status waitUntilOpTimeForReadUntil(OperationContext* opCtx,
                                                const ReadConcernArgs& readConcern,
@@ -171,7 +181,7 @@ public:
 
     virtual Status waitUntilOpTimeForRead(OperationContext* opCtx,
                                           const ReadConcernArgs& readConcern) override;
-    Status awaitOpTimeCommitted(OperationContext* opCtx, OpTime opTime) override;
+    Status awaitTimestampCommitted(OperationContext* opCtx, Timestamp ts) override;
     virtual OID getElectionId() override;
 
     virtual int getMyId() const override;
@@ -209,7 +219,7 @@ public:
 
     virtual void processReplSetMetadata(const rpc::ReplSetMetadata& replMetadata) override;
 
-    virtual void advanceCommitPoint(const OpTime& committedOpTime) override;
+    virtual void advanceCommitPoint(const OpTime& committedOpTime, bool fromSyncSource) override;
 
     virtual void cancelAndRescheduleElectionTimeout() override;
 
@@ -753,7 +763,10 @@ private:
     int _getMyId_inlock() const;
 
     OpTime _getMyLastAppliedOpTime_inlock() const;
+    OpTimeAndWallTime _getMyLastAppliedOpTimeAndWallTime_inlock() const;
+
     OpTime _getMyLastDurableOpTime_inlock() const;
+    OpTimeAndWallTime _getMyLastDurableOpTimeAndWallTime_inlock() const;
 
     /**
      * Helper method for updating our tracking of the last optime applied by a given node.
@@ -777,11 +790,13 @@ private:
     /**
      * Helpers to set the last applied and durable OpTime.
      */
-    void _setMyLastAppliedOpTime(WithLock lk,
-                                 const OpTime& opTime,
-                                 bool isRollbackAllowed,
-                                 DataConsistency consistency);
-    void _setMyLastDurableOpTime(WithLock lk, const OpTime& opTime, bool isRollbackAllowed);
+    void _setMyLastAppliedOpTimeAndWallTime(WithLock lk,
+                                            const OpTimeAndWallTime& opTime,
+                                            bool isRollbackAllowed,
+                                            DataConsistency consistency);
+    void _setMyLastDurableOpTimeAndWallTime(WithLock lk,
+                                            const OpTimeAndWallTime& opTimeAndWallTime,
+                                            bool isRollbackAllowed);
 
     /**
      * Schedules a heartbeat to be sent to "target" at "when". "targetIndex" is the index
@@ -863,7 +878,7 @@ private:
      */
     void _finishLoadLocalConfig(const executor::TaskExecutor::CallbackArgs& cbData,
                                 const ReplSetConfig& localConfig,
-                                const StatusWith<OpTime>& lastOpTimeStatus,
+                                const StatusWith<OpTimeAndWallTime>& lastOpTimeAndWallTimeStatus,
                                 const StatusWith<LastVote>& lastVoteStatus);
 
     /**
@@ -1048,10 +1063,13 @@ private:
         stdx::unique_lock<stdx::mutex> lock);
 
     /**
-     * Updates the last committed OpTime to be "committedOpTime" if it is more recent than the
-     * current last committed OpTime.
+     * Updates the last committed OpTime to be 'committedOpTime' if it is more recent than the
+     * current last committed OpTime. We ignore 'committedOpTime' if it has a different term than
+     * our lastApplied, unless 'fromSyncSource'=true, which guarantees we are on the same branch of
+     * history as 'committedOpTime', so we update our commit point to min(committedOpTime,
+     * lastApplied).
      */
-    void _advanceCommitPoint(WithLock lk, const OpTime& committedOpTime);
+    void _advanceCommitPoint(WithLock lk, const OpTime& committedOpTime, bool fromSyncSource);
 
     /**
      * Scan the memberData and determine the highest last applied or last
@@ -1432,6 +1450,9 @@ private:
     // When we decide to step down due to hearing about a higher term, we remember the term we heard
     // here so we can update our term to match as part of finishing stepdown.
     boost::optional<long long> _pendingTermUpdateDuringStepDown;  // (M)
+
+    // If we're in terminal shutdown.  If true, we'll refuse to vote in elections.
+    bool _inTerminalShutdown = false;  // (M)
 };
 
 }  // namespace repl

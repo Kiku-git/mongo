@@ -29,7 +29,6 @@
 
 #pragma once
 
-#include "mongo/base/disallow_copying.h"
 #include "mongo/db/op_observer.h"
 
 namespace mongo {
@@ -39,7 +38,8 @@ namespace mongo {
  * relevant entries for free monitoring.
  */
 class FreeMonOpObserver final : public OpObserver {
-    MONGO_DISALLOW_COPYING(FreeMonOpObserver);
+    FreeMonOpObserver(const FreeMonOpObserver&) = delete;
+    FreeMonOpObserver& operator=(const FreeMonOpObserver&) = delete;
 
 public:
     FreeMonOpObserver();
@@ -167,7 +167,7 @@ public:
         const std::vector<repl::ReplOperation>& statements) noexcept final {}
 
     void onTransactionPrepare(OperationContext* opCtx,
-                              const OplogSlot& prepareOpTime,
+                              const std::vector<OplogSlot>& reservedSlots,
                               std::vector<repl::ReplOperation>& statements) final {}
 
     void onTransactionAbort(OperationContext* opCtx,

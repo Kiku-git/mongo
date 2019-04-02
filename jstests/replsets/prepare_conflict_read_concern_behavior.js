@@ -1,6 +1,7 @@
 /**
  * Test calling reads with various read concerns on a prepared transaction. Snapshot, linearizable
- * and afterClusterTime reads are the only reads that should block on a prepared transaction.
+ * and afterClusterTime reads are the only reads that should block on a prepared transaction. Reads
+ * that happen as part of a write should also block on a prepared transaction.
  *
  * @tags: [uses_transactions, uses_prepare_transaction]
  */
@@ -44,7 +45,7 @@
         const read = function(read_concern, timeout, db, coll, num_expected) {
             let res = db.runCommand({
                 find: coll,
-                filter: {in_prepared_txn: 3},
+                filter: {in_prepared_txn: false},
                 readConcern: read_concern,
                 maxTimeMS: timeout,
             });
@@ -57,22 +58,22 @@
         };
 
         assert.commandWorked(
-            testColl.insert({_id: 1, in_prepared_txn: 3}, {writeConcern: {w: "majority"}}));
-        assert.commandWorked(testColl2.insert({_id: 1, in_prepared_txn: 3}));
+            testColl.insert({_id: 1, in_prepared_txn: false}, {writeConcern: {w: "majority"}}));
+        assert.commandWorked(testColl.insert({_id: 2, in_prepared_txn: false}));
+        assert.commandWorked(testColl2.insert({_id: 1, in_prepared_txn: false}));
 
         session.startTransaction();
         const clusterTimeBeforePrepare =
-            assert.commandWorked(sessionColl.runCommand("insert", {documents: [{_id: 2}]}))
+            assert.commandWorked(sessionColl.runCommand("insert", {documents: [{_id: 3}]}))
                 .operationTime;
+        assert.commandWorked(sessionColl.update({_id: 2}, {_id: 2, in_prepared_txn: true}));
         const prepareTimestamp = PrepareHelpers.prepareTransaction(session);
 
-        // TODO: Once we no longer hold the stable optime behind the earliest prepare optime
-        // whose corresponding commit/abort oplog entry optime is not majority committed, allow
-        // this insert to be majority committed.
         const clusterTimeAfterPrepare =
             assert
-                .commandWorked(
-                    testColl.runCommand("insert", {documents: [{_id: 3, in_prepared_txn: 3}]}))
+                .commandWorked(testColl.runCommand(
+                    "insert",
+                    {documents: [{_id: 4, in_prepared_txn: false}], writeConcern: {w: "majority"}}))
                 .operationTime;
 
         jsTestLog("prepareTimestamp: " + prepareTimestamp + " clusterTimeBeforePrepare: " +
@@ -82,19 +83,16 @@
         assert.gt(prepareTimestamp, clusterTimeBeforePrepare);
         assert.gt(clusterTimeAfterPrepare, prepareTimestamp);
 
-        // TODO: Once we no longer hold the stable optime behind the earliest prepare optime
-        // whose corresponding commit/abort oplog entry optime is not majority committed, uncomment
-        // this read.
-        // jsTestLog(
-        //     "Test read with read concern 'majority' doesn't block on a prepared transaction.");
-        // assert.commandWorked(read({level: 'majority'}, successTimeout, testDB, collName, 2));
+        jsTestLog(
+            "Test read with read concern 'majority' doesn't block on a prepared transaction.");
+        assert.commandWorked(read({level: 'majority'}, successTimeout, testDB, collName, 3));
 
         jsTestLog("Test read with read concern 'local' doesn't block on a prepared transaction.");
-        assert.commandWorked(read({level: 'local'}, successTimeout, testDB, collName, 2));
+        assert.commandWorked(read({level: 'local'}, successTimeout, testDB, collName, 3));
 
         jsTestLog(
             "Test read with read concern 'available' doesn't block on a prepared transaction.");
-        assert.commandWorked(read({level: 'available'}, successTimeout, testDB, collName, 2));
+        assert.commandWorked(read({level: 'available'}, successTimeout, testDB, collName, 3));
 
         jsTestLog("Test read with read concern 'linearizable' blocks on a prepared transaction.");
         assert.commandFailedWithCode(
@@ -127,6 +125,14 @@
                                   collName2,
                                   1));
 
+        jsTestLog("Test read from an update blocks on a prepared transaction.");
+        assert.commandFailedWithCode(testDB.runCommand({
+            update: collName,
+            updates: [{q: {_id: 2}, u: {_id: 2, in_prepared_txn: false, a: 1}}],
+            maxTimeMS: failureTimeout,
+        }),
+                                     ErrorCodes.MaxTimeMSExpired);
+
         // Create a second session and start a new transaction to test snapshot reads.
         const session2 = conn.startSession({causalConsistency: false});
         const sessionDB2 = session2.getDatabase(dbName);
@@ -136,32 +142,48 @@
         session2.startTransaction(
             {readConcern: {level: "snapshot", atClusterTime: clusterTimeAfterPrepare}});
 
-        // TODO: Once we no longer hold the stable optime behind the earliest prepare optime
-        // whose corresponding commit/abort oplog entry optime is not majority committed, uncomment
-        // this read.
-        // jsTestLog("Test read with read concern 'snapshot' and a read timestamp after " +
-        //           "prepareTimestamp on non-prepared documents doesn't block on a prepared " +
-        //           "transaction.");
-        // assert.commandWorked(read({}, failureTimeout, sessionDB2, collName2, 1));
+        jsTestLog("Test read with read concern 'snapshot' and a read timestamp after " +
+                  "prepareTimestamp on non-prepared documents doesn't block on a prepared " +
+                  "transaction.");
+        assert.commandWorked(read({}, failureTimeout, sessionDB2, collName2, 1));
 
         jsTestLog("Test read with read concern 'snapshot' and a read timestamp after " +
                   "prepareTimestamp blocks on a prepared transaction.");
         assert.commandFailedWithCode(read({}, failureTimeout, sessionDB2, collName),
                                      ErrorCodes.MaxTimeMSExpired);
-
         session2.abortTransaction_forTesting();
-        session2.startTransaction(
-            {readConcern: {level: "snapshot", atClusterTime: clusterTimeBeforePrepare}});
 
         jsTestLog("Test read with read concern 'snapshot' and atClusterTime before " +
                   "prepareTimestamp doesn't block on a prepared transaction.");
-        assert.commandWorked(read({}, successTimeout, sessionDB2, collName, 1));
+        session2.startTransaction(
+            {readConcern: {level: "snapshot", atClusterTime: clusterTimeBeforePrepare}});
+        assert.commandWorked(read({}, successTimeout, sessionDB2, collName, 2));
+        session2.abortTransaction_forTesting();
+
+        jsTestLog("Test read from a transaction with read concern 'majority' blocks on a prepared" +
+                  " transaction.");
+        session2.startTransaction({readConcern: {level: "majority"}});
+        assert.commandFailedWithCode(read({}, failureTimeout, sessionDB2, collName),
+                                     ErrorCodes.MaxTimeMSExpired);
+        session2.abortTransaction_forTesting();
+
+        jsTestLog("Test read from a transaction with read concern 'local' blocks on a prepared " +
+                  "transaction.");
+        session2.startTransaction({readConcern: {level: "local"}});
+        assert.commandFailedWithCode(read({}, failureTimeout, sessionDB2, collName),
+                                     ErrorCodes.MaxTimeMSExpired);
+        session2.abortTransaction_forTesting();
+
+        jsTestLog("Test read from a transaction with no read concern specified blocks on a " +
+                  "prepared transaction.");
+        session2.startTransaction();
+        assert.commandFailedWithCode(read({}, failureTimeout, sessionDB2, collName),
+                                     ErrorCodes.MaxTimeMSExpired);
+        session2.abortTransaction_forTesting();
+        session2.endSession();
 
         session.abortTransaction_forTesting();
         session.endSession();
-
-        session2.abortTransaction_forTesting();
-        session2.endSession();
     }
 
     try {

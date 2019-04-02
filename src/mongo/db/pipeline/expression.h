@@ -2092,4 +2092,31 @@ private:
     boost::intrusive_ptr<Expression> _onError;
     boost::intrusive_ptr<Expression> _onNull;
 };
+
+class ExpressionRegexFind final : public ExpressionFixedArity<ExpressionRegexFind, 1> {
+public:
+    explicit ExpressionRegexFind(const boost::intrusive_ptr<ExpressionContext>& expCtx)
+        : ExpressionFixedArity<ExpressionRegexFind, 1>(expCtx) {}
+
+    Value evaluate(const Document& root) const final;
+    const char* getOpName() const final;
+};
+
+class ExpressionRegexFindAll final : public ExpressionFixedArity<ExpressionRegexFindAll, 1> {
+public:
+    explicit ExpressionRegexFindAll(const boost::intrusive_ptr<ExpressionContext>& expCtx)
+        : ExpressionFixedArity<ExpressionRegexFindAll, 1>(expCtx) {}
+
+    Value evaluate(const Document& root) const final;
+    const char* getOpName() const final;
+};
+
+class ExpressionRegexMatch final : public ExpressionFixedArity<ExpressionRegexMatch, 1> {
+public:
+    explicit ExpressionRegexMatch(const boost::intrusive_ptr<ExpressionContext>& expCtx)
+        : ExpressionFixedArity<ExpressionRegexMatch, 1>(expCtx) {}
+
+    Value evaluate(const Document& root) const final;
+    const char* getOpName() const final;
+};
 }

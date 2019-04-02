@@ -1,9 +1,10 @@
 // @tags: [
+//   assumes_superuser_permissions,
 //   does_not_support_stepdowns,
+//   requires_fastcount,
 //   requires_getmore,
 //   requires_non_retryable_commands,
 //   requires_non_retryable_writes,
-//   requires_fastcount,
 // ]
 
 /*
@@ -314,6 +315,7 @@
         grantRolesToUser: {skip: isUnrelated},
         handshake: {skip: isUnrelated},
         hostInfo: {skip: isUnrelated},
+        httpClientRequest: {skip: isAnInternalCommand},
         insert: {command: {insert: "view", documents: [{x: 1}]}, expectFailure: true},
         invalidateUserCache: {skip: isUnrelated},
         isdbgrid: {skip: isUnrelated},

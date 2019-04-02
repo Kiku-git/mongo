@@ -84,9 +84,13 @@ env.Library(
     target='storage_options',
     source=[
         'storage_options.cpp',
+        env.Idlc('storage_parameters.idl')[0],
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/db/server_parameters',
+        '$BUILD_DIR/mongo/base',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/idl/server_parameter',
     ],
 )
 
@@ -179,7 +183,6 @@ env.Library(
         'record_store_test_truncate.cpp',
         'record_store_test_updaterecord.cpp',
         'record_store_test_updatewithdamages.cpp',
-        'record_store_test_validate.cpp',
         ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/service_context',
@@ -353,4 +356,24 @@ env.Library(
         'storage_options',
         '$BUILD_DIR/mongo/base',
     ]
+)
+
+env.Library(
+    target='flow_control',
+    source=[
+        'flow_control.cpp',
+        env.Idlc('flow_control_parameters.idl')[0],
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/commands/server_status',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/concurrency/flow_control_ticketholder',
+        '$BUILD_DIR/mongo/db/concurrency/lock_manager',
+        '$BUILD_DIR/mongo/db/server_options_core',
+        '$BUILD_DIR/mongo/db/service_context',
+        '$BUILD_DIR/mongo/idl/server_parameter',
+        '$BUILD_DIR/mongo/util/background_job',
+    ],
 )

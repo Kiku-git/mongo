@@ -33,6 +33,7 @@
 
 #include "mongo/db/server_options_base.h"
 #include "mongo/db/server_options_helpers.h"
+#include "mongo/db/storage/mobile/mobile_global_options_gen.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/embedded/embedded_options_gen.h"
 
@@ -46,6 +47,11 @@ using std::string;
 
 Status addOptions(optionenvironment::OptionSection* options) {
     Status ret = addBaseServerOptions(options);
+    if (!ret.isOK()) {
+        return ret;
+    }
+
+    ret = addMobileStorageOptionDefinitions(options);
     if (!ret.isOK()) {
         return ret;
     }
@@ -77,6 +83,12 @@ Status storeOptions(const moe::Environment& params) {
     if (params.count("storage.dbPath")) {
         storageGlobalParams.dbpath = params["storage.dbPath"].as<string>();
     }
+
+    ret = mobileGlobalOptions.store(params);
+    if (!ret.isOK()) {
+        return ret;
+    }
+
 #ifdef _WIN32
     if (storageGlobalParams.dbpath.size() > 1 &&
         storageGlobalParams.dbpath[storageGlobalParams.dbpath.size() - 1] == '/') {

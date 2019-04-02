@@ -51,7 +51,6 @@ MozJSProxyScope::MozJSProxyScope(MozJSScriptEngine* engine)
       _mutex(),
       _state(State::Idle),
       _status(Status::OK()),
-      _condvar(),
       // Despite calling PR_CreateThread, we're actually using our own
       // implementation of PosixNSPR.cpp in this directory. So these threads
       // are actually hosted on top of stdx::threads and most of the flags
@@ -83,7 +82,7 @@ void MozJSProxyScope::init(const BSONObj* data) {
 
 void MozJSProxyScope::reset() {
     unregisterOperation();
-    runWithoutInterruption([&] { _implScope->reset(); });
+    runWithoutInterruptionExceptAtGlobalShutdown([&] { _implScope->reset(); });
 }
 
 bool MozJSProxyScope::isKillPending() const {
@@ -104,13 +103,14 @@ void MozJSProxyScope::externalSetup() {
 
 std::string MozJSProxyScope::getError() {
     std::string out;
-    runWithoutInterruption([&] { out = _implScope->getError(); });
+    runWithoutInterruptionExceptAtGlobalShutdown([&] { out = _implScope->getError(); });
     return out;
 }
 
 bool MozJSProxyScope::hasOutOfMemoryException() {
     bool out;
-    runWithoutInterruption([&] { out = _implScope->hasOutOfMemoryException(); });
+    runWithoutInterruptionExceptAtGlobalShutdown(
+        [&] { out = _implScope->hasOutOfMemoryException(); });
     return out;
 }
 
@@ -119,11 +119,11 @@ void MozJSProxyScope::gc() {
 }
 
 void MozJSProxyScope::advanceGeneration() {
-    runWithoutInterruption([&] { _implScope->advanceGeneration(); });
+    runWithoutInterruptionExceptAtGlobalShutdown([&] { _implScope->advanceGeneration(); });
 }
 
 void MozJSProxyScope::requireOwnedObjects() {
-    runWithoutInterruption([&] { _implScope->requireOwnedObjects(); });
+    runWithoutInterruptionExceptAtGlobalShutdown([&] { _implScope->requireOwnedObjects(); });
 }
 
 double MozJSProxyScope::getNumber(const char* field) {
@@ -274,11 +274,11 @@ void MozJSProxyScope::run(Closure&& closure) {
 }
 
 template <typename Closure>
-void MozJSProxyScope::runWithoutInterruption(Closure&& closure) {
+void MozJSProxyScope::runWithoutInterruptionExceptAtGlobalShutdown(Closure&& closure) {
     auto toRun = [&] { run(std::forward<Closure>(closure)); };
 
     if (_opCtx) {
-        return _opCtx->runWithoutInterruption(toRun);
+        return _opCtx->runWithoutInterruptionExceptAtGlobalShutdown(toRun);
     } else {
         return toRun();
     }
@@ -291,19 +291,21 @@ void MozJSProxyScope::runOnImplThread(unique_function<void()> f) {
     invariant(_state == State::Idle);
     _state = State::ProxyRequest;
 
-    _condvar.notify_one();
+    lk.unlock();
+    _implCondvar.notify_one();
+    lk.lock();
 
     Interruptible* interruptible = _opCtx ? _opCtx : Interruptible::notInterruptible();
 
     auto pred = [&] { return _state == State::ImplResponse; };
 
     try {
-        interruptible->waitForConditionOrInterrupt(_condvar, lk, pred);
+        interruptible->waitForConditionOrInterrupt(_proxyCondvar, lk, pred);
     } catch (const DBException& ex) {
         _status = ex.toStatus();
 
         _implScope->kill();
-        _condvar.wait(lk, pred);
+        _proxyCondvar.wait(lk, pred);
     }
 
     _state = State::Idle;
@@ -326,7 +328,7 @@ void MozJSProxyScope::shutdownThread() {
         _state = State::Shutdown;
     }
 
-    _condvar.notify_one();
+    _implCondvar.notify_one();
 
     PR_JoinThread(_thread);
 }
@@ -369,7 +371,7 @@ void MozJSProxyScope::implThread(void* arg) {
         stdx::unique_lock<stdx::mutex> lk(proxy->_mutex);
         {
             MONGO_IDLE_THREAD_BLOCK;
-            proxy->_condvar.wait(lk, [proxy] {
+            proxy->_implCondvar.wait(lk, [proxy] {
                 return proxy->_state == State::ProxyRequest || proxy->_state == State::Shutdown;
             });
         }
@@ -387,7 +389,8 @@ void MozJSProxyScope::implThread(void* arg) {
 
         proxy->_state = State::ImplResponse;
 
-        proxy->_condvar.notify_one();
+        lk.unlock();
+        proxy->_proxyCondvar.notify_one();
     }
 }
 

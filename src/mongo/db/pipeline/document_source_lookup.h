@@ -117,10 +117,6 @@ public:
 
     DepsTracker::State getDependencies(DepsTracker* deps) const final;
 
-    BSONObjSet getOutputSorts() final {
-        return DocumentSource::truncateSortSet(pSource->getOutputSorts(), {_as.fullPath()});
-    }
-
     boost::optional<MergingLogic> mergingLogic() final {
         // {shardsStage, mergingStage, sortPattern}
         return MergingLogic{nullptr, this, boost::none};
@@ -168,6 +164,17 @@ public:
      */
     bool wasConstructedWithPipelineSyntax() const {
         return !static_cast<bool>(_localField);
+    }
+
+    /**
+     * Returns a non-executable pipeline which can be useful for introspection. In this pipeline,
+     * all view definitions are resolved. This pipeline is present in both the sub-pipeline version
+     * of $lookup and the simpler 'localField/foreignField' version, but because it is not tied to
+     * any document to look up it is missing variable definitions for the former type and the $match
+     * stage which will be added to enforce the join criteria for the latter.
+     */
+    const auto& getResolvedIntrospectionPipeline() const {
+        return *_resolvedIntrospectionPipeline;
     }
 
     const Variables& getVariables_forTest() {

@@ -71,7 +71,7 @@
     jsTest.log("Start a transaction and then commit it.");
 
     // Compare server status after starting a transaction with the server status before.
-    session.startTransaction();
+    session.startTransaction({readConcern: {level: 'snapshot'}});
     assert.commandWorked(sessionColl.insert({_id: "insert-1"}));
     // Trigger the oldestOpenUnpreparedReadTimestamp to be set.
     assert.eq(sessionColl.find({_id: "insert-1"}).itcount(), 1);
@@ -110,7 +110,7 @@
     jsTest.log("Start a transaction and then abort it.");
 
     // Compare server status after starting a transaction with the server status before.
-    session.startTransaction();
+    session.startTransaction({readConcern: {level: 'snapshot'}});
     assert.commandWorked(sessionColl.insert({_id: "insert-2"}));
     // Trigger the oldestOpenUnpreparedReadTimestamp to be set.
     assert.eq(sessionColl.find({_id: "insert-2"}).itcount(), 1);
@@ -150,7 +150,7 @@
     jsTest.log("Start a transaction that will abort on a duplicated key error.");
 
     // Compare server status after starting a transaction with the server status before.
-    session.startTransaction();
+    session.startTransaction({readConcern: {level: 'snapshot'}});
     // Inserting a new document will work fine, and the transaction starts.
     assert.commandWorked(sessionColl.insert({_id: "insert-3"}));
     // Trigger the oldestOpenUnpreparedReadTimestamp to be set.
@@ -192,10 +192,8 @@
     // inactive counters while operation is running inside a transaction.
     jsTest.log(
         "Start a transaction that will hang in the middle of an operation due to a fail point.");
-    assert.commandWorked(testDB.adminCommand(
-        {configureFailPoint: 'setInterruptOnlyPlansCheckForInterruptHang', mode: 'alwaysOn'}));
     assert.commandWorked(
-        testDB.adminCommand({setParameter: 1, internalQueryExecYieldIterations: 1}));
+        testDB.adminCommand({configureFailPoint: 'hangDuringBatchUpdate', mode: 'alwaysOn'}));
 
     const transactionFn = function() {
         const collName = 'server_transactions_metrics';
@@ -226,8 +224,8 @@
         initialStatus.transactions, newStatus.transactions, "currentInactive", 0);
 
     // Now the transaction can proceed.
-    assert.commandWorked(testDB.adminCommand(
-        {configureFailPoint: 'setInterruptOnlyPlansCheckForInterruptHang', mode: 'off'}));
+    assert.commandWorked(
+        testDB.adminCommand({configureFailPoint: 'hangDuringBatchUpdate', mode: 'off'}));
     transactionProcess();
     newStatus = assert.commandWorked(testDB.adminCommand({serverStatus: 1}));
     verifyServerStatusFields(newStatus);

@@ -45,6 +45,7 @@
 #include "mongo/db/command_generic_argument.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/index/index_descriptor.h"
+#include "mongo/db/index_builds_coordinator.h"
 #include "mongo/db/op_observer.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator.h"
@@ -309,7 +310,7 @@ Status _collModInternal(OperationContext* opCtx,
     // May also modify a view instead of a collection.
     boost::optional<ViewDefinition> view;
     if (db && !coll) {
-        const auto sharedView = db->getViewCatalog()->lookup(opCtx, nss.ns());
+        const auto sharedView = ViewCatalog::get(db)->lookup(opCtx, nss.ns());
         if (sharedView) {
             // We copy the ViewDefinition as it is modified below to represent the requested state.
             view = {*sharedView};
@@ -319,6 +320,10 @@ Status _collModInternal(OperationContext* opCtx,
     // This can kill all cursors so don't allow running it while a background operation is in
     // progress.
     BackgroundOperation::assertNoBgOpInProgForNs(nss);
+    if (coll) {
+        IndexBuildsCoordinator::get(opCtx)->assertNoIndexBuildInProgForCollection(
+            coll->uuid().get());
+    }
 
     // If db/collection/view does not exist, short circuit and return.
     if (!db || (!coll && !view)) {
@@ -355,7 +360,7 @@ Status _collModInternal(OperationContext* opCtx,
         if (!cmr.viewOn.empty())
             view->setViewOn(NamespaceString(dbName, cmr.viewOn));
 
-        ViewCatalog* catalog = db->getViewCatalog();
+        ViewCatalog* catalog = ViewCatalog::get(db);
 
         BSONArrayBuilder pipeline;
         for (auto& item : view->pipeline()) {
@@ -520,8 +525,11 @@ Status _updateNonReplicatedUniqueIndexesPerDatabase(OperationContext* opCtx,
 
     // Iterate through all collections if we're in the "local" database.
     if (dbName == "local") {
-        for (auto collectionIt = db->begin(); collectionIt != db->end(); ++collectionIt) {
+        for (auto collectionIt = db->begin(opCtx); collectionIt != db->end(opCtx); ++collectionIt) {
             Collection* coll = *collectionIt;
+            if (!coll) {
+                break;
+            }
 
             auto collModStatus = _updateNonReplicatedIndexPerCollection(opCtx, coll);
             if (!collModStatus.isOK())
@@ -553,8 +561,12 @@ void _updateUniqueIndexesForDatabase(OperationContext* opCtx, const std::string&
         if (!db)
             return;
 
-        for (auto collectionIt = db->begin(); collectionIt != db->end(); ++collectionIt) {
+        for (auto collectionIt = db->begin(opCtx); collectionIt != db->end(opCtx); ++collectionIt) {
             Collection* coll = *collectionIt;
+            if (!coll) {
+                break;
+            }
+
             NamespaceString collNSS = coll->ns();
 
             // Skip non-replicated collection.

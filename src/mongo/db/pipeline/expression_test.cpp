@@ -5950,6 +5950,119 @@ TEST(GetComputedPathsTest, ExpressionMapNotConsideredRenameWithDottedInputPath) 
 
 }  // namespace GetComputedPathsTest
 
+namespace ExpressionRegexTest {
+
+TEST(ExpressionRegexFindTest, BasicTest) {
+    Value input(fromjson("{input: 'asdf', regex: '^as' }"));
+    BSONObj expectedOut(fromjson("{match: 'as', idx:0, captures:[]}"));
+    intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    ExpressionRegexFind regexF(expCtx);
+    regexF.addOperand(ExpressionConstant::create(expCtx, input));
+    Value output = regexF.evaluate(Document());
+    ASSERT_BSONOBJ_EQ(toBson(output.getDocument()), expectedOut);
+}
+
+TEST(ExpressionRegexFindTest, ExtendedRegexOptions) {
+    Value input(fromjson("{input: 'FirstLine\\nSecondLine', regex: '^second' , options: 'mi'}"));
+    BSONObj expectedOut(fromjson("{match: 'Second', idx:10, captures:[]}"));
+    intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    ExpressionRegexFind regexF(expCtx);
+    regexF.addOperand(ExpressionConstant::create(expCtx, input));
+    Value output = regexF.evaluate(Document());
+    ASSERT_BSONOBJ_EQ(toBson(output.getDocument()), expectedOut);
+}
+
+TEST(ExpressionRegexFindTest, FailureCase) {
+    Value input(
+        fromjson("{input: 'FirstLine\\nSecondLine', regex: {invalid : 'regex'} , options: 'mi'}"));
+    intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    ExpressionRegexFind regexF(expCtx);
+    regexF.addOperand(ExpressionConstant::create(expCtx, input));
+    ASSERT_THROWS_CODE(regexF.evaluate(Document()), DBException, 51105);
+}
+
+TEST(ExpressionRegexFindAllTest, MultipleMatches) {
+    Value input(fromjson("{input: 'a1b2c3', regex: '([a-c][1-3])' }"));
+    std::vector<Value> expectedOut = {Value(fromjson("{match: 'a1', idx:0, captures:['a1']}")),
+                                      Value(fromjson("{match: 'b2', idx:2, captures:['b2']}")),
+                                      Value(fromjson("{match: 'c3', idx:4, captures:['c3']}"))};
+    intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    ExpressionRegexFindAll regexF(expCtx);
+    regexF.addOperand(ExpressionConstant::create(expCtx, input));
+    Value output = regexF.evaluate(Document());
+    ASSERT_VALUE_EQ(output, Value(expectedOut));
+}
+
+TEST(ExpressionRegexFindAllTest, NoMatch) {
+    Value input(fromjson("{input: 'a1b2c3', regex: 'ab' }"));
+    intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    ExpressionRegexFindAll regexF(expCtx);
+    regexF.addOperand(ExpressionConstant::create(expCtx, input));
+    Value output = regexF.evaluate(Document());
+    ASSERT_VALUE_EQ(output, Value(std::vector<Value>()));
+}
+
+TEST(ExpressionRegexFindAllTest, FailureCase) {
+    Value input(fromjson("{input: 'FirstLine\\nSecondLine', regex: '[0-9'}"));
+    intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    ExpressionRegexFindAll regexF(expCtx);
+    regexF.addOperand(ExpressionConstant::create(expCtx, input));
+    ASSERT_THROWS_CODE(regexF.evaluate(Document()), DBException, 51111);
+}
+
+TEST(ExpressionRegexFindAllTest, InvalidUTF8InInput) {
+    std::string inputField = "1234 ";
+    // Append an invalid UTF-8 character.
+    inputField += '\xe5';
+    inputField += "  1234";
+    Value input(fromjson("{input: '" + inputField + "', regex: '[0-9]'}"));
+    intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    ExpressionRegexFindAll regexF(expCtx);
+    regexF.addOperand(ExpressionConstant::create(expCtx, input));
+    // Verify that PCRE will error during execution if input is not a valid UTF-8.
+    ASSERT_THROWS_CODE(regexF.evaluate(Document()), DBException, 51156);
+}
+
+TEST(ExpressionRegexFindAllTest, InvalidUTF8InRegex) {
+    std::string regexField = "1234 ";
+    // Append an invalid UTF-8 character.
+    regexField += '\xe5';
+    Value input(fromjson("{input: '123456', regex: '" + regexField + "'}"));
+    intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    ExpressionRegexFindAll regexF(expCtx);
+    regexF.addOperand(ExpressionConstant::create(expCtx, input));
+    // Verify that PCRE will error if REGEX is not a valid UTF-8.
+    ASSERT_THROWS_CODE(regexF.evaluate(Document()), DBException, 51111);
+}
+
+TEST(ExpressionRegexMatchTest, NoMatch) {
+    Value input(fromjson("{input: 'asdf', regex: '^sd' }"));
+    Value expectedOut(false);
+    intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    ExpressionRegexMatch regexMatchExpr(expCtx);
+    regexMatchExpr.addOperand(ExpressionConstant::create(expCtx, input));
+    ASSERT_VALUE_EQ(regexMatchExpr.evaluate(Document()), expectedOut);
+}
+
+TEST(ExpressionRegexMatchTest, ExtendedRegexOptions) {
+    Value input(fromjson("{input: 'FirstLine\\nSecondLine', regex: '^second' , options: 'mi'}"));
+    Value expectedOut(true);
+    intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    ExpressionRegexMatch regexMatchExpr(expCtx);
+    regexMatchExpr.addOperand(ExpressionConstant::create(expCtx, input));
+    ASSERT_VALUE_EQ(regexMatchExpr.evaluate(Document()), expectedOut);
+}
+
+TEST(ExpressionRegexMatchTest, FailureCase) {
+    Value input(fromjson("{regex: 'valid', input: {invalid : 'input'} , options: 'mi'}"));
+    intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    ExpressionRegexMatch regexMatchExpr(expCtx);
+    regexMatchExpr.addOperand(ExpressionConstant::create(expCtx, input));
+    ASSERT_THROWS_CODE(regexMatchExpr.evaluate(Document()), DBException, 51104);
+}
+
+}  // namespace ExpressionRegexTest
+
 class All : public Suite {
 public:
     All() : Suite("expression") {}
@@ -6155,4 +6268,42 @@ public:
 
 SuiteInstance<All> myall;
 
+namespace NowAndClusterTime {
+TEST(NowAndClusterTime, BasicTest) {
+    intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+
+    // $$NOW is the Date type.
+    {
+        auto expression = ExpressionFieldPath::parse(expCtx, "$$NOW", expCtx->variablesParseState);
+        Value result = expression->evaluate(Document());
+        ASSERT_EQ(result.getType(), Date);
+    }
+    // $$CLUSTER_TIME is the timestamp type.
+    {
+        auto expression =
+            ExpressionFieldPath::parse(expCtx, "$$CLUSTER_TIME", expCtx->variablesParseState);
+        Value result = expression->evaluate(Document());
+        ASSERT_EQ(result.getType(), bsonTimestamp);
+    }
+
+    // Multiple references to $$NOW must return the same value.
+    {
+        auto expression = Expression::parseExpression(
+            expCtx, fromjson("{$eq: [\"$$NOW\", \"$$NOW\"]}"), expCtx->variablesParseState);
+        Value result = expression->evaluate(Document());
+
+        ASSERT_VALUE_EQ(result, Value{true});
+    }
+    // Same is true for the $$CLUSTER_TIME.
+    {
+        auto expression =
+            Expression::parseExpression(expCtx,
+                                        fromjson("{$eq: [\"$$CLUSTER_TIME\", \"$$CLUSTER_TIME\"]}"),
+                                        expCtx->variablesParseState);
+        Value result = expression->evaluate(Document());
+
+        ASSERT_VALUE_EQ(result, Value{true});
+    }
+}
+}
 }  // namespace ExpressionTests

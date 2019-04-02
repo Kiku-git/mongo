@@ -44,24 +44,6 @@ namespace mongo {
  */
 class UpdateInternalNode : public UpdateNode {
 public:
-    /**
-     * Helper class for appending to a FieldRef for the duration of the current scope and then
-     * restoring the FieldRef at the end of the scope.
-     */
-    class FieldRefTempAppend {
-    public:
-        FieldRefTempAppend(FieldRef& fieldRef, StringData part) : _fieldRef(fieldRef) {
-            _fieldRef.appendPart(part);
-        }
-
-        ~FieldRefTempAppend() {
-            _fieldRef.removeLastPart();
-        }
-
-    private:
-        FieldRef& _fieldRef;
-    };
-
     UpdateInternalNode(UpdateNode::Type type) : UpdateNode(type) {}
 
     /**
@@ -76,6 +58,13 @@ public:
     virtual void setChild(std::string field, std::unique_ptr<UpdateNode> child) = 0;
 
 protected:
+    /**
+     * Helper for subclass implementations needing to produce the syntax for applied array filters.
+     */
+    static std::string toArrayFilterIdentifier(const std::string& fieldName) {
+        return "$[" + fieldName + "]";
+    }
+
     /**
      * Helper for subclass implementations of createUpdateNodeByMerging. Any UpdateNode value whose
      * key is only in 'leftMap' or only in 'rightMap' is cloned and added to the output map. If the

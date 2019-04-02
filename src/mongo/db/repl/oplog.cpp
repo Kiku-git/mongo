@@ -80,13 +80,14 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/timestamp_block.h"
 #include "mongo/db/repl/transaction_oplog_application.h"
-#include "mongo/db/server_parameters.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/stats/server_write_concern_metrics.h"
+#include "mongo/db/storage/flow_control.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/transaction_participant.h"
+#include "mongo/db/views/view_catalog.h"
 #include "mongo/platform/random.h"
 #include "mongo/scripting/engine.h"
 #include "mongo/stdx/memory.h"
@@ -113,11 +114,16 @@ namespace {
 
 MONGO_FAIL_POINT_DEFINE(sleepBetweenInsertOpTimeGenerationAndLogOp);
 
+// Failpoint to block after a write and its oplog entry have been written to the storage engine and
+// are visible, but before we have advanced 'lastApplied' for the write.
+MONGO_FAIL_POINT_DEFINE(hangBeforeLogOpAdvancesLastApplied);
+
 /**
  * This structure contains per-service-context state related to the oplog.
  */
 struct LocalOplogInfo {
-    MONGO_DISALLOW_COPYING(LocalOplogInfo);
+    LocalOplogInfo(const LocalOplogInfo&) = delete;
+    LocalOplogInfo& operator=(const LocalOplogInfo&) = delete;
     LocalOplogInfo() = default;
 
     // Name of the oplog collection.
@@ -158,11 +164,20 @@ void _getNextOpTimes(OperationContext* opCtx,
         term = replCoord->getTerm();
     }
 
+    Timestamp ts;
+    // Provide a sample to FlowControl after the `oplogInfo.newOpMutex` is released.
+    ON_BLOCK_EXIT([opCtx, &ts, count] {
+        auto flowControl = FlowControl::get(opCtx);
+        if (flowControl) {
+            flowControl->sample(ts, count);
+        }
+    });
+
     // Allow the storage engine to start the transaction outside the critical section.
     opCtx->recoveryUnit()->preallocateSnapshot();
     stdx::lock_guard<stdx::mutex> lk(oplogInfo.newOpMutex);
 
-    auto ts = LogicalClock::get(opCtx)->reserveTicks(count).asTimestamp();
+    ts = LogicalClock::get(opCtx)->reserveTicks(count).asTimestamp();
     const bool orderedCommit = false;
 
     if (persist) {
@@ -366,13 +381,21 @@ void createIndexForApplyOps(OperationContext* opCtx,
         Lock::TempRelease release(opCtx->lockState());
         // TempRelease cannot fail because no recursive locks should be taken.
         invariant(!opCtx->lockState()->isLocked());
-
-        IndexBuilder* builder = new IndexBuilder(
-            indexSpec, constraints, replicatedWrites, opCtx->recoveryUnit()->getCommitTimestamp());
+        auto collUUID = *indexCollection->uuid();
+        auto indexBuildUUID = UUID::gen();
+        auto indexBuildsCoordinator = IndexBuildsCoordinator::get(opCtx);
+        // We don't pass in a commit quorum here because secondary nodes don't have any knowledge of
+        // it.
+        IndexBuildsCoordinator::IndexBuildOptions indexBuildOptions = {
+            /*commitQuorum=*/boost::none};
         // This spawns a new thread and returns immediately.
-        builder->go();
-        // Wait for thread to start and register itself
-        IndexBuilder::waitForBgIndexStarting();
+        MONGO_COMPILER_VARIABLE_UNUSED auto fut = uassertStatusOK(
+            indexBuildsCoordinator->startIndexBuild(opCtx,
+                                                    collUUID,
+                                                    {indexSpec},
+                                                    indexBuildUUID,
+                                                    IndexBuildProtocol::kSinglePhase,
+                                                    indexBuildOptions));
     }
 
     opCtx->recoveryUnit()->abandonSnapshot();
@@ -452,7 +475,7 @@ OplogDocWriter _logOpWriter(OperationContext* opCtx,
         b.append("o2", *o2);
 
     invariant(wallTime != Date_t{});
-    b.appendDate("wall", wallTime);
+    b.appendDate(OplogEntryBase::kWallClockTimeFieldName, wallTime);
 
     appendSessionInfo(opCtx, &b, statementId, sessionInfo, oplogLink);
 
@@ -487,6 +510,7 @@ OplogDocWriter _logOpWriter(OperationContext* opCtx,
  * timestamps - an array with size nDocs of respective Timestamp objects for each DocWriter.
  * oplogCollection - collection to be written to.
   * finalOpTime - the OpTime of the last DocWriter object.
+  * wallTime - the wall clock time of the corresponding oplog entry.
  */
 void _logOpsInner(OperationContext* opCtx,
                   const NamespaceString& nss,
@@ -494,7 +518,8 @@ void _logOpsInner(OperationContext* opCtx,
                   Timestamp* timestamps,
                   size_t nDocs,
                   Collection* oplogCollection,
-                  OpTime finalOpTime) {
+                  OpTime finalOpTime,
+                  Date_t wallTime) {
     auto replCoord = ReplicationCoordinator::get(opCtx);
     if (nss.size() && replCoord->getReplicationMode() == ReplicationCoordinator::modeReplSet &&
         !replCoord->canAcceptWritesFor(opCtx, nss)) {
@@ -508,7 +533,7 @@ void _logOpsInner(OperationContext* opCtx,
 
     // Set replCoord last optime only after we're sure the WUOW didn't abort and roll back.
     opCtx->recoveryUnit()->onCommit(
-        [opCtx, replCoord, finalOpTime](boost::optional<Timestamp> commitTime) {
+        [opCtx, replCoord, finalOpTime, wallTime](boost::optional<Timestamp> commitTime) {
             if (commitTime) {
                 // The `finalOpTime` may be less than the `commitTime` if multiple oplog entries
                 // are logging within one WriteUnitOfWork.
@@ -518,9 +543,16 @@ void _logOpsInner(OperationContext* opCtx,
                                         << commitTime->toString());
             }
 
+            // Optionally hang before advancing lastApplied.
+            if (MONGO_FAIL_POINT(hangBeforeLogOpAdvancesLastApplied)) {
+                log() << "hangBeforeLogOpAdvancesLastApplied fail point enabled.";
+                MONGO_FAIL_POINT_PAUSE_WHILE_SET_OR_INTERRUPTED(opCtx,
+                                                                hangBeforeLogOpAdvancesLastApplied);
+            }
+
             // Optimes on the primary should always represent consistent database states.
-            replCoord->setMyLastAppliedOpTimeForward(
-                finalOpTime, ReplicationCoordinator::DataConsistency::Consistent);
+            replCoord->setMyLastAppliedOpTimeAndWallTimeForward(
+                {finalOpTime, wallTime}, ReplicationCoordinator::DataConsistency::Consistent);
 
             // We set the last op on the client to 'finalOpTime', because that contains the
             // timestamp of the operation that the client actually performed.
@@ -599,7 +631,7 @@ OpTime logOp(OperationContext* opCtx,
                                inTxn);
     const DocWriter* basePtr = &writer;
     auto timestamp = slot.opTime.getTimestamp();
-    _logOpsInner(opCtx, nss, &basePtr, &timestamp, 1, oplog, slot.opTime);
+    _logOpsInner(opCtx, nss, &basePtr, &timestamp, 1, oplog, slot.opTime, wallClockTime);
     wuow.commit();
     return slot.opTime;
 }
@@ -695,7 +727,8 @@ std::vector<OpTime> logInsertOps(OperationContext* opCtx,
     invariant(!opTimes.empty());
     auto lastOpTime = opTimes.back();
     invariant(!lastOpTime.isNull());
-    _logOpsInner(opCtx, nss, basePtrs.get(), timestamps.get(), count, oplog, lastOpTime);
+    _logOpsInner(
+        opCtx, nss, basePtrs.get(), timestamps.get(), count, oplog, lastOpTime, wallClockTime);
     wuow.commit();
     return opTimes;
 }
@@ -811,17 +844,6 @@ void createOplog(OperationContext* opCtx) {
     createOplog(opCtx, localOplogInfo(opCtx->getServiceContext()).oplogName, isReplSet);
 }
 
-MONGO_REGISTER_SHIM(GetNextOpTimeClass::getNextOpTime)(OperationContext* opCtx)->OplogSlot {
-    // The local oplog collection pointer must already be established by this point.
-    // We can't establish it here because that would require locking the local database, which would
-    // be a lock order violation.
-    auto oplog = localOplogInfo(opCtx->getServiceContext()).oplog;
-    invariant(oplog);
-    OplogSlot os;
-    _getNextOpTimes(opCtx, oplog, 1, &os);
-    return os;
-}
-
 OplogSlot getNextOpTimeNoPersistForTesting(OperationContext* opCtx) {
     auto oplog = localOplogInfo(opCtx->getServiceContext()).oplog;
     invariant(oplog);
@@ -831,7 +853,8 @@ OplogSlot getNextOpTimeNoPersistForTesting(OperationContext* opCtx) {
     return os;
 }
 
-std::vector<OplogSlot> getNextOpTimes(OperationContext* opCtx, std::size_t count) {
+MONGO_REGISTER_SHIM(GetNextOpTimeClass::getNextOpTimes)
+(OperationContext* opCtx, std::size_t count)->std::vector<OplogSlot> {
     // The local oplog collection pointer must already be established by this point.
     // We can't establish it here because that would require locking the local database, which would
     // be a lock order violation.
@@ -842,7 +865,6 @@ std::vector<OplogSlot> getNextOpTimes(OperationContext* opCtx, std::size_t count
     _getNextOpTimes(opCtx, oplog, count, &(*oplogSlot));
     return oplogSlots;
 }
-
 
 // -------------------------------------
 
@@ -916,7 +938,7 @@ struct ApplyOpMetadata {
     }
 };
 
-std::map<std::string, ApplyOpMetadata> opsMap = {
+const StringMap<ApplyOpMetadata> kOpsMap = {
     {"create",
      {[](OperationContext* opCtx,
          const char* ns,
@@ -927,6 +949,7 @@ std::map<std::string, ApplyOpMetadata> opsMap = {
          OplogApplication::Mode mode,
          boost::optional<Timestamp> stableTimestampForRecovery) -> Status {
           const NamespaceString nss(parseNs(ns, cmd));
+          Lock::DBLock dbXLock(opCtx, nss.db(), MODE_X);
           if (auto idIndexElem = cmd["idIndex"]) {
               // Remove "idIndex" field from command.
               auto cmdWithoutIdIndex = cmd.removeField("idIndex");
@@ -968,7 +991,9 @@ std::map<std::string, ApplyOpMetadata> opsMap = {
           createIndexForApplyOps(opCtx, indexSpec, nss, {}, mode);
           return Status::OK();
       },
-      {ErrorCodes::IndexAlreadyExists, ErrorCodes::NamespaceNotFound}}},
+      {ErrorCodes::IndexAlreadyExists,
+       ErrorCodes::IndexBuildAlreadyInProgress,
+       ErrorCodes::NamespaceNotFound}}},
     {"startIndexBuild",
      {[](OperationContext* opCtx,
          const char* ns,
@@ -1312,7 +1337,18 @@ std::map<std::string, ApplyOpMetadata> opsMap = {
          const OplogEntry& entry,
          OplogApplication::Mode mode,
          boost::optional<Timestamp> stableTimestampForRecovery) -> Status {
-         return applyCommitTransaction(opCtx, entry, mode, stableTimestampForRecovery);
+         return applyCommitTransaction(opCtx, entry, mode);
+     }}},
+    {"prepareTransaction",
+     {[](OperationContext* opCtx,
+         const char* ns,
+         const BSONElement& ui,
+         BSONObj& cmd,
+         const OpTime& opTime,
+         const OplogEntry& entry,
+         OplogApplication::Mode mode,
+         boost::optional<Timestamp> stableTimestampForRecovery) -> Status {
+         return applyPrepareTransaction(opCtx, entry, mode);
      }}},
     {"abortTransaction",
      {[](OperationContext* opCtx,
@@ -1382,8 +1418,8 @@ Status applyOperation_inlock(OperationContext* opCtx,
         mode == repl::OplogApplication::Mode::kApplyOpsCmd || opCtx->writesAreReplicated();
     OpCounters* opCounters = shouldUseGlobalOpCounters ? &globalOpCounters : &replOpCounters;
 
-    std::array<StringData, 8> names = {"ts", "t", "o", "ui", "ns", "op", "b", "o2"};
-    std::array<BSONElement, 8> fields;
+    std::array<StringData, 9> names = {"ts", "t", "o", "ui", "ns", "op", "b", "o2", "inTxn"};
+    std::array<BSONElement, 9> fields;
     op.getFields(names, &fields);
     BSONElement& fieldTs = fields[0];
     BSONElement& fieldT = fields[1];
@@ -1393,10 +1429,16 @@ Status applyOperation_inlock(OperationContext* opCtx,
     BSONElement& fieldOp = fields[5];
     BSONElement& fieldB = fields[6];
     BSONElement& fieldO2 = fields[7];
+    BSONElement& fieldInTxn = fields[8];
 
     BSONObj o;
     if (fieldO.isABSONObj())
         o = fieldO.embeddedObject();
+
+    // Make sure we don't apply partial transactions through applyOps.
+    uassert(51117,
+            "Operations with 'inTxn' set are only used internally by secondaries.",
+            fieldInTxn.eoo());
 
     // operation type -- see logOp() comments for types
     const char* opType = fieldOp.valuestrsafe();
@@ -1423,26 +1465,17 @@ Status applyOperation_inlock(OperationContext* opCtx,
                 collection);
         requestNss = collection->ns();
         dassert(opCtx->lockState()->isCollectionLockedForMode(
-                    requestNss.ns(), supportsDocLocking() ? MODE_IX : MODE_X),
-                requestNss.ns());
+            requestNss, supportsDocLocking() ? MODE_IX : MODE_X));
     } else {
         uassert(ErrorCodes::InvalidNamespace,
                 "'ns' must be of type String",
                 fieldNs.type() == BSONType::String);
         const StringData ns = fieldNs.valuestrsafe();
         requestNss = NamespaceString(ns);
-        if (nsIsFull(ns)) {
-            if (supportsDocLocking()) {
-                // WiredTiger, and others requires MODE_IX since the applier threads driving
-                // this allow writes to the same collection on any thread.
-                dassert(opCtx->lockState()->isCollectionLockedForMode(ns, MODE_IX),
-                        requestNss.ns());
-            } else {
-                // mmapV1 ensures that all operations to the same collection are executed from
-                // the same worker thread, so it takes an exclusive lock (MODE_X)
-                dassert(opCtx->lockState()->isCollectionLockedForMode(ns, MODE_X), requestNss.ns());
-            }
-        }
+        invariant(requestNss.coll().size());
+        dassert(opCtx->lockState()->isCollectionLockedForMode(
+                    requestNss, supportsDocLocking() ? MODE_IX : MODE_X),
+                requestNss.ns());
         collection = db->getCollection(opCtx, requestNss);
     }
 
@@ -1470,7 +1503,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
     const bool haveWrappingWriteUnitOfWork = opCtx->lockState()->inAWriteUnitOfWork();
     uassert(ErrorCodes::CommandNotSupportedOnView,
             str::stream() << "applyOps not supported on view: " << requestNss.ns(),
-            collection || !db->getViewCatalog()->lookup(opCtx, requestNss.ns()));
+            collection || !ViewCatalog::get(db)->lookup(opCtx, requestNss.ns()));
 
     // This code must decide what timestamp the storage engine should make the upcoming writes
     // visible with. The requirements and use-cases:
@@ -1885,7 +1918,7 @@ Status applyCommand_inlock(OperationContext* opCtx,
         Lock::DBLock lock(opCtx, nss.db(), MODE_IS);
         auto databaseHolder = DatabaseHolder::get(opCtx);
         auto db = databaseHolder->getDb(opCtx, nss.ns());
-        if (db && !db->getCollection(opCtx, nss) && db->getViewCatalog()->lookup(opCtx, nss.ns())) {
+        if (db && !db->getCollection(opCtx, nss) && ViewCatalog::get(db)->lookup(opCtx, nss.ns())) {
             return {ErrorCodes::CommandNotSupportedOnView,
                     str::stream() << "applyOps not supported on view:" << nss.ns()};
         }
@@ -1897,8 +1930,12 @@ Status applyCommand_inlock(OperationContext* opCtx,
     // for each collection dropped. 'applyOps' and 'commitTransaction' will try to apply each
     // individual operation, and those will be caught then if they are a problem. 'abortTransaction'
     // won't ever change the server configuration collection.
-    auto whitelistedOps = std::vector<std::string>{
-        "dropDatabase", "applyOps", "dbCheck", "commitTransaction", "abortTransaction"};
+    std::vector<std::string> whitelistedOps{"dropDatabase",
+                                            "applyOps",
+                                            "dbCheck",
+                                            "commitTransaction",
+                                            "abortTransaction",
+                                            "prepareTransaction"};
     if ((mode == OplogApplication::Mode::kInitialSync) &&
         (std::find(whitelistedOps.begin(), whitelistedOps.end(), o.firstElementFieldName()) ==
          whitelistedOps.end()) &&
@@ -1930,7 +1967,7 @@ Status applyCommand_inlock(OperationContext* opCtx,
         // Don't assign commit timestamp for transaction commands.
         const StringData commandName(o.firstElementFieldName());
         if (op.getBoolField("prepare") || commandName == "abortTransaction" ||
-            commandName == "commitTransaction")
+            commandName == "commitTransaction" || commandName == "prepareTransaction")
             return false;
 
         switch (replMode) {
@@ -1957,29 +1994,33 @@ Status applyCommand_inlock(OperationContext* opCtx,
 
     bool done = false;
     while (!done) {
-        auto op = opsMap.find(o.firstElementFieldName());
-        if (op == opsMap.end()) {
+        auto op = kOpsMap.find(o.firstElementFieldName());
+        if (op == kOpsMap.end()) {
             return Status(ErrorCodes::BadValue,
                           mongoutils::str::stream() << "Invalid key '" << o.firstElementFieldName()
                                                     << "' found in field 'o'");
         }
-        ApplyOpMetadata curOpToApply = op->second;
-        Status status = Status::OK();
-        try {
-            // If 'writeTime' is not null, any writes in this scope will be given 'writeTime' as
-            // their timestamp at commit.
-            TimestampBlock tsBlock(opCtx, writeTime);
-            status = curOpToApply.applyFunc(opCtx,
-                                            nss.ns().c_str(),
-                                            fieldUI,
-                                            o,
-                                            opTime,
-                                            entry,
-                                            mode,
-                                            stableTimestampForRecovery);
-        } catch (...) {
-            status = exceptionToStatus();
-        }
+
+        const ApplyOpMetadata& curOpToApply = op->second;
+
+        Status status = [&] {
+            try {
+                // If 'writeTime' is not null, any writes in this scope will be given 'writeTime' as
+                // their timestamp at commit.
+                TimestampBlock tsBlock(opCtx, writeTime);
+                return curOpToApply.applyFunc(opCtx,
+                                              nss.ns().c_str(),
+                                              fieldUI,
+                                              o,
+                                              opTime,
+                                              entry,
+                                              mode,
+                                              stableTimestampForRecovery);
+            } catch (const DBException& ex) {
+                return ex.toStatus();
+            }
+        }();
+
         switch (status.code()) {
             case ErrorCodes::WriteConflict: {
                 // Need to throw this up to a higher level where it will be caught and the
@@ -1990,6 +2031,7 @@ Status applyCommand_inlock(OperationContext* opCtx,
                 Lock::TempRelease release(opCtx->lockState());
 
                 BackgroundOperation::awaitNoBgOpInProgForDb(nss.db());
+                IndexBuildsCoordinator::get(opCtx)->awaitNoBgOpInProgForDb(nss.db());
                 opCtx->recoveryUnit()->abandonSnapshot();
                 opCtx->checkForInterrupt();
                 break;
@@ -2001,19 +2043,28 @@ Status applyCommand_inlock(OperationContext* opCtx,
                 invariant(cmd);
 
                 // TODO: This parse could be expensive and not worth it.
-                BackgroundOperation::awaitNoBgOpInProgForNs(
-                    cmd->parse(opCtx, OpMsgRequest::fromDBAndBody(nss.db(), o))->ns().toString());
+                auto ns =
+                    cmd->parse(opCtx, OpMsgRequest::fromDBAndBody(nss.db(), o))->ns().toString();
+                auto swUUID = UUID::parse(fieldUI);
+                if (!swUUID.isOK()) {
+                    error() << "Failed command " << redact(o) << " on " << ns << " with status "
+                            << swUUID.getStatus() << "during oplog application. Expected a UUID.";
+                }
+                BackgroundOperation::awaitNoBgOpInProgForNs(ns);
+                IndexBuildsCoordinator::get(opCtx)->awaitNoIndexBuildInProgressForCollection(
+                    swUUID.getValue());
 
                 opCtx->recoveryUnit()->abandonSnapshot();
                 opCtx->checkForInterrupt();
                 break;
             }
-            default:
+            default: {
                 if (!curOpToApply.acceptableErrors.count(status.code())) {
                     error() << "Failed command " << redact(o) << " on " << nss.db()
                             << " with status " << status << " during oplog application";
                     return status;
                 }
+            }
             // fallthrough
             case ErrorCodes::OK:
                 done = true;
@@ -2042,7 +2093,7 @@ void initTimestampFromOplog(OperationContext* opCtx, const std::string& oplogNS)
     }
 }
 
-void oplogCheckCloseDatabase(OperationContext* opCtx, Database* db) {
+void oplogCheckCloseDatabase(OperationContext* opCtx, const Database* db) {
     invariant(opCtx->lockState()->isW());
     if (db->name() == "local") {
         localOplogInfo(opCtx->getServiceContext()).oplog = nullptr;

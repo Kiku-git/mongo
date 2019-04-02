@@ -35,25 +35,32 @@
 
 #include <vector>
 
+#include "mongo/db/concurrency/flow_control_ticketholder.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/storage/flow_control.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/stdx/new.h"
 #include "mongo/util/background.h"
 #include "mongo/util/concurrency/ticketholder.h"
 #include "mongo/util/debug_util.h"
+#include "mongo/util/fail_point_service.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/scopeguard.h"
 
 namespace mongo {
+
+MONGO_FAIL_POINT_DEFINE(failNonIntentLocksIfWaitNeeded);
+
 namespace {
 
 /**
  * Partitioned global lock statistics, so we don't hit the same bucket.
  */
 class PartitionedInstanceWideLockStats {
-    MONGO_DISALLOW_COPYING(PartitionedInstanceWideLockStats);
+    PartitionedInstanceWideLockStats(const PartitionedInstanceWideLockStats&) = delete;
+    PartitionedInstanceWideLockStats& operator=(const PartitionedInstanceWideLockStats&) = delete;
 
 public:
     PartitionedInstanceWideLockStats() {}
@@ -103,10 +110,6 @@ private:
 
 // Global lock manager instance.
 LockManager globalLockManager;
-
-// Global lock. Every server operation, which uses the Locker must acquire this lock at least
-// once. See comments in the header file (begin/endTransaction) for more information.
-const ResourceId resourceIdGlobal = ResourceId(RESOURCE_GLOBAL, ResourceId::SINGLETON_GLOBAL);
 
 // How often (in millis) to check for deadlock if a lock has not been granted for some time
 const Milliseconds MaxWaitTime = Milliseconds(500);
@@ -292,7 +295,6 @@ Locker::ClientState LockerImpl::getClientState() const {
 
 void LockerImpl::lockGlobal(OperationContext* opCtx, LockMode mode) {
     LockResult result = _lockGlobalBegin(opCtx, mode, Date_t::max());
-
     if (result == LOCK_WAITING) {
         lockGlobalComplete(opCtx, Date_t::max());
     }
@@ -371,8 +373,26 @@ LockResult LockerImpl::_lockGlobalBegin(OperationContext* opCtx, LockMode mode, 
             actualLockMode = isSharedLockMode(mode) ? MODE_S : MODE_X;
         }
     }
+
     const LockResult result = lockBegin(opCtx, resourceIdGlobal, actualLockMode);
     invariant(result == LOCK_OK || result == LOCK_WAITING);
+
+    // This failpoint is used to time out non-intent locks if they cannot be granted immediately.
+    // Testing-only.
+    if (result == LOCK_WAITING && MONGO_FAIL_POINT(failNonIntentLocksIfWaitNeeded)) {
+        // Clean up the state on any failed lock attempts.
+        auto unlockOnErrorGuard = makeGuard([&] {
+            LockRequestsMap::Iterator it = _requests.find(resourceIdGlobal);
+            _unlockImpl(&it);
+        });
+
+        uassert(ErrorCodes::LockTimeout,
+                "Cannot immediately acquire global lock. Timing out due to failpoint.",
+                (actualLockMode == MODE_IS || actualLockMode == MODE_IX));
+
+        unlockOnErrorGuard.dismiss();
+    }
+
     return result;
 }
 
@@ -465,6 +485,8 @@ void LockerImpl::restoreWriteUnitOfWork(OperationContext* opCtx,
 }
 
 void LockerImpl::lock(OperationContext* opCtx, ResourceId resId, LockMode mode, Date_t deadline) {
+    // `lockGlobal` must be called to lock `resourceIdGlobal`.
+    invariant(resId != resourceIdGlobal);
 
     const LockResult result = lockBegin(opCtx, resId, mode);
 
@@ -473,6 +495,15 @@ void LockerImpl::lock(OperationContext* opCtx, ResourceId resId, LockMode mode, 
         return;
 
     invariant(result == LOCK_WAITING);
+
+    // This failpoint is used to time out non-intent locks if they cannot be granted immediately.
+    // Testing-only.
+    if (MONGO_FAIL_POINT(failNonIntentLocksIfWaitNeeded)) {
+        uassert(ErrorCodes::LockTimeout,
+                str::stream() << "Cannot immediately acquire lock '" << resId.toString()
+                              << "'. Timing out due to failpoint.",
+                (mode == MODE_IS || mode == MODE_IX));
+    }
 
     lockComplete(opCtx, resId, mode, deadline);
 }
@@ -550,15 +581,14 @@ bool LockerImpl::isDbLockedForMode(StringData dbName, LockMode mode) const {
     return isLockHeldForMode(resIdDb, mode);
 }
 
-bool LockerImpl::isCollectionLockedForMode(StringData ns, LockMode mode) const {
-    invariant(nsIsFull(ns));
+bool LockerImpl::isCollectionLockedForMode(const NamespaceString& nss, LockMode mode) const {
+    invariant(nss.coll().size());
 
     if (isW())
         return true;
     if (isR() && isSharedLockMode(mode))
         return true;
 
-    const NamespaceString nss(ns);
     const ResourceId resIdDb(RESOURCE_DATABASE, nss.db());
 
     LockMode dbMode = getLockMode(resIdDb);
@@ -574,7 +604,7 @@ bool LockerImpl::isCollectionLockedForMode(StringData ns, LockMode mode) const {
             return isSharedLockMode(mode);
         case MODE_IX:
         case MODE_IS: {
-            const ResourceId resIdColl(RESOURCE_COLLECTION, ns);
+            const ResourceId resIdColl(RESOURCE_COLLECTION, nss.ns());
             return isLockHeldForMode(resIdColl, mode);
         } break;
         case LockModesCount:
@@ -707,6 +737,13 @@ void LockerImpl::restoreLockState(OperationContext* opCtx, const Locker::LockSna
     // We shouldn't be saving and restoring lock state from inside a WriteUnitOfWork.
     invariant(!inAWriteUnitOfWork());
     invariant(_modeForTicket == MODE_NONE);
+
+    if (opCtx && (state.globalMode == LockMode::MODE_IX)) {
+        auto ticketholder = FlowControlTicketholder::get(opCtx);
+        if (ticketholder) {
+            ticketholder->getTicket(opCtx);
+        }
+    }
 
     std::vector<OneLock>::const_iterator it = state.locks.begin();
     // If we locked the PBWM, it must be locked before the resourceIdGlobal and
@@ -879,13 +916,12 @@ void LockerImpl::lockComplete(OperationContext* opCtx,
     unlockOnErrorGuard.dismiss();
 }
 
-LockResult LockerImpl::lockRSTLBegin(OperationContext* opCtx) {
-    invariant(!opCtx->lockState()->isLocked());
-    return lockBegin(opCtx, resourceIdReplicationStateTransitionLock, MODE_X);
+LockResult LockerImpl::lockRSTLBegin(OperationContext* opCtx, LockMode mode) {
+    return lockBegin(opCtx, resourceIdReplicationStateTransitionLock, mode);
 }
 
-void LockerImpl::lockRSTLComplete(OperationContext* opCtx, Date_t deadline) {
-    lockComplete(opCtx, resourceIdReplicationStateTransitionLock, MODE_X, deadline);
+void LockerImpl::lockRSTLComplete(OperationContext* opCtx, LockMode mode, Date_t deadline) {
+    lockComplete(opCtx, resourceIdReplicationStateTransitionLock, mode, deadline);
 }
 
 void LockerImpl::releaseTicket() {
@@ -972,9 +1008,9 @@ void resetGlobalLockStats() {
 const ResourceId resourceIdLocalDB = ResourceId(RESOURCE_DATABASE, StringData("local"));
 const ResourceId resourceIdOplog = ResourceId(RESOURCE_COLLECTION, StringData("local.oplog.rs"));
 const ResourceId resourceIdAdminDB = ResourceId(RESOURCE_DATABASE, StringData("admin"));
+const ResourceId resourceIdGlobal = ResourceId(RESOURCE_GLOBAL, ResourceId::SINGLETON_GLOBAL);
 const ResourceId resourceIdParallelBatchWriterMode =
     ResourceId(RESOURCE_GLOBAL, ResourceId::SINGLETON_PARALLEL_BATCH_WRITER_MODE);
 const ResourceId resourceIdReplicationStateTransitionLock =
     ResourceId(RESOURCE_GLOBAL, ResourceId::SINGLETON_REPLICATION_STATE_TRANSITION_LOCK);
-
 }  // namespace mongo

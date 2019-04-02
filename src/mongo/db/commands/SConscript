@@ -9,9 +9,10 @@ env.Library(
     target="test_commands_enabled",
     source=[
         "test_commands_enabled.cpp",
+        env.Idlc('test_commands_enabled.idl')[0],
     ],
     LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/db/server_parameters',
+        '$BUILD_DIR/mongo/idl/server_parameter',
         "server_status_core",
     ]
 )
@@ -41,6 +42,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/server_options_core',
         '$BUILD_DIR/mongo/db/stats/counters',
         '$BUILD_DIR/mongo/util/processinfo',
+        '$BUILD_DIR/mongo/util/net/http_client',
         'server_status_core',
     ],
 )
@@ -240,6 +242,8 @@ env.Library(
         "find_cmd.cpp",
         "get_last_error.cpp",
         "getmore_cmd.cpp",
+        "http_client.cpp",
+        env.Idlc('http_client.idl')[0],
         "index_filter_commands.cpp",
         "kill_op.cpp",
         "killcursors_cmd.cpp",
@@ -274,13 +278,16 @@ env.Library(
         '$BUILD_DIR/mongo/db/stats/counters',
         '$BUILD_DIR/mongo/db/stats/server_read_concern_write_concern_metrics',
         '$BUILD_DIR/mongo/db/storage/storage_engine_common',
+        '$BUILD_DIR/mongo/db/transaction',
         '$BUILD_DIR/mongo/db/views/views_mongod',
+        '$BUILD_DIR/mongo/util/net/http_client',
         'core',
         'current_op_common',
         'fsync_locked',
         'kill_common',
         'list_collections_filter',
         'list_databases_command',
+        'test_commands_enabled',
         'write_commands_common',
     ],
 )
@@ -365,7 +372,6 @@ env.Library(
         '$BUILD_DIR/mongo/db/dbhelpers',
         '$BUILD_DIR/mongo/db/exec/stagedebug_cmd',
         '$BUILD_DIR/mongo/db/index_builds_coordinator_interface',
-        '$BUILD_DIR/mongo/db/index_d',
         '$BUILD_DIR/mongo/db/repl/dbcheck',
         '$BUILD_DIR/mongo/db/repl/oplog',
         '$BUILD_DIR/mongo/db/repl/repl_coordinator_interface',

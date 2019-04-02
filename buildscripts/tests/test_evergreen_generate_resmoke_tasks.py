@@ -357,6 +357,7 @@ class EvergreenConfigGeneratorTest(unittest.TestCase):
         self.assertEqual(len(config["tasks"]), len(suites) + 1)
         command1 = config["tasks"][0]["commands"][2]
         self.assertIn(options.resmoke_args, command1["vars"]["resmoke_args"])
+        self.assertIn(" --originSuite=suite", command1["vars"]["resmoke_args"])
         self.assertIn(options.run_multiple_jobs, command1["vars"]["run_multiple_jobs"])
         self.assertEqual("run generated tests", command1["func"])
 
@@ -549,6 +550,27 @@ class MainTest(unittest.TestCase):
             self.assertEqual(50, len(suite.tests))
 
         self.assertEqual(n_tests, len(main.test_list))
+
+    def test_calculate_suites_uses_fallback_if_only_results_are_filtered(self):
+        n_tests = 100
+        evg = Mock()
+        evg.test_stats.return_value = [{
+            "test_file": "test{}.js".format(i), "avg_duration_pass": 60, "num_pass": 1
+        } for i in range(100)]
+
+        main = grt.Main(evg)
+        main.options = Mock()
+        main.config_options = self.get_mock_options()
+        main.list_tests = Mock(return_value=["test{}.js".format(i) for i in range(n_tests)])
+        with patch("os.path.exists") as exists_mock:
+            exists_mock.return_value = False
+            suites = main.calculate_suites(_DATE, _DATE)
+
+            self.assertEqual(main.config_options.fallback_num_sub_suites, len(suites))
+            for suite in suites:
+                self.assertEqual(50, len(suite.tests))
+
+            self.assertEqual(n_tests, len(main.test_list))
 
     def test_calculate_suites_error(self):
         response = Mock()

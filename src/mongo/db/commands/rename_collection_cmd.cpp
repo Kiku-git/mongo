@@ -40,7 +40,6 @@
 #include "mongo/db/commands/rename_collection.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/index/index_descriptor.h"
-#include "mongo/db/index_builder.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer.h"
 #include "mongo/db/ops/insert.h"
@@ -79,14 +78,6 @@ public:
 
     std::string parseNs(const std::string& dbname, const BSONObj& cmdObj) const override {
         return CommandHelpers::parseNsFullyQualified(cmdObj);
-    }
-
-    static void dropCollection(OperationContext* opCtx, Database* db, StringData collName) {
-        WriteUnitOfWork wunit(opCtx);
-        if (db->dropCollection(opCtx, collName).isOK()) {
-            // ignoring failure case
-            wunit.commit();
-        }
     }
 
     virtual bool errmsgRun(OperationContext* opCtx,

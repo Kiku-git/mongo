@@ -225,6 +225,7 @@ fi
 %defattr(-,root,root,-)
 %config(noreplace) /etc/mongod.conf
 %{_bindir}/mongod
+%{_bindir}/mongocryptd
 %{_mandir}/man1/mongod.1*
 /lib/systemd/system/mongod.service
 %attr(0755,mongod,mongod) %dir /var/lib/mongo
@@ -256,9 +257,9 @@ fi
 %files tools
 %defattr(-,root,root,-)
 #%doc README
+%doc THIRD-PARTY-NOTICES.gotools
 
 %{_bindir}/bsondump
-%{_bindir}/mongocryptd
 %{_bindir}/install_compass
 %{_bindir}/mongodecrypt
 %{_bindir}/mongoldap

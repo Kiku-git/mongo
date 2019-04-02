@@ -78,6 +78,10 @@ public:
         return false;
     }
 
+    bool canIgnorePrepareConflicts() const override {
+        return true;
+    }
+
     bool supportsReadConcern(const std::string& dbName,
                              const BSONObj& cmdObj,
                              repl::ReadConcernLevel level) const override {
@@ -123,8 +127,10 @@ public:
         const auto nss = ctx->getNss();
 
         const ExtensionsCallbackReal extensionsCallback(opCtx, &nss);
-        auto parsedDistinct =
-            uassertStatusOK(ParsedDistinct::parse(opCtx, nss, cmdObj, extensionsCallback, true));
+        auto defaultCollator =
+            ctx->getCollection() ? ctx->getCollection()->getDefaultCollator() : nullptr;
+        auto parsedDistinct = uassertStatusOK(
+            ParsedDistinct::parse(opCtx, nss, cmdObj, extensionsCallback, true, defaultCollator));
 
         if (ctx->getView()) {
             // Relinquish locks. The aggregation command will re-acquire them.
@@ -175,8 +181,10 @@ public:
         const auto& nss = ctx->getNss();
 
         const ExtensionsCallbackReal extensionsCallback(opCtx, &nss);
-        auto parsedDistinct =
-            uassertStatusOK(ParsedDistinct::parse(opCtx, nss, cmdObj, extensionsCallback, false));
+        auto defaultCollation =
+            ctx->getCollection() ? ctx->getCollection()->getDefaultCollator() : nullptr;
+        auto parsedDistinct = uassertStatusOK(
+            ParsedDistinct::parse(opCtx, nss, cmdObj, extensionsCallback, false, defaultCollation));
 
         // Check whether we are allowed to read from this node after acquiring our locks.
         auto replCoord = repl::ReplicationCoordinator::get(opCtx);

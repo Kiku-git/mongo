@@ -38,7 +38,8 @@ namespace mongo {
  * relevant entries for authentication.
  */
 class AuthOpObserver final : public OpObserver {
-    MONGO_DISALLOW_COPYING(AuthOpObserver);
+    AuthOpObserver(const AuthOpObserver&) = delete;
+    AuthOpObserver& operator=(const AuthOpObserver&) = delete;
 
 public:
     AuthOpObserver();
@@ -166,7 +167,7 @@ public:
         const std::vector<repl::ReplOperation>& statements) noexcept final {}
 
     void onTransactionPrepare(OperationContext* opCtx,
-                              const OplogSlot& prepareOpTime,
+                              const std::vector<OplogSlot>& reservedSlots,
                               std::vector<repl::ReplOperation>& statements) final {}
 
     void onTransactionAbort(OperationContext* opCtx,

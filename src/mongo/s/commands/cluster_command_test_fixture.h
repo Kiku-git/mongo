@@ -97,6 +97,12 @@ protected:
     void testSnapshotReadConcernWithAfterClusterTime(BSONObj targetedCmd,
                                                      BSONObj scatterGatherCmd = BSONObj());
 
+    /**
+     * Appends the metadata shards return on responses to transaction statements, such as the
+     * readOnly field.
+     */
+    void appendTxnResponseMetadata(BSONObjBuilder& bob);
+
 private:
     /**
      * Makes a new command object from the one given by apppending read concern
@@ -104,6 +110,11 @@ private:
      * is true, also appends afterClusterTime to the read concern.
      */
     BSONObj _makeCmd(BSONObj cmdObj, bool includeAfterClusterTime = false);
+
+    // Enables the transaction router to retry within a transaction on stale version and snapshot
+    // errors for the duration of each test.
+    // TODO SERVER-39704: Remove this failpoint block.
+    std::unique_ptr<FailPointEnableBlock> _staleVersionAndSnapshotRetriesBlock;
 };
 
 }  // namespace mongo

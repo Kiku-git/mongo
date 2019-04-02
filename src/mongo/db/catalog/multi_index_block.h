@@ -35,7 +35,6 @@
 #include <string>
 #include <vector>
 
-#include "mongo/base/disallow_copying.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -47,10 +46,15 @@
 #include "mongo/db/record_id.h"
 #include "mongo/stdx/functional.h"
 #include "mongo/stdx/mutex.h"
+#include "mongo/util/fail_point_service.h"
 
 namespace mongo {
+
+MONGO_FAIL_POINT_DECLARE(leaveIndexBuildUnfinishedForShutdown);
+
 class Collection;
 class MatchExpression;
+class NamespaceString;
 class OperationContext;
 
 /**
@@ -65,7 +69,8 @@ class OperationContext;
  * (as it is itself essentially a form of rollback, you don't want to "rollback the rollback").
  */
 class MultiIndexBlock {
-    MONGO_DISALLOW_COPYING(MultiIndexBlock);
+    MultiIndexBlock(const MultiIndexBlock&) = delete;
+    MultiIndexBlock& operator=(const MultiIndexBlock&) = delete;
 
 public:
     MultiIndexBlock() = default;
@@ -320,7 +325,9 @@ private:
     /**
      * Updates CurOp's 'opDescription' field with the current state of this index build.
      */
-    void _updateCurOpOpDescription(OperationContext* opCtx, bool isBuildingPhaseComplete) const;
+    void _updateCurOpOpDescription(OperationContext* opCtx,
+                                   const NamespaceString& nss,
+                                   const std::vector<BSONObj>& indexSpecs) const;
 
     // Is set during init() and ensures subsequent function calls act on the same Collection.
     boost::optional<UUID> _collectionUUID;

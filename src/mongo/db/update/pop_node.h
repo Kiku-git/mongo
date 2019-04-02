@@ -29,6 +29,7 @@
 
 #pragma once
 
+#include "mongo/base/string_data.h"
 #include "mongo/db/update/modifier_node.h"
 #include "mongo/stdx/memory.h"
 
@@ -61,7 +62,19 @@ public:
         return _popFromFront;
     }
 
+    void acceptVisitor(UpdateNodeVisitor* visitor) final {
+        visitor->visit(this);
+    }
+
 private:
+    StringData operatorName() const final {
+        return "$pop";
+    }
+
+    BSONObj operatorValue() const final {
+        return _popFromFront ? BSON("" << -1) : BSON("" << 1);
+    }
+
     bool _popFromFront = true;
 };
 

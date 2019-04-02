@@ -35,7 +35,6 @@
 #include "mongo/base/static_assert.h"
 #include "mongo/config.h"
 #include "mongo/db/commands/server_status.h"
-#include "mongo/db/server_parameters.h"
 #include "mongo/util/log.h"
 #include "mongo/util/stacktrace.h"
 #include "mongo/util/tcmalloc_parameters_gen.h"
@@ -152,7 +151,8 @@ using Hash = uint32_t;
 
 template <class Key, class Value>
 class HashTable {
-    MONGO_DISALLOW_COPYING(HashTable);
+    HashTable(const HashTable&) = delete;
+    HashTable& operator=(const HashTable&) = delete;
 
 private:
     struct Entry {

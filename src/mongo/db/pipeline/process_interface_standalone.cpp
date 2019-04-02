@@ -55,6 +55,7 @@
 #include "mongo/db/stats/fill_locker_info.h"
 #include "mongo/db/stats/storage_stats.h"
 #include "mongo/db/storage/backup_cursor_hooks.h"
+#include "mongo/db/transaction_history_iterator.h"
 #include "mongo/db/transaction_participant.h"
 #include "mongo/s/cluster_commands_helpers.h"
 #include "mongo/s/query/document_source_merge_cursors.h"
@@ -144,6 +145,29 @@ void MongoInterfaceStandalone::setOperationContext(OperationContext* opCtx) {
 
 DBClientBase* MongoInterfaceStandalone::directClient() {
     return &_client;
+}
+
+repl::OplogEntry MongoInterfaceStandalone::lookUpOplogEntryByOpTime(OperationContext* opCtx,
+                                                                    repl::OpTime lookupTime) {
+    invariant(!lookupTime.isNull());
+
+    TransactionHistoryIterator iterator(lookupTime);
+    try {
+        auto result = iterator.next(opCtx);
+
+        // This function is intended to link a "commit" command to its corresponding "applyOps"
+        // command, which represents a prepared transaction. There should be no additional entries
+        // in the transaction's chain of operations. Note that when the oplog changes gated by
+        // 'useMultipleOplogEntryFormatForTransactions' become permanent, these assumptions about
+        // iterating transactions will no longer hold.
+        invariant(!iterator.hasNext());
+        return result;
+    } catch (ExceptionFor<ErrorCodes::IncompleteTransactionHistory>& ex) {
+        ex.addContext(
+            "Oplog no longer has history necessary for $changeStream to observe operations from a "
+            "committed transaction.");
+        uasserted(ErrorCodes::ChangeStreamHistoryLost, ex.reason());
+    }
 }
 
 bool MongoInterfaceStandalone::isSharded(OperationContext* opCtx, const NamespaceString& nss) {
@@ -431,15 +455,18 @@ boost::optional<Document> MongoInterfaceStandalone::lookupSingleDocument(
                                 << "]");
     }
 
-    // Set the speculative read optime appropriately after we do a document lookup locally. We don't
-    // know exactly what optime the document reflects, we so set the speculative read optime to the
-    // most recent applied optime.
+    // Set the speculative read timestamp appropriately after we do a document lookup locally. We
+    // set the speculative read timestamp based on the timestamp used by the transaction.
     repl::SpeculativeMajorityReadInfo& speculativeMajorityReadInfo =
         repl::SpeculativeMajorityReadInfo::get(expCtx->opCtx);
     if (speculativeMajorityReadInfo.isSpeculativeRead()) {
-        auto replCoord = repl::ReplicationCoordinator::get(expCtx->opCtx);
-        speculativeMajorityReadInfo.setSpeculativeReadOpTimeForward(
-            replCoord->getMyLastAppliedOpTime());
+        // Speculative majority reads are required to use the 'kNoOverlap' read source.
+        invariant(expCtx->opCtx->recoveryUnit()->getTimestampReadSource() ==
+                  RecoveryUnit::ReadSource::kNoOverlap);
+        boost::optional<Timestamp> readTs =
+            expCtx->opCtx->recoveryUnit()->getPointInTimeReadTimestamp();
+        invariant(readTs);
+        speculativeMajorityReadInfo.setSpeculativeReadTimestampForward(*readTs);
     }
 
     return lookedUpDocument;

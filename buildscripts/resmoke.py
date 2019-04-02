@@ -144,7 +144,14 @@ class Resmoke(object):  # pylint: disable=too-many-instance-attributes
 
     def run_tests(self):
         """Run the suite and tests specified."""
-        self._resmoke_logger.info("resmoke.py invocation: %s", " ".join(sys.argv))
+        self._resmoke_logger.info("verbatim resmoke.py invocation: %s", " ".join(sys.argv))
+
+        if config.EVERGREEN_TASK_ID:
+            local_args = parser.to_local_args()
+            self._resmoke_logger.info("resmoke.py invocation for local usage: %s %s",
+                                      os.path.join("buildscripts", "resmoke.py"),
+                                      " ".join(local_args))
+
         suites = None
         try:
             suites = self._get_suites()
@@ -318,7 +325,9 @@ class Resmoke(object):  # pylint: disable=too-many-instance-attributes
         jasper_process.Process.jasper_pb2_grpc = jasper_pb2_grpc
 
         curator_path = "build/curator"
-        git_hash = "1b8c7344aa1daed0846e32204dffb21cfdda208c"
+        if sys.platform == "win32":
+            curator_path += ".exe"
+        git_hash = "d846f0c875716e9377044ab2a50542724369662a"
         curator_exists = os.path.isfile(curator_path)
         curator_same_version = False
         if curator_exists:

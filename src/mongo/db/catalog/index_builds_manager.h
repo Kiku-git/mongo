@@ -33,7 +33,6 @@
 #include <string>
 #include <vector>
 
-#include "mongo/base/disallow_copying.h"
 #include "mongo/db/catalog/multi_index_block.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/stdx/functional.h"
@@ -53,9 +52,24 @@ enum IndexBuildRecoveryState { Building, Verifying, Committing };
  * state is set up and then cleaned up by this class.
  */
 class IndexBuildsManager {
-    MONGO_DISALLOW_COPYING(IndexBuildsManager);
+    IndexBuildsManager(const IndexBuildsManager&) = delete;
+    IndexBuildsManager& operator=(const IndexBuildsManager&) = delete;
 
 public:
+    /**
+     * Indicates whether or not to ignore indexing constraints.
+     */
+    enum class IndexConstraints { kEnforce, kRelax };
+
+    /**
+     * Additional options for setUpIndexBuild. The default values are sufficient in most cases.
+     */
+    struct SetupOptions {
+        SetupOptions();
+        IndexConstraints indexConstraints = IndexConstraints::kEnforce;
+        bool forRecovery = false;
+    };
+
     IndexBuildsManager() = default;
     ~IndexBuildsManager();
 
@@ -68,7 +82,7 @@ public:
                            const std::vector<BSONObj>& specs,
                            const UUID& buildUUID,
                            OnInitFn onInit,
-                           bool forRecovery);
+                           SetupOptions options = {});
 
     /**
      * Recovers the index build from its persisted state and sets it up to run again.
@@ -104,7 +118,9 @@ public:
      * Document inserts observed during the scanning/insertion phase of an index build are not
      * added but are instead stored in a temporary buffer until this function is invoked.
      */
-    Status drainBackgroundWrites(OperationContext* opCtx, const UUID& buildUUID);
+    Status drainBackgroundWrites(OperationContext* opCtx,
+                                 const UUID& buildUUID,
+                                 RecoveryUnit::ReadSource readSource);
 
     /**
      * Persists information in the index catalog entry to reflect the successful completion of the
@@ -151,10 +167,10 @@ public:
      *
      * Returns true if a build existed to be signaled, as opposed to having already finished and
      * been cleared away, or not having yet started..
-     *
-     * TODO: Not yet implemented.
      */
-    bool interruptIndexBuild(const UUID& buildUUID, const std::string& reason);
+    bool interruptIndexBuild(OperationContext* opCtx,
+                             const UUID& buildUUID,
+                             const std::string& reason);
 
     /**
      * Cleans up the index build state and unregisters it from the manager.

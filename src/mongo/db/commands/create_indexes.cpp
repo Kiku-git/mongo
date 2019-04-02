@@ -70,7 +70,7 @@ namespace {
 constexpr auto kIndexesFieldName = "indexes"_sd;
 constexpr auto kCommandName = "createIndexes"_sd;
 constexpr auto kCommitQuorumFieldName = "commitQuorum"_sd;
-constexpr auto kignoreUnknownIndexSpecFieldsName = "ignoreUnknownIndexSpecFields"_sd;
+constexpr auto kIgnoreUnknownIndexOptionsName = "ignoreUnknownIndexOptions"_sd;
 constexpr auto kTwoPhaseCommandName = "twoPhaseCreateIndexes"_sd;
 constexpr auto kCreateCollectionAutomaticallyFieldName = "createdCollectionAutomatically"_sd;
 constexpr auto kNumIndexesBeforeFieldName = "numIndexesBefore"_sd;
@@ -89,17 +89,16 @@ StatusWith<std::vector<BSONObj>> parseAndValidateIndexSpecs(
     const ServerGlobalParams::FeatureCompatibility& featureCompatibility) {
     bool hasIndexesField = false;
 
-    bool ignoreUnknownIndexSpecFields = false;
-    if (cmdObj.hasField(kignoreUnknownIndexSpecFieldsName)) {
-        auto ignoreUnknownIndexSpecFieldsElement =
-            cmdObj.getField(kignoreUnknownIndexSpecFieldsName);
-        if (ignoreUnknownIndexSpecFieldsElement.type() != BSONType::Bool) {
+    bool ignoreUnknownIndexOptions = false;
+    if (cmdObj.hasField(kIgnoreUnknownIndexOptionsName)) {
+        auto ignoreUnknownIndexOptionsElement = cmdObj.getField(kIgnoreUnknownIndexOptionsName);
+        if (ignoreUnknownIndexOptionsElement.type() != BSONType::Bool) {
             return {ErrorCodes::TypeMismatch,
-                    str::stream() << "The field '" << kignoreUnknownIndexSpecFieldsName
+                    str::stream() << "The field '" << kIgnoreUnknownIndexOptionsName
                                   << "' must be a boolean, but got "
-                                  << typeName(ignoreUnknownIndexSpecFieldsElement.type())};
+                                  << typeName(ignoreUnknownIndexOptionsElement.type())};
         }
-        ignoreUnknownIndexSpecFields = ignoreUnknownIndexSpecFieldsElement.boolean();
+        ignoreUnknownIndexOptions = ignoreUnknownIndexOptionsElement.boolean();
     }
 
     std::vector<BSONObj> indexSpecs;
@@ -123,7 +122,7 @@ StatusWith<std::vector<BSONObj>> parseAndValidateIndexSpecs(
                 }
 
                 BSONObj parsedIndexSpec = indexesElem.Obj();
-                if (ignoreUnknownIndexSpecFields) {
+                if (ignoreUnknownIndexOptions) {
                     parsedIndexSpec = index_key_validate::removeUnknownFields(parsedIndexSpec);
                 }
 
@@ -158,7 +157,7 @@ StatusWith<std::vector<BSONObj>> parseAndValidateIndexSpecs(
             hasIndexesField = true;
         } else if (kCommandName == cmdElemFieldName || kCommitQuorumFieldName == cmdElemFieldName ||
                    kTwoPhaseCommandName == cmdElemFieldName ||
-                   kignoreUnknownIndexSpecFieldsName == cmdElemFieldName ||
+                   kIgnoreUnknownIndexOptionsName == cmdElemFieldName ||
                    isGenericArgument(cmdElemFieldName)) {
             continue;
         } else {
@@ -220,7 +219,7 @@ std::vector<BSONObj> resolveDefaultsAndRemoveExistingIndexes(OperationContext* o
 void checkUniqueIndexConstraints(OperationContext* opCtx,
                                  const NamespaceString& nss,
                                  const BSONObj& newIdxKey) {
-    invariant(opCtx->lockState()->isCollectionLockedForMode(nss.ns(), MODE_X));
+    invariant(opCtx->lockState()->isCollectionLockedForMode(nss, MODE_X));
 
     const auto metadata = CollectionShardingState::get(opCtx, nss)->getCurrentMetadata();
     if (!metadata->isSharded())
@@ -305,7 +304,7 @@ bool runCreateIndexes(OperationContext* opCtx,
     if (collection) {
         result.appendBool("createdCollectionAutomatically", false);
     } else {
-        if (db->getViewCatalog()->lookup(opCtx, ns.ns())) {
+        if (ViewCatalog::get(db)->lookup(opCtx, ns.ns())) {
             errmsg = "Cannot create indexes on a view";
             uasserted(ErrorCodes::CommandNotSupportedOnView, errmsg);
         }
@@ -355,6 +354,15 @@ bool runCreateIndexes(OperationContext* opCtx,
 
     // The 'indexer' can throw, so ensure the build cleanup occurs.
     ON_BLOCK_EXIT([&] {
+        if (MONGO_FAIL_POINT(leaveIndexBuildUnfinishedForShutdown)) {
+            // Set a flag to leave the persisted index build state intact when cleanUpAfterBuild()
+            // is called below. The index build will be found on server startup.
+            //
+            // Note: this failpoint has two parts, the first to make the index build error and the
+            // second to catch it here: the index build must error before commit(), otherwise
+            // commit() clears the state.
+            indexer.abortWithoutCleanup(opCtx);
+        }
         invariant(opCtx->lockState()->isDbLockedForMode(dbname, MODE_X));
         indexer.cleanUpAfterBuild(opCtx, collection);
     });
@@ -553,7 +561,7 @@ bool runCreateIndexesWithCoordinator(OperationContext* opCtx,
             // We would not reach this point if we were able to check existing indexes on the
             // collection.
             invariant(!collection);
-            if (db->getViewCatalog()->lookup(opCtx, ns.ns())) {
+            if (ViewCatalog::get(db)->lookup(opCtx, ns.ns())) {
                 errmsg = str::stream() << "Cannot create indexes on a view: " << ns.ns();
                 uasserted(ErrorCodes::CommandNotSupportedOnView, errmsg);
             }
@@ -653,6 +661,8 @@ bool runCreateIndexesWithCoordinator(OperationContext* opCtx,
     } else if (stats.numIndexesAfter < stats.numIndexesBefore + int(specs.size())) {
         result.append(kNoteFieldName, "index already exists");
     }
+
+    commitQuorum->append("commitQuorum", &result);
 
     return true;
 }

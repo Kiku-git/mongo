@@ -29,7 +29,6 @@
 
 #pragma once
 
-#include "mongo/base/disallow_copying.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/s/scoped_collection_metadata.h"
@@ -53,7 +52,8 @@ namespace mongo {
  * lock on the respective collection.
  */
 class CollectionShardingState {
-    MONGO_DISALLOW_COPYING(CollectionShardingState);
+    CollectionShardingState(const CollectionShardingState&) = delete;
+    CollectionShardingState& operator=(const CollectionShardingState&) = delete;
 
 public:
     using CSRLock = ShardingStateLock<CollectionShardingState>;
@@ -75,16 +75,26 @@ public:
     static void report(OperationContext* opCtx, BSONObjBuilder* builder);
 
     /**
-     * Returns the chunk filtering metadata that the current operation should be using for that
-     * collection or otherwise throws if it has not been loaded yet. If the operation does not
-     * require a specific shard version, returns an UNSHARDED metadata. The returned object is safe
-     * to access outside of collection lock.
+     * Returns the orphan chunk filtering metadata that the current operation should be using for
+     * the collection.
      *
-     * If the operation context contains an 'atClusterTime' property, the returned filtering
-     * metadata will be tied to a specific point in time. Otherwise it will reference the latest
-     * time available.
+     * If the operation context contains an 'atClusterTime', the returned filtering metadata will be
+     * tied to a specific point in time. Otherwise, it will reference the latest time available. If
+     * the operation is not associated with a shard version (refer to
+     * OperationShardingState::isOperationVersioned for more info on that), returns an UNSHARDED
+     * metadata object.
+     *
+     * The intended users of this method are callers which need to perform orphan filtering. Use
+     * 'getCurrentMetadata' for all other cases, where just sharding-related properties of the
+     * collection are necessary (e.g., isSharded or the shard key).
+     *
+     * The returned object is safe to access even after the collection lock has been dropped.
      */
-    ScopedCollectionMetadata getMetadataForOperation(OperationContext* opCtx);
+    ScopedCollectionMetadata getOrphansFilter(OperationContext* opCtx);
+
+    /**
+     * See the comments for 'getOrphansFilter' above for more information on this method.
+     */
     ScopedCollectionMetadata getCurrentMetadata();
 
     /**
@@ -162,7 +172,8 @@ private:
  * which is running.
  */
 class CollectionShardingStateFactory {
-    MONGO_DISALLOW_COPYING(CollectionShardingStateFactory);
+    CollectionShardingStateFactory(const CollectionShardingStateFactory&) = delete;
+    CollectionShardingStateFactory& operator=(const CollectionShardingStateFactory&) = delete;
 
 public:
     static void set(ServiceContext* service,

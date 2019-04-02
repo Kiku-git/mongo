@@ -33,7 +33,6 @@
 #include <stdlib.h>
 #include <string>
 
-#include "mongo/base/disallow_copying.h"
 #include "mongo/base/status.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/repl/read_concern_level.h"
@@ -50,7 +49,8 @@ class OperationContext;
  * and an operator to add the statistics values.
  */
 class StorageStats {
-    MONGO_DISALLOW_COPYING(StorageStats);
+    StorageStats(const StorageStats&) = delete;
+    StorageStats& operator=(const StorageStats&) = delete;
 
 public:
     StorageStats() = default;
@@ -80,7 +80,8 @@ public:
  * All on-disk information must be mutated through this interface.
  */
 class RecoveryUnit {
-    MONGO_DISALLOW_COPYING(RecoveryUnit);
+    RecoveryUnit(const RecoveryUnit&) = delete;
+    RecoveryUnit& operator=(const RecoveryUnit&) = delete;
 
 public:
     virtual ~RecoveryUnit() {}
@@ -124,12 +125,32 @@ public:
                   "This storage engine does not support prepared transactions");
     }
 
-
     /**
      * Sets whether or not to ignore prepared transactions if supported by this storage engine. When
-     * 'ignore' is true, allows reading data in prepared, but uncommitted transactions.
+     * 'ignore' is true, allows reading data from before prepared transactions, but will not show
+     * prepared data. This may not be called while a transaction is already open.
      */
     virtual void setIgnorePrepared(bool ignore) {}
+
+    /**
+     * Returns whether or not we are ignoring prepared conflicts. Defaults to false if prepared
+     * transactions are not supported by this storage engine.
+     */
+    virtual bool getIgnorePrepared() const {
+        return false;
+    }
+
+    /**
+     * Dictates whether to round up prepare and commit timestamp of a prepared transaction. If set
+     * to true, the prepare timestamp will be rounded up to the oldest timestamp if found to be
+     * earlier; and the commit timestamp will be rounded up to the prepare timestamp if found to
+     * be earlier.
+     *
+     * This must be called before a transaction begins, and defaults to false. On transaction close,
+     * we reset the value to its default.
+     *
+     */
+    virtual void setRoundUpPreparedTimestamps(bool value) {}
 
     /**
      * Waits until all commits that happened before this call are durable in the journal. Returns
@@ -142,13 +163,13 @@ public:
     /**
      * Unlike `waitUntilDurable`, this method takes a stable checkpoint, making durable any writes
      * on unjournaled tables that are behind the current stable timestamp. If the storage engine
-     * is starting from an "unstable" checkpoint, this method call will turn into an unstable
-     * checkpoint.
+     * is starting from an "unstable" checkpoint or 'stableCheckpoint'=false, this method call will
+     * turn into an unstable checkpoint.
      *
      * This must not be called by a system taking user writes until after a stable timestamp is
      * passed to the storage engine.
      */
-    virtual bool waitUntilUnjournaledWritesDurable() {
+    virtual bool waitUntilUnjournaledWritesDurable(bool stableCheckpoint = true) {
         return waitUntilDurable();
     }
 

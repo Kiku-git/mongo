@@ -49,13 +49,11 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/repl_set_config.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/server_parameters.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/logger/redaction.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
-#include "mongo/util/fail_point_service.h"
 #include "mongo/util/log.h"
 #include "mongo/util/progress_meter.h"
 #include "mongo/util/quick_exit.h"
@@ -66,18 +64,16 @@ namespace mongo {
 
 namespace {
 
-const StringData kBuildUUIDFieldName = "buildUUID"_sd;
-const StringData kBuildingPhaseCompleteFieldName = "buildingPhaseComplete"_sd;
-const StringData kRunTwoPhaseIndexBuildFieldName = "runTwoPhaseIndexBuild"_sd;
-const StringData kCommitReadyMembersFieldName = "commitReadyMembers"_sd;
+const StringData kCreateIndexesFieldName = "createIndexes"_sd;
+const StringData kIndexesFieldName = "indexes"_sd;
 
 }  // namespace
 
-MONGO_FAIL_POINT_DEFINE(crashAfterStartingIndexBuild);
 MONGO_FAIL_POINT_DEFINE(hangAfterStartingIndexBuild);
 MONGO_FAIL_POINT_DEFINE(hangAfterStartingIndexBuildUnlocked);
 MONGO_FAIL_POINT_DEFINE(hangBeforeIndexBuildOf);
 MONGO_FAIL_POINT_DEFINE(hangAfterIndexBuildOf);
+MONGO_FAIL_POINT_DEFINE(leaveIndexBuildUnfinishedForShutdown);
 
 MultiIndexBlock::~MultiIndexBlock() {
     invariant(_buildIsCleanedUp);
@@ -229,7 +225,7 @@ StatusWith<std::vector<BSONObj>> MultiIndexBlock::init(OperationContext* opCtx,
 
     _buildIsCleanedUp = false;
 
-    _updateCurOpOpDescription(opCtx, false);
+    _updateCurOpOpDescription(opCtx, collection->ns(), indexSpecs);
 
     WriteUnitOfWork wunit(opCtx);
 
@@ -351,16 +347,6 @@ StatusWith<std::vector<BSONObj>> MultiIndexBlock::init(OperationContext* opCtx,
     }
 
     wunit.commit();
-
-    if (MONGO_FAIL_POINT(crashAfterStartingIndexBuild)) {
-        log() << "Index build interrupted due to 'crashAfterStartingIndexBuild' failpoint. Will "
-                 "exit after waiting for changes to become durable (while holding onto locks).";
-        // We are holding onto locks when calling waitUntilDurable, which is unsafe, but acceptable
-        // for this failpoint until further work can be done. See SERVER-39591.
-        if (opCtx->recoveryUnit()->waitUntilDurable()) {
-            quickExit(EXIT_TEST);
-        }
-    }
 
     _setState(State::kRunning);
 
@@ -504,6 +490,14 @@ Status MultiIndexBlock::insertAllDocumentsInCollection(OperationContext* opCtx,
         return exec->getMemberObjectStatus(objToIndex.value());
     }
 
+    if (MONGO_FAIL_POINT(leaveIndexBuildUnfinishedForShutdown)) {
+        log() << "Index build interrupted due to 'leaveIndexBuildUnfinishedForShutdown' failpoint. "
+                 "Mimicing shutdown error code.";
+        return Status(
+            ErrorCodes::InterruptedAtShutdown,
+            "background index build interrupted due to failpoint. returning a shutdown error.");
+    }
+
     if (MONGO_FAIL_POINT(hangAfterStartingIndexBuildUnlocked)) {
         // Unlock before hanging so replication recognizes we've completed.
         Locker::LockSnapshot lockInfo;
@@ -614,7 +608,7 @@ Status MultiIndexBlock::dumpInsertsFromBulk(OperationContext* opCtx,
         }
     }
 
-    _updateCurOpOpDescription(opCtx, true);
+    _updateCurOpOpDescription(opCtx, {}, {});
     return Status::OK();
 }
 
@@ -800,37 +794,30 @@ void MultiIndexBlock::_setStateToAbortedIfNotCommitted(StringData reason) {
 }
 
 void MultiIndexBlock::_updateCurOpOpDescription(OperationContext* opCtx,
-                                                bool isBuildingPhaseComplete) const {
+                                                const NamespaceString& nss,
+                                                const std::vector<BSONObj>& indexSpecs) const {
     BSONObjBuilder builder;
 
-    // TODO(SERVER-37980): Replace with index build UUID.
-    auto buildUUID = UUID::gen();
-    buildUUID.appendToBuilder(&builder, kBuildUUIDFieldName);
+    // If the collection namespace is provided, add a 'createIndexes' field with the collection name
+    // to allow tests to identify this op as an index build.
+    if (!nss.isEmpty()) {
+        builder.append(kCreateIndexesFieldName, nss.coll());
+    }
 
-    builder.append(kBuildingPhaseCompleteFieldName, isBuildingPhaseComplete);
-
-    builder.appendBool(kRunTwoPhaseIndexBuildFieldName, false);
-
-    auto replCoord = repl::ReplicationCoordinator::get(opCtx);
-    if (replCoord->isReplEnabled()) {
-        // TODO(SERVER-37939): Update the membersBuilder array to state the actual commit ready
-        // members.
-        BSONArrayBuilder membersBuilder;
-        auto config = replCoord->getConfig();
-        for (auto it = config.membersBegin(); it != config.membersEnd(); ++it) {
-            const auto& memberConfig = *it;
-            if (memberConfig.isArbiter()) {
-                continue;
-            }
-            membersBuilder.append(memberConfig.getHostAndPort().toString());
+    // If index specs are provided, add them under the 'indexes' field.
+    if (!indexSpecs.empty()) {
+        BSONArrayBuilder indexesBuilder;
+        for (const auto& spec : indexSpecs) {
+            indexesBuilder.append(spec);
         }
-        builder.append(kCommitReadyMembersFieldName, membersBuilder.arr());
+        builder.append(kIndexesFieldName, indexesBuilder.arr());
     }
 
     stdx::unique_lock<Client> lk(*opCtx->getClient());
     auto curOp = CurOp::get(opCtx);
     builder.appendElementsUnique(curOp->opDescription());
     auto opDescObj = builder.obj();
+    curOp->setLogicalOp_inlock(LogicalOp::opCommand);
     curOp->setOpDescription_inlock(opDescObj);
     curOp->ensureStarted();
 }

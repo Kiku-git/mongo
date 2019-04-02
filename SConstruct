@@ -400,6 +400,11 @@ add_option('use-system-mongo-c',
     type='choice',
 )
 
+add_option('use-system-kms-message',
+    help='use system version of kms-message library',
+    nargs=0,
+)
+
 add_option('use-system-all',
     help='use all system libraries',
     nargs=0,
@@ -1872,8 +1877,8 @@ if env.TargetOSIs('posix'):
             pass
 
     if env.TargetOSIs('linux') and has_option( "gcov" ):
-        env.Append( CCFLAGS=["-fprofile-arcs", "-ftest-coverage"] )
-        env.Append( LINKFLAGS=["-fprofile-arcs", "-ftest-coverage"] )
+        env.Append( CCFLAGS=["-fprofile-arcs", "-ftest-coverage", "-fprofile-update=single"] )
+        env.Append( LINKFLAGS=["-fprofile-arcs", "-ftest-coverage", "-fprofile-update=single"] )
 
     if optBuild and not optBuildForSize:
         env.Append( CCFLAGS=["-O2"] )
@@ -3871,7 +3876,7 @@ env.Alias('all', allTargets)
 if should_dagger:
     dependencyDb = env.Alias("dagger", env.Dagger('library_dependency_graph.json'))
     # Require everything to be built before trying to extract build dependency information
-    env.Requires(dependencyDb, all)
+    env.Requires(dependencyDb, allTargets)
 
 # We don't want installing files to cause them to flow into the cache,
 # since presumably we can re-install them from the origin if needed.
